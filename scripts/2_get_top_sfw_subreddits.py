@@ -19,6 +19,7 @@ from typing import Dict, List, Any, Optional
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, create_directories
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import read_json_file, write_json_file
 from utils.reddit import clean_rule_text
 
@@ -29,13 +30,14 @@ try:
     REDDIT_API_AVAILABLE = True
 except ImportError:
     REDDIT_API_AVAILABLE = False
-    print("⚠️  Warning: praw or tqdm not available. Install with: pip install praw tqdm")
+    # Will log warning from main function when logger is available
 
 
 
-def initialize_reddit_client() -> Optional[object]:
+def initialize_reddit_client(logger) -> Optional[object]:
     """Initialize Reddit API client."""
     if not REDDIT_API_AVAILABLE:
+        logger.warning("⚠️  Warning: praw or tqdm not available. Install with: pip install praw tqdm")
         return None
 
     try:
@@ -51,26 +53,26 @@ def initialize_reddit_client() -> Optional[object]:
         return reddit
 
     except Exception as e:
-        print(f"⚠️  Reddit API initialization failed: {e}")
-        print("💡 Set environment variables: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET")
+        logger.error(f"⚠️  Reddit API initialization failed: {e}")
+        logger.error("💡 Set environment variables: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET")
         return None
 
 
-def check_nsfw_status(reddit: object, subreddit_name: str) -> bool:
+def check_nsfw_status(reddit: object, subreddit_name: str, logger) -> bool:
     """Check if a subreddit is NSFW using Reddit API."""
     if not reddit:
-        print(f"⚠️  No Reddit API - skipping r/{subreddit_name} (cannot verify SFW status)")
+        logger.warning(f"⚠️  No Reddit API - skipping r/{subreddit_name} (cannot verify SFW status)")
         return True  # Skip if we can't check (safer)
 
     try:
         subreddit = reddit.subreddit(subreddit_name)
         return subreddit.over18
     except Exception as e:
-        print(f"⚠️  Error checking r/{subreddit_name}: {e}")
+        logger.warning(f"⚠️  Error checking r/{subreddit_name}: {e}")
         return True  # Assume NSFW if we can't check (safer)
 
 
-def extract_subreddit_data(reddit: object, subreddit_name: str, original_rank: int, mod_comment_count: int) -> Optional[Dict[str, Any]]:
+def extract_subreddit_data(reddit: object, subreddit_name: str, original_rank: int, mod_comment_count: int, logger) -> Optional[Dict[str, Any]]:
     """Extract full subreddit data from Reddit API."""
     if not reddit:
         return None  # No fallback - API is required for accurate data
@@ -96,11 +98,11 @@ def extract_subreddit_data(reddit: object, subreddit_name: str, original_rank: i
         return subreddit_data
 
     except Exception as e:
-        print(f"⚠️  Error getting data for r/{subreddit_name}: {e}")
+        logger.warning(f"⚠️  Error getting data for r/{subreddit_name}: {e}")
         return None
 
 
-def extract_community_rules(reddit: object, subreddit_name: str) -> List[Dict[str, Any]]:
+def extract_community_rules(reddit: object, subreddit_name: str, logger) -> List[Dict[str, Any]]:
     """Extract community rules for a subreddit."""
     if not reddit:
         return []
@@ -129,13 +131,13 @@ def extract_community_rules(reddit: object, subreddit_name: str) -> List[Dict[st
         return rules_data
 
     except Exception as e:
-        print(f"⚠️  Error getting rules for r/{subreddit_name}: {e}")
+        logger.warning(f"⚠️  Error getting rules for r/{subreddit_name}: {e}")
         return []
 
 
-def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object) -> List[Dict[str, Any]]:
+def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger) -> List[Dict[str, Any]]:
     """Collect top N SFW subreddits with full metadata and rules."""
-    print(f"🚀 Collecting top {TOP_N_SUBREDDITS_WITH_MOD_COMMENTS} SFW subreddits...")
+    logger.info(f"🚀 Collecting top {TOP_N_SUBREDDITS_WITH_MOD_COMMENTS} SFW subreddits...")
 
     sfw_subreddits = []
     checked_count = 0
@@ -159,20 +161,20 @@ def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object) -> Lis
             checked_count += 1
 
             # Check if NSFW
-            is_nsfw = check_nsfw_status(reddit, subreddit_name)
+            is_nsfw = check_nsfw_status(reddit, subreddit_name, logger)
 
             if is_nsfw:
                 nsfw_skipped += 1
-                print(f"🔒 Skipping r/{subreddit_name} (NSFW) - rank {original_rank}")
+                logger.info(f"🔒 Skipping r/{subreddit_name} (NSFW) - rank {original_rank}")
                 continue
 
             # Get subreddit data
-            subreddit_data = extract_subreddit_data(reddit, subreddit_name, original_rank, mod_comment_count)
+            subreddit_data = extract_subreddit_data(reddit, subreddit_name, original_rank, mod_comment_count, logger)
             if not subreddit_data:
                 continue
 
             # Get community rules
-            rules_data = extract_community_rules(reddit, subreddit_name)
+            rules_data = extract_community_rules(reddit, subreddit_name, logger)
 
             # Add SFW rank
             subreddit_data['sfw_rank'] = len(sfw_subreddits) + 1
@@ -185,7 +187,7 @@ def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object) -> Lis
 
             sfw_subreddits.append(sfw_entry)
 
-            print(f"✅ r/{subreddit_name} - SFW rank {len(sfw_subreddits)} (mod rank {original_rank}) - {len(rules_data)} rules")
+            logger.info(f"✅ r/{subreddit_name} - SFW rank {len(sfw_subreddits)} (mod rank {original_rank}) - {len(rules_data)} rules")
 
             if progress_bar:
                 progress_bar.update(1)
@@ -194,89 +196,99 @@ def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object) -> Lis
         if progress_bar:
             progress_bar.close()
 
-    print(f"\n📊 Collection complete:")
-    print(f"  Collected: {len(sfw_subreddits)} SFW subreddits")
-    print(f"  Checked: {checked_count} subreddits total")
-    print(f"  Skipped: {nsfw_skipped} NSFW subreddits")
+    logger.info(f"📊 Collection complete:")
+    logger.info(f"  Collected: {len(sfw_subreddits)} SFW subreddits")
+    logger.info(f"  Checked: {checked_count} subreddits total")
+    logger.info(f"  Skipped: {nsfw_skipped} NSFW subreddits")
 
     return sfw_subreddits
 
 
 def main():
     """Main execution function."""
-    print("Stage 2: Get Top N SFW Subreddits")
-    print("=" * 40)
+    # Initialize logging
+    logger = get_stage_logger(2, "get_top_sfw_subreddits")
+    log_stage_start(logger, 2, "Get Top N SFW Subreddits")
 
-    # Create directories
-    create_directories()
-
-    # Load subreddit rankings from Stage 1
-    rankings_file = os.path.join(PATHS['data'], 'stage1_subreddit_mod_comment_rankings.json')
-
-    if not os.path.exists(rankings_file):
-        print(f"❌ Input file not found: {rankings_file}")
-        print("Make sure Stage 1 has completed successfully.")
-        return 1
-
-    print(f"🔍 Loading subreddit rankings from: {rankings_file}")
-    rankings_data = read_json_file(rankings_file)
-
-    total_subreddits = len(rankings_data['rankings'])
-    print(f"📊 Loaded {total_subreddits:,} subreddits from rankings")
-
-    # Initialize Reddit API
-    print("🔌 Initializing Reddit API...")
-    reddit = initialize_reddit_client()
-
-    if reddit:
-        print("✅ Reddit API connected")
-    else:
-        print("⚠️  Reddit API unavailable - will skip all subreddits for safety")
-
-    # Collect SFW subreddits
     start_time = time.time()
-    sfw_subreddits = collect_sfw_subreddits(rankings_data, reddit)
 
-    if len(sfw_subreddits) < TOP_N_SUBREDDITS_WITH_MOD_COMMENTS:
-        print(f"⚠️  Warning: Only collected {len(sfw_subreddits)} SFW subreddits, "
-              f"less than target {TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}")
+    try:
+        # Create directories
+        create_directories()
 
-    # Create output data
-    output_data = {
-        'summary': {
-            'total_collected': len(sfw_subreddits),
-            'target_count': TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
-            'source_file': rankings_file,
-            'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
-            'reddit_api_used': reddit is not None,
-            'filtering_method': 'Reddit API over18 flag' if reddit else 'No filtering (API required)'
-        },
-        'subreddits': sfw_subreddits
-    }
+        # Load subreddit rankings from Stage 1
+        rankings_file = os.path.join(PATHS['data'], 'stage1_subreddit_mod_comment_rankings.json')
 
-    # Save results
-    output_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
-    write_json_file(output_data, output_file)
+        if not os.path.exists(rankings_file):
+            logger.error(f"❌ Input file not found: {rankings_file}")
+            logger.error("Make sure Stage 1 has completed successfully.")
+            log_stage_end(logger, 2, success=False, elapsed_time=time.time() - start_time)
+            return 1
 
-    # Print summary
-    elapsed = time.time() - start_time
+        logger.info(f"🔍 Loading subreddit rankings from: {rankings_file}")
+        rankings_data = read_json_file(rankings_file)
 
-    print(f"\nStage 2 Complete!")
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Selected {len(sfw_subreddits)} SFW subreddits")
-    print(f"Results saved to: {output_file}")
+        total_subreddits = len(rankings_data['rankings'])
+        logger.info(f"📊 Loaded {total_subreddits:,} subreddits from rankings")
 
-    # Show top 10 selected subreddits
-    print(f"\n🏆 Top 10 SFW subreddits by mod comment count:")
-    for i, entry in enumerate(sfw_subreddits[:10]):
-        sub = entry['subreddit']
-        rules_count = len(entry['rules'])
-        subscribers = sub.get('subscribers', 'N/A')
-        if isinstance(subscribers, int):
-            subscribers = f"{subscribers:,}"
-        print(f"  {i+1:2d}. r/{sub['name']} - {sub['mod_comment_count']:,} mod comments, {subscribers} subscribers, {rules_count} rules")
+        # Initialize Reddit API
+        logger.info("🔌 Initializing Reddit API...")
+        reddit = initialize_reddit_client(logger)
 
-    return 0
+        if reddit:
+            logger.info("✅ Reddit API connected")
+        else:
+            logger.warning("⚠️  Reddit API unavailable - will skip all subreddits for safety")
+
+        # Collect SFW subreddits
+        sfw_subreddits = collect_sfw_subreddits(rankings_data, reddit, logger)
+
+        if len(sfw_subreddits) < TOP_N_SUBREDDITS_WITH_MOD_COMMENTS:
+            logger.warning(f"⚠️  Warning: Only collected {len(sfw_subreddits)} SFW subreddits, "
+                  f"less than target {TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}")
+
+        # Create output data
+        output_data = {
+            'summary': {
+                'total_collected': len(sfw_subreddits),
+                'target_count': TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
+                'source_file': rankings_file,
+                'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
+                'reddit_api_used': reddit is not None,
+                'filtering_method': 'Reddit API over18 flag' if reddit else 'No filtering (API required)'
+            },
+            'subreddits': sfw_subreddits
+        }
+
+        # Save results
+        output_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+        write_json_file(output_data, output_file)
+
+        # Print summary
+        elapsed = time.time() - start_time
+
+        logger.info(f"Stage 2 Complete!")
+        logger.info(f"Time: {elapsed:.1f}s")
+        logger.info(f"Selected {len(sfw_subreddits)} SFW subreddits")
+        logger.info(f"Results saved to: {output_file}")
+
+        # Show top 10 selected subreddits
+        logger.info(f"🏆 Top 10 SFW subreddits by mod comment count:")
+        for i, entry in enumerate(sfw_subreddits[:10]):
+            sub = entry['subreddit']
+            rules_count = len(entry['rules'])
+            subscribers = sub.get('subscribers', 'N/A')
+            if isinstance(subscribers, int):
+                subscribers = f"{subscribers:,}"
+            logger.info(f"  {i+1:2d}. r/{sub['name']} - {sub['mod_comment_count']:,} mod comments, {subscribers} subscribers, {rules_count} rules")
+
+        log_stage_end(logger, 2, success=True, elapsed_time=elapsed)
+        return 0
+
+    except Exception as e:
+        log_error_and_continue(logger, e, "Stage 2 execution")
+        log_stage_end(logger, 2, success=False, elapsed_time=time.time() - start_time)
+        return 1
 
 
 if __name__ == "__main__":

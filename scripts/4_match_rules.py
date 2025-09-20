@@ -22,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
                    SIMILARITY_THRESHOLD, EMBEDDING_MODEL, MIN_MATCHED_COMMENTS,
                    MAX_MATCHED_COMMENTS, create_directories)
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, write_zst_json_objects)
 from utils.reddit import clean_rule_text, normalize_subreddit_name, validate_comment_structure, extract_submission_id
@@ -37,18 +38,18 @@ try:
     EMBEDDINGS_AVAILABLE = True
 except ImportError:
     EMBEDDINGS_AVAILABLE = False
-    print("⚠️  Warning: Embedding libraries not available. Install with: pip install vllm transformers torch")
+    # Will log warning from main function when logger is available
 
 
-def load_subreddit_rules() -> Dict[str, List[Dict[str, Any]]]:
+def load_subreddit_rules(logger) -> Dict[str, List[Dict[str, Any]]]:
     """Load subreddit rules from Stage 2 output."""
     rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
 
     if not os.path.exists(rules_file):
-        print(f"❌ Rules file not found: {rules_file}")
+        logger.error(f"❌ Rules file not found: {rules_file}")
         return {}
 
-    print(f"Loading subreddit rules from: {rules_file}")
+    logger.info(f"Loading subreddit rules from: {rules_file}")
     data = read_json_file(rules_file)
 
     subreddit_rules = {}
@@ -79,7 +80,7 @@ def load_subreddit_rules() -> Dict[str, List[Dict[str, Any]]]:
 
         subreddit_rules[subreddit_name] = rules
 
-    print(f"Loaded rules for {len(subreddit_rules)} subreddits")
+    logger.info(f"Loaded rules for {len(subreddit_rules)} subreddits")
     return subreddit_rules
 
 
@@ -436,194 +437,207 @@ def process_single_subreddit(args: tuple) -> Dict[str, Any]:
 
 def main():
     """Main execution function."""
-    print("Stage 4: Match Comments to Rules")
-    print("=" * 40)
-
-    # Create directories
-    create_directories()
-
-    # Check if embeddings are available
-    if not EMBEDDINGS_AVAILABLE:
-        print("❌ Embedding libraries not available!")
-        print("Install with: pip install vllm transformers torch")
-        return 1
-
-    # Load subreddit rules
-    subreddit_rules = load_subreddit_rules()
-
-    if not subreddit_rules:
-        print("❌ No subreddit rules loaded!")
-        return 1
-
-    # Get subreddit files to process
-    subreddit_files = []
-    top_subreddits_dir = PATHS['top_subreddits']
-
-    if not os.path.exists(top_subreddits_dir):
-        print(f"❌ Top subreddits directory not found: {top_subreddits_dir}")
-        return 1
-
-    for filename in os.listdir(top_subreddits_dir):
-        if filename.endswith('_mod_comments.jsonl.zst'):
-            subreddit = filename.replace('_mod_comments.jsonl.zst', '')
-            if subreddit in subreddit_rules:
-                subreddit_files.append(subreddit)
-
-    if not subreddit_files:
-        print("❌ No subreddit files found to process!")
-        return 1
-
-    # Get available CUDA devices
-    cuda_devices = get_available_cuda_devices()
-
-    if cuda_devices:
-        num_workers = len(cuda_devices)
-        print(f"Found {len(cuda_devices)} CUDA devices: {cuda_devices}")
-        print(f"Using {num_workers} parallel GPU processes")
-    else:
-        num_workers = min(PROCESSES, len(subreddit_files))  # Limit to available subreddits
-        cuda_devices = [None] * num_workers  # CPU mode
-        print(f"No CUDA devices found - using {num_workers} CPU processes")
-
-    print(f"Found {len(subreddit_files)} subreddit files to process")
+    # Initialize logging
+    logger = get_stage_logger(4, "match_rules")
+    log_stage_start(logger, 4, "Match Comments to Rules")
 
     start_time = time.time()
 
-    # Assign CUDA devices to subreddits in round-robin fashion
-    process_args = []
-    for i, subreddit in enumerate(subreddit_files):
-        cuda_device = cuda_devices[i % len(cuda_devices)]
-        process_args.append((subreddit, subreddit_rules, cuda_device))
+    try:
+        # Create directories
+        create_directories()
 
-    print("\n🚀 Processing subreddits...")
-    results = process_files_parallel(process_args, process_single_subreddit, num_workers)
+        # Check if embeddings are available
+        if not EMBEDDINGS_AVAILABLE:
+            logger.error("❌ Embedding libraries not available!")
+            logger.error("Install with: pip install vllm transformers torch")
+            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+            return 1
 
-    # Aggregate results
-    successful_results = [r for r in results if not r.get("error")]
-    failed_results = [r for r in results if r.get("error")]
+        # Load subreddit rules
+        logger.info("📚 Loading subreddit rules...")
+        subreddit_rules = load_subreddit_rules(logger)
 
-    # Calculate JSD and rank subreddits using utilities
-    print("\n🔄 Calculating JSD and ranking subreddits...")
+        if not subreddit_rules:
+            logger.error("❌ No subreddit rules loaded!")
+            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+            return 1
 
-    # Add JSD scores to each subreddit
-    for stats in successful_results:
-        rule_matches = stats.get('rule_matches', {})
-        stats['jsd_from_uniform'] = calculate_jsd_from_uniform(rule_matches)
+        # Get subreddit files to process
+        subreddit_files = []
+        top_subreddits_dir = PATHS['top_subreddits']
 
-    # Rank subreddits by JSD (using generic ranking utility)
-    def has_enough_matches(item):
-        return item.get('matched_comments', 0) >= MIN_MATCHED_COMMENTS
+        if not os.path.exists(top_subreddits_dir):
+            logger.error(f"❌ Top subreddits directory not found: {top_subreddits_dir}")
+            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+            return 1
 
-    ranked_results = rank_by_score(successful_results, 'jsd_from_uniform', ascending=True,
-                                   filter_func=has_enough_matches)
+        for filename in os.listdir(top_subreddits_dir):
+            if filename.endswith('_mod_comments.jsonl.zst'):
+                subreddit = filename.replace('_mod_comments.jsonl.zst', '')
+                if subreddit in subreddit_rules:
+                    subreddit_files.append(subreddit)
 
-    print(f"Ranked {len([r for r in ranked_results if r.get('rank', 999999) != 999999])} subreddits with ≥{MIN_MATCHED_COMMENTS} matched comments")
+        if not subreddit_files:
+            logger.error("❌ No subreddit files found to process!")
+            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+            return 1
 
-    # Analyze rule distribution across all subreddits
-    rule_analysis = analyze_rule_distribution(successful_results)
+        # Get available CUDA devices
+        cuda_devices = get_available_cuda_devices()
 
-    total_comments = sum(r.get("total_comments", 0) for r in successful_results)
-    total_matched = sum(r.get("matched_comments", 0) for r in successful_results)
-    total_ambiguous = sum(r.get("ambiguous_matches", 0) for r in successful_results)
-    overall_match_rate = (total_matched / total_comments * 100) if total_comments > 0 else 0
-    overall_ambiguous_rate = (total_ambiguous / total_comments * 100) if total_comments > 0 else 0
+        if cuda_devices:
+            num_workers = len(cuda_devices)
+            logger.info(f"Found {len(cuda_devices)} CUDA devices: {cuda_devices}")
+            logger.info(f"Using {num_workers} parallel GPU processes")
+        else:
+            num_workers = min(PROCESSES, len(subreddit_files))  # Limit to available subreddits
+            cuda_devices = [None] * num_workers  # CPU mode
+            logger.info(f"No CUDA devices found - using {num_workers} CPU processes")
 
-    # Save consolidated statistics
-    summary = {
-        'total_subreddits_processed': len(subreddit_files),
-        'successful_subreddits': len(successful_results),
-        'failed_subreddits': len(failed_results),
-        'total_comments': total_comments,
-        'total_matched': total_matched,
-        'total_ambiguous': total_ambiguous,
-        'overall_match_rate': overall_match_rate,
-        'overall_ambiguous_rate': overall_ambiguous_rate,
-        'embedding_model': EMBEDDING_MODEL,
-        'similarity_threshold': SIMILARITY_THRESHOLD,
-        'cuda_devices_used': cuda_devices if cuda_devices[0] is not None else [],
-        'parallel_workers': num_workers,
-        'processing_time_seconds': time.time() - start_time,
-        'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
-        'rule_analysis': rule_analysis,
-        'subreddit_stats': ranked_results  # Now includes ranks and JSD
-    }
+        logger.info(f"Found {len(subreddit_files)} subreddit files to process")
 
-    summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary.json')
-    write_json_file(summary, summary_file)
+        # Assign CUDA devices to subreddits in round-robin fashion
+        process_args = []
+        for i, subreddit in enumerate(subreddit_files):
+            cuda_device = cuda_devices[i % len(cuda_devices)]
+            process_args.append((subreddit, subreddit_rules, cuda_device))
 
-    # Save ranked subreddits for Stage 5 (replaces the need for separate stage)
-    rankings_file = os.path.join(PATHS['data'], 'subreddit_match_rankings.json')
-    write_json_file(ranked_results, rankings_file)
+        logger.info("🚀 Processing subreddits...")
+        results = process_files_parallel(process_args, process_single_subreddit, num_workers)
 
-    # Create submission IDs file for Stage 5 (replaces the need for separate stage)
-    submission_ids_data = {}
-    total_submission_ids = 0
+        # Aggregate results
+        successful_results = [r for r in results if not r.get("error")]
+        failed_results = [r for r in results if r.get("error")]
 
-    for stats in ranked_results:
-        if stats.get('rank', 999999) != 999999:  # Only include ranked subreddits
+        # Calculate JSD and rank subreddits using utilities
+        logger.info("🔄 Calculating JSD and ranking subreddits...")
+
+        # Add JSD scores to each subreddit
+        for stats in successful_results:
+            rule_matches = stats.get('rule_matches', {})
+            stats['jsd_from_uniform'] = calculate_jsd_from_uniform(rule_matches)
+
+        # Rank subreddits by JSD (using generic ranking utility)
+        def has_enough_matches(item):
+            return item.get('matched_comments', 0) >= MIN_MATCHED_COMMENTS
+
+        ranked_results = rank_by_score(successful_results, 'jsd_from_uniform', ascending=True,
+                                       filter_func=has_enough_matches)
+
+        logger.info(f"Ranked {len([r for r in ranked_results if r.get('rank', 999999) != 999999])} subreddits with ≥{MIN_MATCHED_COMMENTS} matched comments")
+
+        # Analyze rule distribution across all subreddits
+        rule_analysis = analyze_rule_distribution(successful_results)
+
+        total_comments = sum(r.get("total_comments", 0) for r in successful_results)
+        total_matched = sum(r.get("matched_comments", 0) for r in successful_results)
+        total_ambiguous = sum(r.get("ambiguous_matches", 0) for r in successful_results)
+        overall_match_rate = (total_matched / total_comments * 100) if total_comments > 0 else 0
+        overall_ambiguous_rate = (total_ambiguous / total_comments * 100) if total_comments > 0 else 0
+
+        # Save consolidated statistics
+        summary = {
+            'total_subreddits_processed': len(subreddit_files),
+            'successful_subreddits': len(successful_results),
+            'failed_subreddits': len(failed_results),
+            'total_comments': total_comments,
+            'total_matched': total_matched,
+            'total_ambiguous': total_ambiguous,
+            'overall_match_rate': overall_match_rate,
+            'overall_ambiguous_rate': overall_ambiguous_rate,
+            'embedding_model': EMBEDDING_MODEL,
+            'similarity_threshold': SIMILARITY_THRESHOLD,
+            'cuda_devices_used': cuda_devices if cuda_devices[0] is not None else [],
+            'parallel_workers': num_workers,
+            'processing_time_seconds': time.time() - start_time,
+            'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
+            'rule_analysis': rule_analysis,
+            'subreddit_stats': ranked_results  # Now includes ranks and JSD
+        }
+
+        summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary.json')
+        write_json_file(summary, summary_file)
+
+        # Save ranked subreddits for Stage 5 (replaces the need for separate stage)
+        rankings_file = os.path.join(PATHS['data'], 'subreddit_match_rankings.json')
+        write_json_file(ranked_results, rankings_file)
+
+        # Create submission IDs file for Stage 5 (replaces the need for separate stage)
+        submission_ids_data = {}
+        total_submission_ids = 0
+
+        for stats in ranked_results:
+            if stats.get('rank', 999999) != 999999:  # Only include ranked subreddits
+                subreddit = stats['subreddit']
+                submission_ids = stats.get('submission_ids', [])
+                submission_ids_data[subreddit] = submission_ids
+                total_submission_ids += len(submission_ids)
+
+        submission_ids_output = {
+            'metadata': {
+                'total_subreddits': len(submission_ids_data),
+                'sample_size_per_subreddit': MAX_MATCHED_COMMENTS,
+                'min_matched_comments_threshold': MIN_MATCHED_COMMENTS,
+                'random_seed': 0,
+                'total_submission_ids': total_submission_ids
+            },
+            'subreddit_submission_ids': submission_ids_data
+        }
+
+        submission_ids_file = os.path.join(PATHS['data'], 'subreddit_submission_ids.json')
+        write_json_file(submission_ids_output, submission_ids_file)
+
+        elapsed = time.time() - start_time
+
+        logger.info(f"🎉 Stage 4 Complete!")
+        logger.info(f"Time: {elapsed:.1f}s")
+        logger.info(f"📊 Processed {len(successful_results)} subreddits")
+        logger.info(f"💬 Total comments: {total_comments:,}")
+        logger.info(f"🎯 Total matched: {total_matched:,} ({overall_match_rate:.1f}%)")
+        logger.info(f"❓ Total ambiguous: {total_ambiguous:,} ({overall_ambiguous_rate:.1f}%)")
+        logger.info(f"📋 Total submission IDs: {total_submission_ids:,}")
+        logger.info(f"🤖 Model: {EMBEDDING_MODEL}")
+        logger.info(f"📏 Threshold: {SIMILARITY_THRESHOLD}")
+        logger.info(f"Summary saved to: {summary_file}")
+        logger.info(f"Rankings saved to: {rankings_file}")
+        logger.info(f"Submission IDs saved to: {submission_ids_file}")
+
+        if failed_results:
+            logger.warning(f"⚠️  {len(failed_results)} subreddits failed:")
+            for result in failed_results:
+                logger.warning(f"  r/{result['subreddit']}: {result.get('error', 'Unknown error')}")
+
+        # Show JSD ranking results
+        ranked_only = [r for r in ranked_results if r.get('rank', 999999) != 999999]
+        logger.info(f"🏆 Top 10 subreddits by JSD ranking (lower JSD = more uniform rule distribution):")
+        logger.info(f"{'Rank':<5} {'Subreddit':<20} {'JSD':<8} {'Match%':<8} {'Matched':<8} {'Rules':<6}")
+        logger.info("-" * 65)
+        for stats in ranked_only[:10]:
+            rank = stats.get('rank', 0)
             subreddit = stats['subreddit']
-            submission_ids = stats.get('submission_ids', [])
-            submission_ids_data[subreddit] = submission_ids
-            total_submission_ids += len(submission_ids)
+            jsd = stats.get('jsd_from_uniform', 0)
+            match_pct = stats.get('match_percentage', 0)
+            matched = stats.get('matched_comments', 0)
+            num_rules = len(stats.get('rule_matches', {}))
+            logger.info(f"{rank:<5} r/{subreddit:<19} {jsd:<8.4f} {match_pct:<8.1f} {matched:<8} {num_rules:<6}")
 
-    submission_ids_output = {
-        'metadata': {
-            'total_subreddits': len(submission_ids_data),
-            'sample_size_per_subreddit': MAX_MATCHED_COMMENTS,
-            'min_matched_comments_threshold': MIN_MATCHED_COMMENTS,
-            'random_seed': 0,
-            'total_submission_ids': total_submission_ids
-        },
-        'subreddit_submission_ids': submission_ids_data
-    }
+        # Show rule distribution summary
+        logger.info(f"📋 Rule Distribution Summary:")
+        logger.info(f"Total unique rules across all subreddits: {rule_analysis['total_rules']}")
+        logger.info(f"Total rule matches: {rule_analysis['total_matches']:,}")
+        top_rules = list(rule_analysis['top_rules'].items())[:5]
+        logger.info("Top 5 most matched rules:")
+        for rule_id, count in top_rules:
+            logger.info(f"  Rule {rule_id}: {count:,} matches")
 
-    submission_ids_file = os.path.join(PATHS['data'], 'subreddit_submission_ids.json')
-    write_json_file(submission_ids_output, submission_ids_file)
+        log_stage_end(logger, 4, success=True, elapsed_time=elapsed)
+        return 0
 
-    elapsed = time.time() - start_time
-
-    print(f"\n🎉 Stage 4 Complete!")
-    print(f"Time: {elapsed:.1f}s")
-    print(f"📊 Processed {len(successful_results)} subreddits")
-    print(f"💬 Total comments: {total_comments:,}")
-    print(f"🎯 Total matched: {total_matched:,} ({overall_match_rate:.1f}%)")
-    print(f"❓ Total ambiguous: {total_ambiguous:,} ({overall_ambiguous_rate:.1f}%)")
-    print(f"📋 Total submission IDs: {total_submission_ids:,}")
-    print(f"🤖 Model: {EMBEDDING_MODEL}")
-    print(f"📏 Threshold: {SIMILARITY_THRESHOLD}")
-    print(f"Summary saved to: {summary_file}")
-    print(f"Rankings saved to: {rankings_file}")
-    print(f"Submission IDs saved to: {submission_ids_file}")
-
-    if failed_results:
-        print(f"\n⚠️  {len(failed_results)} subreddits failed:")
-        for result in failed_results:
-            print(f"  r/{result['subreddit']}: {result.get('error', 'Unknown error')}")
-
-    # Show JSD ranking results
-    ranked_only = [r for r in ranked_results if r.get('rank', 999999) != 999999]
-    print(f"\n🏆 Top 10 subreddits by JSD ranking (lower JSD = more uniform rule distribution):")
-    print(f"{'Rank':<5} {'Subreddit':<20} {'JSD':<8} {'Match%':<8} {'Matched':<8} {'Rules':<6}")
-    print("-" * 65)
-    for stats in ranked_only[:10]:
-        rank = stats.get('rank', 0)
-        subreddit = stats['subreddit']
-        jsd = stats.get('jsd_from_uniform', 0)
-        match_pct = stats.get('match_percentage', 0)
-        matched = stats.get('matched_comments', 0)
-        num_rules = len(stats.get('rule_matches', {}))
-        print(f"{rank:<5} r/{subreddit:<19} {jsd:<8.4f} {match_pct:<8.1f} {matched:<8} {num_rules:<6}")
-
-    # Show rule distribution summary
-    print(f"\n📋 Rule Distribution Summary:")
-    print(f"Total unique rules across all subreddits: {rule_analysis['total_rules']}")
-    print(f"Total rule matches: {rule_analysis['total_matches']:,}")
-    top_rules = list(rule_analysis['top_rules'].items())[:5]
-    print("Top 5 most matched rules:")
-    for rule_id, count in top_rules:
-        print(f"  Rule {rule_id}: {count:,} matches")
-
-    return 0
+    except Exception as e:
+        log_error_and_continue(logger, e, "Stage 4 execution")
+        log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+        return 1
 
 
 if __name__ == "__main__":

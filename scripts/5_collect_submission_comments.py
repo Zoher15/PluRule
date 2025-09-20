@@ -27,11 +27,12 @@ from typing import Dict, Any
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, PROCESSES, DATE_RANGE, create_directories
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, process_zst_file_multi)
 from utils.reddit import extract_submission_id, normalize_subreddit_name, validate_comment_structure
 
-def load_submission_ids():
+def load_submission_ids(logger):
     """Load submission IDs from Stage 4 output."""
     submission_ids_file = os.path.join(PATHS['data'], 'subreddit_submission_ids.json')
     data = read_json_file(submission_ids_file)
@@ -47,7 +48,7 @@ def load_submission_ids():
         all_submission_ids.update(submission_ids)
         target_subreddits.add(normalized_sub)
 
-    print(f"📋 Loaded {len(all_submission_ids)} submission IDs from {len(subreddit_to_ids)} subreddits")
+    logger.info(f"📋 Loaded {len(all_submission_ids)} submission IDs from {len(subreddit_to_ids)} subreddits")
     return all_submission_ids, subreddit_to_ids, target_subreddits
 
 def get_rc_files():
@@ -73,6 +74,9 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
         Dict with processing statistics
     """
     rc_file_path, subreddit_to_ids, target_subreddits, temp_dir = args
+
+    # Create worker logger
+    worker_logger = get_stage_logger(5, "collect_submission_comments")
 
     rc_filename = os.path.basename(rc_file_path)
     rc_date = rc_filename.split('_')[1].split('.')[0]  # Extract YYYY-MM
@@ -116,7 +120,7 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
 
         return {'matched': False}
 
-    print(f"🔄 Processing {rc_filename}")
+    worker_logger.info(f"🔄 Processing {rc_filename}")
     start_time = time.time()
 
     try:
@@ -126,7 +130,7 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
         elapsed = time.time() - start_time
         subreddits_with_comments = len(stats["output_stats"])
 
-        print(f"✅ {rc_filename}: {stats['lines_processed']:,} lines, {stats['lines_matched']:,} comments -> {subreddits_with_comments} subreddits in {elapsed:.1f}s")
+        worker_logger.info(f"✅ {rc_filename}: {stats['lines_processed']:,} lines, {stats['lines_matched']:,} comments -> {subreddits_with_comments} subreddits in {elapsed:.1f}s")
 
         return {
             'rc_file': rc_filename,
@@ -138,7 +142,7 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"❌ Error processing {rc_filename}: {e}")
+        worker_logger.error(f"❌ Error processing {rc_filename}: {e}")
         return {
             'rc_file': rc_filename,
             'total_lines': 0,
@@ -161,7 +165,10 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
     """
     subreddit, target_submission_ids, temp_dir, output_dir = args
 
-    print(f"🔄 Organizing {subreddit} ({len(target_submission_ids)} target submissions)")
+    # Create worker logger
+    worker_logger = get_stage_logger(5, "collect_submission_comments")
+
+    worker_logger.info(f"🔄 Organizing {subreddit} ({len(target_submission_ids)} target submissions)")
     start_time = time.time()
 
     # Build nested structure: {submission_id: {comment_id: comment_object}}
@@ -172,7 +179,7 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
     # Get subreddit's temp directory
     subreddit_temp_dir = os.path.join(temp_dir, subreddit)
     if not os.path.exists(subreddit_temp_dir):
-        print(f"⚠️  No temp directory found for {subreddit}")
+        worker_logger.warning(f"⚠️  No temp directory found for {subreddit}")
         return {
             'subreddit': subreddit,
             'comments_organized': 0,
@@ -218,7 +225,7 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
             files_processed += 1
 
         except Exception as e:
-            print(f"⚠️  Error processing {os.path.basename(rc_file_path)} for {subreddit}: {e}")
+            worker_logger.warning(f"⚠️  Error processing {os.path.basename(rc_file_path)} for {subreddit}: {e}")
             continue
 
     # Write pickle file for this subreddit
@@ -234,7 +241,7 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
     total_submissions = len(submission_comments)
     avg_comments_per_submission = total_comments / total_submissions if total_submissions > 0 else 0
 
-    print(f"✅ {subreddit}: {total_comments:,} comments across {total_submissions} submissions "
+    worker_logger.info(f"✅ {subreddit}: {total_comments:,} comments across {total_submissions} submissions "
           f"(avg {avg_comments_per_submission:.1f} comments/submission) in {elapsed:.1f}s")
 
     return {
@@ -248,125 +255,140 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
 
 def main():
     """Main function to orchestrate the three-phase process."""
-    print("🚀 Starting Stage 5: Collect and Organize Submission Comments")
+    # Initialize logging
+    logger = get_stage_logger(5, "collect_submission_comments")
+    log_stage_start(logger, 5, "Collect and Organize Submission Comments")
+
     overall_start = time.time()
 
-    # Create directories
-    create_directories()
+    try:
+        # Create directories
+        create_directories()
 
-    # Load submission IDs from Stage 4
-    _, subreddit_to_ids, target_subreddits = load_submission_ids()
+        # Load submission IDs from Stage 4
+        logger.info("📋 Loading submission IDs from Stage 4...")
+        _, subreddit_to_ids, target_subreddits = load_submission_ids(logger)
 
-    # Get RC files to process
-    rc_files = get_rc_files()
-    if not rc_files:
-        print("❌ No RC files found to process")
-        return
+        # Get RC files to process
+        rc_files = get_rc_files()
+        if not rc_files:
+            logger.error("❌ No RC files found to process")
+            log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
+            return 1
 
-    # Setup temp directory
-    temp_dir = os.path.join(PATHS['submission_comments'], 'temp')
-    os.makedirs(temp_dir, exist_ok=True)
+        # Setup temp directory
+        temp_dir = os.path.join(PATHS['submission_comments'], 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
 
-    # Phase 1: Process RC files in parallel
-    print(f"\n📁 Phase 1: Processing {len(rc_files)} RC files with {PROCESSES} processes")
-    phase1_start = time.time()
+        # Phase 1: Process RC files in parallel
+        logger.info(f"📁 Phase 1: Processing {len(rc_files)} RC files with {PROCESSES} processes")
+        phase1_start = time.time()
 
-    rc_args = [(rc_file, subreddit_to_ids, target_subreddits, temp_dir) for rc_file in rc_files]
-    rc_results = process_files_parallel(process_rc_file, rc_args, max_workers=PROCESSES)
+        rc_args = [(rc_file, subreddit_to_ids, target_subreddits, temp_dir) for rc_file in rc_files]
+        rc_results = process_files_parallel(rc_args, process_rc_file, PROCESSES)
 
-    phase1_elapsed = time.time() - phase1_start
-    successful_rc = [r for r in rc_results if r['success']]
-    total_lines_processed = sum(r['total_lines'] for r in successful_rc)
-    total_comments_collected = sum(r['matched_comments'] for r in successful_rc)
+        phase1_elapsed = time.time() - phase1_start
+        successful_rc = [r for r in rc_results if r['success']]
+        total_lines_processed = sum(r['total_lines'] for r in successful_rc)
+        total_comments_collected = sum(r['matched_comments'] for r in successful_rc)
 
-    print(f"✅ Phase 1 complete in {phase1_elapsed:.1f}s")
-    print(f"   📊 {len(successful_rc)}/{len(rc_files)} files processed successfully")
-    print(f"   📊 {total_lines_processed:,} lines processed, {total_comments_collected:,} comments collected")
+        logger.info(f"✅ Phase 1 complete in {phase1_elapsed:.1f}s")
+        logger.info(f"   📊 {len(successful_rc)}/{len(rc_files)} files processed successfully")
+        logger.info(f"   📊 {total_lines_processed:,} lines processed, {total_comments_collected:,} comments collected")
 
-    # Phase 2: Organize comments by subreddit in parallel
-    print(f"\n🗂️  Phase 2: Organizing comments for {len(subreddit_to_ids)} subreddits")
-    phase2_start = time.time()
+        # Phase 2: Organize comments by subreddit in parallel
+        logger.info(f"🗂️  Phase 2: Organizing comments for {len(subreddit_to_ids)} subreddits")
+        phase2_start = time.time()
 
-    subreddit_args = [(subreddit, target_ids, temp_dir, PATHS['organized_comments'])
-                      for subreddit, target_ids in subreddit_to_ids.items()]
-    org_results = process_files_parallel(organize_subreddit_comments, subreddit_args, max_workers=PROCESSES)
+        subreddit_args = [(subreddit, target_ids, temp_dir, PATHS['organized_comments'])
+                          for subreddit, target_ids in subreddit_to_ids.items()]
+        org_results = process_files_parallel(subreddit_args, organize_subreddit_comments, PROCESSES)
 
-    phase2_elapsed = time.time() - phase2_start
-    successful_orgs = [r for r in org_results if r['success']]
-    total_comments_organized = sum(r['comments_organized'] for r in successful_orgs)
-    total_submissions = sum(r['submissions_with_comments'] for r in successful_orgs)
+        phase2_elapsed = time.time() - phase2_start
+        successful_orgs = [r for r in org_results if r['success']]
+        total_comments_organized = sum(r['comments_organized'] for r in successful_orgs)
+        total_submissions = sum(r['submissions_with_comments'] for r in successful_orgs)
 
-    print(f"✅ Phase 2 complete in {phase2_elapsed:.1f}s")
-    print(f"   📊 {len(successful_orgs)}/{len(subreddit_to_ids)} subreddits organized successfully")
-    print(f"   📊 {total_comments_organized:,} comments organized across {total_submissions:,} submissions")
+        logger.info(f"✅ Phase 2 complete in {phase2_elapsed:.1f}s")
+        logger.info(f"   📊 {len(successful_orgs)}/{len(subreddit_to_ids)} subreddits organized successfully")
+        logger.info(f"   📊 {total_comments_organized:,} comments organized across {total_submissions:,} submissions")
 
-    # Phase 3: Cleanup temp directories
-    print(f"\n🧹 Phase 3: Cleaning up temp directories")
-    phase3_start = time.time()
+        # Phase 3: Cleanup temp directories
+        logger.info(f"🧹 Phase 3: Cleaning up temp directories")
+        phase3_start = time.time()
 
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
-        print(f"   🗑️  Removed temp directory: {temp_dir}")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            logger.info(f"   🗑️  Removed temp directory: {temp_dir}")
 
-    phase3_elapsed = time.time() - phase3_start
-    print(f"✅ Phase 3 complete in {phase3_elapsed:.1f}s")
+        phase3_elapsed = time.time() - phase3_start
+        logger.info(f"✅ Phase 3 complete in {phase3_elapsed:.1f}s")
 
-    # Write summary statistics
-    stats_file = os.path.join(PATHS['organized_comments'], 'stage5_submission_comment_organization_stats.json')
-    stats_data = {
-        'summary': {
-            'total_subreddits': len(org_results),
-            'successful_subreddits': len(successful_orgs),
-            'total_comments_organized': total_comments_organized,
-            'total_submissions_with_comments': total_submissions,
-            'avg_comments_per_submission': round(total_comments_organized / total_submissions, 2) if total_submissions > 0 else 0,
-            'phase1_time': round(phase1_elapsed, 1),
-            'phase2_time': round(phase2_elapsed, 1),
-            'phase3_time': round(phase3_elapsed, 1),
-            'total_time': round(time.time() - overall_start, 1),
-            'collection_date': time.strftime('%Y-%m-%d %H:%M:%S')
-        },
-        'subreddit_stats': [
-            {
-                'subreddit': r['subreddit'],
-                'comments_organized': r['comments_organized'],
-                'submissions_with_comments': r['submissions_with_comments'],
-                'files_processed': r['files_processed'],
-                'processing_time': round(r['processing_time'], 2),
-                'avg_comments_per_submission': round(r['comments_organized'] / r['submissions_with_comments'], 2) if r['submissions_with_comments'] > 0 else 0
-            }
-            for r in sorted(successful_orgs, key=lambda x: x['comments_organized'], reverse=True)
-        ],
-        'failed_subreddits': [
-            {
-                'subreddit': r['subreddit'],
-                'reason': 'processing_failed'
-            }
-            for r in org_results if not r['success']
-        ]
-    }
+        # Write summary statistics
+        stats_file = os.path.join(PATHS['organized_comments'], 'stage5_submission_comment_organization_stats.json')
+        stats_data = {
+            'summary': {
+                'total_subreddits': len(org_results),
+                'successful_subreddits': len(successful_orgs),
+                'total_comments_organized': total_comments_organized,
+                'total_submissions_with_comments': total_submissions,
+                'avg_comments_per_submission': round(total_comments_organized / total_submissions, 2) if total_submissions > 0 else 0,
+                'phase1_time': round(phase1_elapsed, 1),
+                'phase2_time': round(phase2_elapsed, 1),
+                'phase3_time': round(phase3_elapsed, 1),
+                'total_time': round(time.time() - overall_start, 1),
+                'collection_date': time.strftime('%Y-%m-%d %H:%M:%S')
+            },
+            'subreddit_stats': [
+                {
+                    'subreddit': r['subreddit'],
+                    'comments_organized': r['comments_organized'],
+                    'submissions_with_comments': r['submissions_with_comments'],
+                    'files_processed': r['files_processed'],
+                    'processing_time': round(r['processing_time'], 2),
+                    'avg_comments_per_submission': round(r['comments_organized'] / r['submissions_with_comments'], 2) if r['submissions_with_comments'] > 0 else 0
+                }
+                for r in sorted(successful_orgs, key=lambda x: x['comments_organized'], reverse=True)
+            ],
+            'failed_subreddits': [
+                {
+                    'subreddit': r['subreddit'],
+                    'reason': 'processing_failed'
+                }
+                for r in org_results if not r['success']
+            ]
+        }
 
-    write_json_file(stats_file, stats_data)
+        write_json_file(stats_data, stats_file)
 
-    # Final summary
-    overall_elapsed = time.time() - overall_start
-    print(f"\n🎉 Stage 5 Complete!")
-    print(f"   ⏱️  Total time: {overall_elapsed:.1f}s")
-    print(f"   📁 RC files processed: {len(successful_rc)}/{len(rc_files)}")
-    print(f"   🗂️  Subreddits organized: {len(successful_orgs)}/{len(subreddit_to_ids)}")
-    print(f"   💬 Comments organized: {total_comments_organized:,}")
-    print(f"   📝 Submissions with comments: {total_submissions:,}")
-    print(f"   📊 Average comments per submission: {total_comments_organized/total_submissions:.1f}" if total_submissions > 0 else "   📊 No submissions found")
-    print(f"   📈 Statistics: {stats_file}")
+        # Final summary
+        overall_elapsed = time.time() - overall_start
+        logger.info(f"🎉 Stage 5 Complete!")
+        logger.info(f"   ⏱️  Total time: {overall_elapsed:.1f}s")
+        logger.info(f"   📁 RC files processed: {len(successful_rc)}/{len(rc_files)}")
+        logger.info(f"   🗂️  Subreddits organized: {len(successful_orgs)}/{len(subreddit_to_ids)}")
+        logger.info(f"   💬 Comments organized: {total_comments_organized:,}")
+        logger.info(f"   📝 Submissions with comments: {total_submissions:,}")
+        logger.info(f"   📊 Average comments per submission: {total_comments_organized/total_submissions:.1f}" if total_submissions > 0 else "   📊 No submissions found")
+        logger.info(f"   📈 Statistics: {stats_file}")
 
-    # Show failed subreddits if any
-    failed_subreddits = [r for r in org_results if not r['success']]
-    if failed_subreddits:
-        print(f"\n⚠️  Failed subreddits ({len(failed_subreddits)}):")
-        for r in failed_subreddits[:10]:  # Show first 10
-            print(f"     {r['subreddit']}")
-        if len(failed_subreddits) > 10:
-            print(f"     ... and {len(failed_subreddits) - 10} more")
+        # Show failed subreddits if any
+        failed_subreddits = [r for r in org_results if not r['success']]
+        if failed_subreddits:
+            logger.warning(f"⚠️  Failed subreddits ({len(failed_subreddits)}):")
+            for r in failed_subreddits[:10]:  # Show first 10
+                logger.warning(f"     {r['subreddit']}")
+            if len(failed_subreddits) > 10:
+                logger.warning(f"     ... and {len(failed_subreddits) - 10} more")
+
+        log_stage_end(logger, 5, success=True, elapsed_time=overall_elapsed)
+        return 0
+
+    except Exception as e:
+        log_error_and_continue(logger, e, "Stage 5 execution")
+        log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    exit(main())

@@ -27,10 +27,11 @@ from urllib.parse import urljoin
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, PROCESSES, DATE_RANGE, create_directories
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import process_files_parallel, ensure_directory
 
 
-def generate_download_urls(date_range: Tuple[str, str]) -> List[Tuple[str, str, str]]:
+def generate_download_urls(date_range: Tuple[str, str], logger=None) -> List[Tuple[str, str, str]]:
     """
     Generate download URLs for the given date range.
 
@@ -66,7 +67,8 @@ def generate_download_urls(date_range: Tuple[str, str]) -> List[Tuple[str, str, 
             # 2023-02 pattern
             base_url = "https://archive.org/download/pushshift_reddit_202302/reddit"
         else:
-            print(f"⚠️  Warning: No known URL pattern for {date_str}")
+            if logger:
+                logger.warning(f"⚠️  Warning: No known URL pattern for {date_str}")
             current_date += timedelta(days=32)
             current_date = current_date.replace(day=1)
             continue
@@ -97,6 +99,9 @@ def download_file(args: Tuple[str, str, str]) -> dict:
     """
     url, filename, file_type = args
 
+    # Create worker logger
+    worker_logger = get_stage_logger(0, "download_data")
+
     # Determine output directory
     if file_type == 'comments':
         output_dir = PATHS['reddit_comments']
@@ -108,7 +113,7 @@ def download_file(args: Tuple[str, str, str]) -> dict:
     # Skip if file already exists
     if os.path.exists(output_path):
         file_size = os.path.getsize(output_path)
-        print(f"✓ {filename} already exists ({file_size / (1024**3):.1f} GB)")
+        worker_logger.info(f"✓ {filename} already exists ({file_size / (1024**3):.1f} GB)")
         return {
             "filename": filename,
             "url": url,
@@ -120,7 +125,7 @@ def download_file(args: Tuple[str, str, str]) -> dict:
     # Ensure output directory exists
     ensure_directory(output_path)
 
-    print(f"📥 Downloading {filename}...")
+    worker_logger.info(f"📥 Downloading {filename}...")
     start_time = time.time()
 
     try:
@@ -144,15 +149,15 @@ def download_file(args: Tuple[str, str, str]) -> dict:
                     if downloaded_bytes % (100 * 1024 * 1024) == 0:
                         if total_size > 0:
                             progress = (downloaded_bytes / total_size) * 100
-                            print(f"  {filename}: {downloaded_bytes / (1024**3):.1f} GB / "
+                            worker_logger.info(f"  {filename}: {downloaded_bytes / (1024**3):.1f} GB / "
                                   f"{total_size / (1024**3):.1f} GB ({progress:.1f}%)")
                         else:
-                            print(f"  {filename}: {downloaded_bytes / (1024**3):.1f} GB downloaded")
+                            worker_logger.info(f"  {filename}: {downloaded_bytes / (1024**3):.1f} GB downloaded")
 
         elapsed = time.time() - start_time
         download_speed = downloaded_bytes / elapsed / (1024**2)  # MB/s
 
-        print(f"✅ {filename} completed: {downloaded_bytes / (1024**3):.1f} GB "
+        worker_logger.info(f"✅ {filename} completed: {downloaded_bytes / (1024**3):.1f} GB "
               f"in {elapsed:.1f}s ({download_speed:.1f} MB/s)")
 
         return {
@@ -167,7 +172,7 @@ def download_file(args: Tuple[str, str, str]) -> dict:
 
     except requests.exceptions.RequestException as e:
         elapsed = time.time() - start_time
-        print(f"❌ {filename} failed after {elapsed:.1f}s: {e}")
+        worker_logger.error(f"❌ {filename} failed after {elapsed:.1f}s: {e}")
 
         # Clean up partial file
         if os.path.exists(output_path):
@@ -183,7 +188,7 @@ def download_file(args: Tuple[str, str, str]) -> dict:
 
     except Exception as e:
         elapsed = time.time() - start_time
-        print(f"❌ {filename} failed with unexpected error after {elapsed:.1f}s: {e}")
+        worker_logger.error(f"❌ {filename} failed with unexpected error after {elapsed:.1f}s: {e}")
 
         # Clean up partial file
         if os.path.exists(output_path):
@@ -200,85 +205,92 @@ def download_file(args: Tuple[str, str, str]) -> dict:
 
 def main():
     """Main execution function."""
-    print("Stage 0: Download Reddit Data from Internet Archive")
-    print("=" * 50)
+    # Initialize logging
+    logger = get_stage_logger(0, "download_data")
+    log_stage_start(logger, 0, "Download Reddit Data from Internet Archive")
 
-    # Create directories
-    create_directories()
-
-    # Ensure reddit data directories exist
-    os.makedirs(PATHS['reddit_comments'], exist_ok=True)
-    os.makedirs(PATHS['reddit_submissions'], exist_ok=True)
-
-    # Generate download URLs
-    print(f"Generating download URLs for date range: {DATE_RANGE[0]} to {DATE_RANGE[1]}")
-    download_urls = generate_download_urls(DATE_RANGE)
-
-    total_files = len(download_urls)
-    comment_files = len([url for url in download_urls if url[2] == 'comments'])
-    submission_files = len([url for url in download_urls if url[2] == 'submissions'])
-
-    print(f"Found {total_files} files to download:")
-    print(f"  Comment files (RC_*): {comment_files}")
-    print(f"  Submission files (RS_*): {submission_files}")
-    print(f"Using {PROCESSES} parallel processes")
-    print()
-
-    # Download files in parallel
     start_time = time.time()
 
-    print("Starting parallel downloads...")
-    results = process_files_parallel(download_urls, download_file, PROCESSES)
+    try:
+        # Create directories
+        create_directories()
 
-    # Analyze results
-    successful = len([r for r in results if r.get('status') == 'success'])
-    skipped = len([r for r in results if r.get('status') == 'skipped'])
-    failed = len([r for r in results if r.get('status') in ['failed', 'error']])
+        # Ensure reddit data directories exist
+        os.makedirs(PATHS['reddit_comments'], exist_ok=True)
+        os.makedirs(PATHS['reddit_submissions'], exist_ok=True)
 
-    total_downloaded_bytes = sum(r.get('size_bytes', 0) for r in results
-                                if r.get('status') in ['success', 'skipped'])
+        # Generate download URLs
+        logger.info(f"Generating download URLs for date range: {DATE_RANGE[0]} to {DATE_RANGE[1]}")
+        download_urls = generate_download_urls(DATE_RANGE, logger)
 
-    elapsed = time.time() - start_time
+        total_files = len(download_urls)
+        comment_files = len([url for url in download_urls if url[2] == 'comments'])
+        submission_files = len([url for url in download_urls if url[2] == 'submissions'])
 
-    # Print summary
-    print(f"\nStage 0 Complete!")
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Files downloaded: {successful}")
-    print(f"Files skipped (already exist): {skipped}")
-    print(f"Files failed: {failed}")
-    print(f"Total data: {total_downloaded_bytes / (1024**3):.1f} GB")
+        logger.info(f"Found {total_files} files to download:")
+        logger.info(f"  Comment files (RC_*): {comment_files}")
+        logger.info(f"  Submission files (RS_*): {submission_files}")
+        logger.info(f"Using {PROCESSES} parallel processes")
 
-    if failed > 0:
-        print(f"\nFailed downloads:")
-        for result in results:
-            if result.get('status') in ['failed', 'error']:
-                print(f"  {result['filename']}: {result.get('error', 'Unknown error')}")
+        # Download files in parallel
+        logger.info("🚀 Starting parallel downloads...")
+        results = process_files_parallel(download_urls, download_file, PROCESSES)
 
-    # Show download locations
-    print(f"\nDownload locations:")
-    print(f"  Comments: {PATHS['reddit_comments']}")
-    print(f"  Submissions: {PATHS['reddit_submissions']}")
+        # Analyze results
+        successful = len([r for r in results if r.get('status') == 'success'])
+        skipped = len([r for r in results if r.get('status') == 'skipped'])
+        failed = len([r for r in results if r.get('status') in ['failed', 'error']])
 
-    # Save download log
-    from utils.files import write_json_file
+        total_downloaded_bytes = sum(r.get('size_bytes', 0) for r in results
+                                    if r.get('status') in ['success', 'skipped'])
 
-    download_log = {
-        'date_range': DATE_RANGE,
-        'total_files': total_files,
-        'successful_downloads': successful,
-        'skipped_files': skipped,
-        'failed_downloads': failed,
-        'total_size_gb': total_downloaded_bytes / (1024**3),
-        'download_time_seconds': elapsed,
-        'download_date': time.strftime("%Y-%m-%d %H:%M:%S"),
-        'results': results
-    }
+        elapsed = time.time() - start_time
 
-    log_file = os.path.join(PATHS['logs'], 'stage0_download_log.json')
-    write_json_file(download_log, log_file)
-    print(f"Download log saved to: {log_file}")
+        # Print summary
+        logger.info(f"Stage 0 Complete!")
+        logger.info(f"Time: {elapsed:.1f}s")
+        logger.info(f"Files downloaded: {successful}")
+        logger.info(f"Files skipped (already exist): {skipped}")
+        logger.info(f"Files failed: {failed}")
+        logger.info(f"Total data: {total_downloaded_bytes / (1024**3):.1f} GB")
 
-    return 0 if failed == 0 else 1
+        if failed > 0:
+            logger.warning(f"Failed downloads:")
+            for result in results:
+                if result.get('status') in ['failed', 'error']:
+                    logger.warning(f"  {result['filename']}: {result.get('error', 'Unknown error')}")
+
+        # Show download locations
+        logger.info(f"Download locations:")
+        logger.info(f"  Comments: {PATHS['reddit_comments']}")
+        logger.info(f"  Submissions: {PATHS['reddit_submissions']}")
+
+        # Save download log
+        from utils.files import write_json_file
+
+        download_log = {
+            'date_range': DATE_RANGE,
+            'total_files': total_files,
+            'successful_downloads': successful,
+            'skipped_files': skipped,
+            'failed_downloads': failed,
+            'total_size_gb': total_downloaded_bytes / (1024**3),
+            'download_time_seconds': elapsed,
+            'download_date': time.strftime("%Y-%m-%d %H:%M:%S"),
+            'results': results
+        }
+
+        log_file = os.path.join(PATHS['logs'], 'stage0_download_log.json')
+        write_json_file(download_log, log_file)
+        logger.info(f"Download log saved to: {log_file}")
+
+        log_stage_end(logger, 0, success=(failed == 0), elapsed_time=elapsed)
+        return 0 if failed == 0 else 1
+
+    except Exception as e:
+        log_error_and_continue(logger, e, "Stage 0 execution")
+        log_stage_end(logger, 0, success=False, elapsed_time=time.time() - start_time)
+        return 1
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ from urllib3.util.retry import Retry
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, PROCESSES, create_directories
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, ensure_directory, get_file_size_gb)
 from utils.stats import rank_by_score
@@ -98,7 +99,7 @@ def get_file_extension_from_url(url: str) -> str:
     return '.unknown'
 
 
-def download_with_requests(url: str, output_path: str, session: requests.Session) -> Dict[str, Any]:
+def download_with_requests(url: str, output_path: str, session: requests.Session, logger=None) -> Dict[str, Any]:
     """
     Download file using requests with proper error handling.
 
@@ -106,7 +107,7 @@ def download_with_requests(url: str, output_path: str, session: requests.Session
         Dict with download result information
     """
     try:
-        print(f"    📥 Downloading: {url}")
+        logger.debug(f"    📥 Downloading: {url}")
 
         # Stream download for large files
         response = session.get(url, stream=True, timeout=30)
@@ -145,7 +146,7 @@ def download_with_requests(url: str, output_path: str, session: requests.Session
         }
 
 
-def download_with_ytdlp(url: str, output_dir: str, submission_id: str) -> Dict[str, Any]:
+def download_with_ytdlp(url: str, output_dir: str, submission_id: str, logger) -> Dict[str, Any]:
     """
     Download file using yt-dlp for complex sites.
 
@@ -153,7 +154,7 @@ def download_with_ytdlp(url: str, output_dir: str, submission_id: str) -> Dict[s
         Dict with download result information
     """
     try:
-        print(f"    📹 yt-dlp downloading: {url}")
+        logger.debug(f"    📹 yt-dlp downloading: {url}")
 
         # Ensure output directory exists
         ensure_directory(os.path.join(output_dir, "dummy.txt"))
@@ -208,7 +209,7 @@ def download_with_ytdlp(url: str, output_dir: str, submission_id: str) -> Dict[s
         }
 
 
-def download_submission_media(submission: Dict[str, Any], media_dir: str, session: requests.Session) -> Dict[str, Any]:
+def download_submission_media(submission: Dict[str, Any], media_dir: str, session: requests.Session, logger) -> Dict[str, Any]:
     """Download media for a single submission."""
     submission_id = submission.get('id', 'unknown')
     url = submission.get('url', '')
@@ -235,12 +236,12 @@ def download_submission_media(submission: Dict[str, Any], media_dir: str, sessio
 
     # YouTube and complex video sites - use yt-dlp
     if any(site in domain for site in ['youtube.com', 'youtu.be', 'v.redd.it']):
-        result = download_with_ytdlp(url, media_dir, submission_id)
+        result = download_with_ytdlp(url, media_dir, submission_id, logger)
     else:
         # Direct downloads - use requests
         extension = get_file_extension_from_url(url)
         output_path = os.path.join(media_dir, f"{submission_id}{extension}")
-        result = download_with_requests(url, output_path, session)
+        result = download_with_requests(url, output_path, session, logger)
 
     # Add submission info to result
     result['submission_id'] = submission_id
@@ -251,10 +252,13 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
     """Process media downloads for a single subreddit."""
     subreddit_name, = args
 
+    # Create worker logger (same function works in worker processes)
+    worker_logger = get_stage_logger(8, "collect_media")
+
     # Normalize subreddit name for consistency
     normalized_subreddit = normalize_subreddit_name(subreddit_name)
 
-    print(f"🔄 Processing media for {subreddit_name}")
+    worker_logger.info(f"🔄 Processing media for {subreddit_name}")
     start_time = time.time()
 
     # File paths (use original name for file lookup, normalized for directory)
@@ -285,7 +289,7 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
                 if validate_submission_structure(submission):
                     submissions.append(submission)
 
-        print(f"  📊 Loaded {len(submissions)} submissions for {subreddit_name}")
+        worker_logger.info(f"  📊 Loaded {len(submissions)} submissions for {subreddit_name}")
 
         # Filter for media submissions
         media_submissions = []
@@ -293,7 +297,7 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
             if has_media(submission):
                 media_submissions.append(submission)
 
-        print(f"  🎬 Found {len(media_submissions)} media submissions in {subreddit_name}")
+        worker_logger.info(f"  🎬 Found {len(media_submissions)} media submissions in {subreddit_name}")
 
         if not media_submissions:
             return {
@@ -311,7 +315,7 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
         total_size = 0
 
         for submission in media_submissions:
-            result = download_submission_media(submission, subreddit_media_dir, session)
+            result = download_submission_media(submission, subreddit_media_dir, session, worker_logger)
             download_results.append(result)
 
             if result.get('success', False):
@@ -321,7 +325,7 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
         elapsed = time.time() - start_time
         success_rate = (successful_downloads / len(media_submissions)) * 100 if media_submissions else 0
 
-        print(f"  ✅ {subreddit_name}: {successful_downloads}/{len(media_submissions)} downloads successful ({success_rate:.1f}%) in {elapsed:.1f}s")
+        worker_logger.info(f"  ✅ {subreddit_name}: {successful_downloads}/{len(media_submissions)} downloads successful ({success_rate:.1f}%) in {elapsed:.1f}s")
 
         # Group failures by error type for debugging
         failure_reasons = {}
@@ -344,7 +348,7 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"❌ Error processing {subreddit_name}: {e}")
+        worker_logger.error(f"❌ Error processing {subreddit_name}: {e}")
         return {
             'subreddit': subreddit_name,
             'success': False,
@@ -355,7 +359,7 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
         }
 
 
-def load_qualified_subreddits() -> List[str]:
+def load_qualified_subreddits(logger) -> List[str]:
     """Load subreddits that have submissions from Stage 7."""
     summary_file = os.path.join(PATHS['data'], 'stage7_submission_collection_stats.json')
 
@@ -368,146 +372,146 @@ def load_qualified_subreddits() -> List[str]:
             if subreddit_stat.get('submissions_collected', 0) > 0:
                 qualified_subreddits.append(subreddit_stat['subreddit'])
 
-        print(f"Loaded {len(qualified_subreddits)} subreddits with submissions from Stage 7")
+        logger.info(f"Loaded {len(qualified_subreddits)} subreddits with submissions from Stage 7")
         return qualified_subreddits
 
     except Exception as e:
-        print(f"Error loading Stage 7 summary: {e}")
+        log_error_and_continue(logger, e, "loading Stage 7 summary")
         return []
 
 
 def main():
     """Main execution function."""
-    print("Stage 8: Collect Media for Submissions")
-    print("=" * 40)
+    # Initialize logging
+    logger = get_stage_logger(8, "collect_media")
+    log_stage_start(logger, 8, "Collect Media for Submissions")
 
     start_time = time.time()
 
-    # Create directories
-    create_directories()
-
-    # Check if yt-dlp is available
     try:
-        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
-        print("✅ yt-dlp found and working")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("⚠️  yt-dlp not found - video downloads may fail")
-        print("Install with: pip install yt-dlp")
+        # Create directories
+        create_directories()
 
-    # Load qualified subreddits from Stage 7
-    qualified_subreddits = load_qualified_subreddits()
+        # Check if yt-dlp is available
+        try:
+            subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
+            logger.info("✅ yt-dlp found and working")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.warning("⚠️  yt-dlp not found - video downloads may fail")
+            logger.warning("Install with: pip install yt-dlp")
 
-    if not qualified_subreddits:
-        print("❌ No qualified subreddits found!")
-        return 1
+        # Load qualified subreddits from Stage 7
+        qualified_subreddits = load_qualified_subreddits(logger)
 
-    print(f"📊 Processing media for {len(qualified_subreddits)} subreddits")
-    print(f"Using {PROCESSES} parallel processes")
+        if not qualified_subreddits:
+            logger.error("❌ No qualified subreddits found!")
+            log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
+            return 1
 
-    # Process subreddits in parallel
-    subreddit_args = [(subreddit,) for subreddit in qualified_subreddits]
-    results = process_files_parallel(subreddit_args, process_subreddit_media, PROCESSES)
+        logger.info(f"📊 Processing media for {len(qualified_subreddits)} subreddits")
+        logger.info(f"Using {PROCESSES} parallel processes")
 
-    # Collect statistics
-    successful_results = [r for r in results if r.get('success', False)]
-    failed_results = [r for r in results if not r.get('success', False)]
+        # Process subreddits in parallel
+        subreddit_args = [(subreddit,) for subreddit in qualified_subreddits]
+        results = process_files_parallel(subreddit_args, process_subreddit_media, PROCESSES)
 
-    total_media_downloaded = sum(r.get('media_downloaded', 0) for r in successful_results)
-    total_submissions = sum(r.get('total_submissions', 0) for r in successful_results)
-    total_media_submissions = sum(r.get('media_submissions', 0) for r in successful_results)
-    total_size = sum(r.get('total_size_bytes', 0) for r in successful_results)
-    total_size_gb = total_size / (1024**3)
+        # Collect statistics
+        successful_results = [r for r in results if r.get('success', False)]
+        failed_results = [r for r in results if not r.get('success', False)]
 
-    # Calculate overall success rate
-    overall_success_rate = (total_media_downloaded / total_media_submissions) * 100 if total_media_submissions > 0 else 0
+        total_media_downloaded = sum(r.get('media_downloaded', 0) for r in successful_results)
+        total_submissions = sum(r.get('total_submissions', 0) for r in successful_results)
+        total_media_submissions = sum(r.get('media_submissions', 0) for r in successful_results)
+        total_size = sum(r.get('total_size_bytes', 0) for r in successful_results)
+        total_size_gb = total_size / (1024**3)
 
-    elapsed = time.time() - start_time
+        # Calculate overall success rate
+        overall_success_rate = (total_media_downloaded / total_media_submissions) * 100 if total_media_submissions > 0 else 0
 
-    # Aggregate failure reasons across all subreddits
-    all_failure_reasons = {}
-    for result in successful_results:
-        for reason, count in result.get('failure_reasons', {}).items():
-            all_failure_reasons[reason] = all_failure_reasons.get(reason, 0) + count
+        elapsed = time.time() - start_time
 
-    # Create summary statistics
-    summary = {
-        'summary': {
-            'total_subreddits_processed': len(qualified_subreddits),
-            'successful_subreddits': len(successful_results),
-            'failed_subreddits': len(failed_results),
-            'total_submissions_processed': total_submissions,
-            'total_media_submissions': total_media_submissions,
-            'total_media_downloaded': total_media_downloaded,
-            'overall_success_rate': overall_success_rate,
-            'total_size_bytes': total_size,
-            'total_size_gb': total_size_gb,
-            'processing_time_seconds': elapsed,
-            'downloads_per_second': total_media_downloaded / elapsed if elapsed > 0 else 0,
-            'collection_date': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'failure_reasons': all_failure_reasons
-        },
-        'subreddit_stats': rank_by_score(
-            [
+        # Aggregate failure reasons across all subreddits
+        all_failure_reasons = {}
+        for result in successful_results:
+            for reason, count in result.get('failure_reasons', {}).items():
+                all_failure_reasons[reason] = all_failure_reasons.get(reason, 0) + count
+
+        # Create summary statistics
+        summary = {
+            'summary': {
+                'total_subreddits_processed': len(qualified_subreddits),
+                'successful_subreddits': len(successful_results),
+                'failed_subreddits': len(failed_results),
+                'total_submissions_processed': total_submissions,
+                'total_media_submissions': total_media_submissions,
+                'total_media_downloaded': total_media_downloaded,
+                'overall_success_rate': overall_success_rate,
+                'total_size_bytes': total_size,
+                'total_size_gb': total_size_gb,
+                'processing_time_seconds': elapsed,
+                'downloads_per_second': total_media_downloaded / elapsed if elapsed > 0 else 0,
+                'collection_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'failure_reasons': all_failure_reasons
+            },
+            'subreddit_stats': rank_by_score(
+                [
+                    {
+                        'subreddit': r['subreddit'],
+                        'media_downloaded': r.get('media_downloaded', 0),
+                        'media_submissions': r.get('media_submissions', 0),
+                        'success_rate': r.get('success_rate', 0),
+                        'size_gb': r.get('total_size_bytes', 0) / (1024**3),
+                        'processing_time': r.get('processing_time', 0)
+                    }
+                    for r in successful_results
+                ],
+                'media_downloaded',
+                ascending=False  # Higher download count = better rank
+            ),
+            'failed_subreddits': [
                 {
                     'subreddit': r['subreddit'],
-                    'media_downloaded': r.get('media_downloaded', 0),
-                    'media_submissions': r.get('media_submissions', 0),
-                    'success_rate': r.get('success_rate', 0),
-                    'size_gb': r.get('total_size_bytes', 0) / (1024**3),
-                    'processing_time': r.get('processing_time', 0)
+                    'error': r.get('error', 'Unknown error')
                 }
-                for r in successful_results
-            ],
-            'media_downloaded',
-            ascending=False  # Higher download count = better rank
-        ),
-        'failed_subreddits': [
-            {
-                'subreddit': r['subreddit'],
-                'error': r.get('error', 'Unknown error')
-            }
-            for r in failed_results
-        ]
-    }
+                for r in failed_results
+            ]
+        }
 
-    # Save summary
-    summary_file = os.path.join(PATHS['data'], 'stage8_media_collection_stats.json')
-    write_json_file(summary, summary_file)
+        # Save summary
+        summary_file = os.path.join(PATHS['data'], 'stage8_media_collection_stats.json')
+        write_json_file(summary, summary_file)
 
-    print(f"\n🎉 Stage 8 Complete!")
-    print(f"Time: {elapsed:.1f}s")
-    print(f"📊 Processed {len(successful_results)}/{len(qualified_subreddits)} subreddits")
-    print(f"🎬 Downloaded {total_media_downloaded:,} media files from {total_media_submissions:,} media submissions")
-    print(f"📈 Overall success rate: {overall_success_rate:.1f}%")
-    print(f"💾 Total size: {total_size_gb:.2f} GB")
-    print(f"🚀 Download rate: {total_media_downloaded/elapsed:.1f} files/sec")
-    print(f"Summary saved to: {summary_file}")
+        # Log comprehensive summary
+        summary_stats = {
+            'processed_subreddits': f"{len(successful_results)}/{len(qualified_subreddits)}",
+            'media_downloaded': total_media_downloaded,
+            'media_submissions': total_media_submissions,
+            'success_rate': f"{overall_success_rate:.1f}%",
+            'total_size_gb': f"{total_size_gb:.2f} GB",
+            'download_rate': f"{total_media_downloaded/elapsed:.1f} files/sec"
+        }
+        log_stats(logger, summary_stats, "Stage 8 Results")
 
-    if failed_results:
-        print(f"\n⚠️  Failed subreddits ({len(failed_results)}):")
-        for result in failed_results[:10]:  # Show first 10
-            print(f"  {result['subreddit']}: {result.get('error', 'Unknown error')}")
-        if len(failed_results) > 10:
-            print(f"  ... and {len(failed_results) - 10} more")
+        if failed_results:
+            logger.warning(f"⚠️  Failed subreddits: {len(failed_results)}")
+            for result in failed_results[:5]:  # Show first 5
+                logger.warning(f"  {result['subreddit']}: {result.get('error', 'Unknown error')}")
 
-    # Show top failure reasons
-    if all_failure_reasons:
-        print(f"\n🔍 Top failure reasons:")
-        sorted_failures = sorted(all_failure_reasons.items(), key=lambda x: x[1], reverse=True)
-        for reason, count in sorted_failures[:5]:
-            print(f"  {reason}: {count:,} failures")
+        # Show top failure reasons
+        if all_failure_reasons:
+            logger.info("🔍 Top failure reasons:")
+            sorted_failures = sorted(all_failure_reasons.items(), key=lambda x: x[1], reverse=True)
+            for reason, count in sorted_failures[:3]:
+                logger.info(f"  {reason}: {count:,} failures")
 
-    # Show top 10 subreddits by media downloaded
-    if successful_results:
-        top_subreddits = sorted(successful_results, key=lambda x: x.get('media_downloaded', 0), reverse=True)[:10]
-        print(f"\n🏆 Top 10 subreddits by media downloaded:")
-        for i, result in enumerate(top_subreddits):
-            count = result['media_downloaded']
-            size = result.get('total_size_bytes', 0) / (1024**3)
-            rate = result.get('success_rate', 0)
-            print(f"  {i+1:2d}. {result['subreddit']}: {count:,} files ({size:.2f} GB, {rate:.1f}% success)")
+        logger.info(f"Summary saved to: {summary_file}")
+        log_stage_end(logger, 8, success=True, elapsed_time=elapsed)
+        return 0
 
-    return 0
+    except Exception as e:
+        log_error_and_continue(logger, e, "Stage 8 execution")
+        log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
+        return 1
 
 
 if __name__ == "__main__":

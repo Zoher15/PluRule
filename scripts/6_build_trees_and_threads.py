@@ -27,13 +27,14 @@ from typing import Dict, List, Any, Optional, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, create_directories
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, ensure_directory, get_file_size_gb)
 from utils.reddit import (normalize_subreddit_name, extract_submission_id, extract_comment_id)
 from utils.stats import calculate_jsd_from_uniform, rank_by_score
 
 
-def load_target_subreddits_and_rules() -> Tuple[Dict[str, str], Dict[str, Dict[str, int]]]:
+def load_target_subreddits_and_rules(logger) -> Tuple[Dict[str, str], Dict[str, Dict[str, int]]]:
     """Load subreddits with their languages and complete rule sets."""
     subreddits_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
 
@@ -59,11 +60,11 @@ def load_target_subreddits_and_rules() -> Tuple[Dict[str, str], Dict[str, Dict[s
 
             subreddit_rules[subreddit_name] = rule_stats
 
-        print(f"Loaded {len(subreddit_languages)} subreddits with complete rule sets")
+        logger.info(f"Loaded {len(subreddit_languages)} subreddits with complete rule sets")
         return subreddit_languages, subreddit_rules
 
     except Exception as e:
-        print(f"Error loading subreddits and rules: {e}")
+        logger.error(f"Error loading subreddits and rules: {e}")
         return {}, {}
 
 
@@ -173,7 +174,7 @@ def build_subreddit_trees(submission_comments: Dict[str, Dict]) -> Dict[str, Any
     }
 
 
-def load_mod_comments(match_file_path: str, sample_size: int = 2000) -> List[Dict]:
+def load_mod_comments(match_file_path: str, logger, sample_size: int = 2000) -> List[Dict]:
     """Load and sample moderator comments from match file."""
     try:
         lines = read_zst_lines(match_file_path)
@@ -189,11 +190,11 @@ def load_mod_comments(match_file_path: str, sample_size: int = 2000) -> List[Dic
         if len(mod_comments) > sample_size:
             mod_comments = random.sample(mod_comments, sample_size)
 
-        print(f"Loaded {len(mod_comments)} moderator comments from {os.path.basename(match_file_path)}")
+        logger.info(f"Loaded {len(mod_comments)} moderator comments from {os.path.basename(match_file_path)}")
         return mod_comments
 
     except Exception as e:
-        print(f"Failed to load match file {match_file_path}: {e}")
+        logger.error(f"Failed to load match file {match_file_path}: {e}")
         return []
 
 
@@ -377,7 +378,10 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
     """Process single subreddit: build trees and create discussion threads."""
     subreddit_name, complete_rule_set = args
 
-    print(f"🔄 Processing {subreddit_name}")
+    # Create worker logger
+    worker_logger = get_stage_logger(6, "build_trees_and_threads")
+
+    worker_logger.info(f"🔄 Processing {subreddit_name}")
     start_time = time.time()
 
     try:
@@ -419,7 +423,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
             }
 
         # Build comment trees (in memory)
-        print(f"  🌳 Building trees for {len(submission_comments)} submissions")
+        worker_logger.info(f"  🌳 Building trees for {len(submission_comments)} submissions")
         trees_data = build_subreddit_trees(submission_comments)
         trees_data['subreddit'] = subreddit_name
         trees_data['source_file'] = submission_comments_file
@@ -432,10 +436,10 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         total_comments = trees_data['metadata']['total_comments']
         trees_file_size = get_file_size_gb(trees_output)
 
-        print(f"  ✅ Built {trees_built} trees with {total_comments:,} comments ({trees_file_size:.2f} GB)")
+        worker_logger.info(f"  ✅ Built {trees_built} trees with {total_comments:,} comments ({trees_file_size:.2f} GB)")
 
         # Load moderator comments
-        mod_comments = load_mod_comments(match_file, 2000)
+        mod_comments = load_mod_comments(match_file, worker_logger, 2000)
 
         if not mod_comments:
             return {
@@ -449,7 +453,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
             }
 
         # Build discussion thread pairs
-        print(f"  🧵 Building discussion threads from {len(mod_comments)} mod comments")
+        worker_logger.info(f"  🧵 Building discussion threads from {len(mod_comments)} mod comments")
 
         thread_pairs = []
         success_count = 0
@@ -525,7 +529,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         success_rate = (success_count / len(mod_comments)) * 100 if mod_comments else 0
         threads_file_size = get_file_size_gb(threads_output)
 
-        print(f"  🎉 {subreddit_name}: {trees_built} trees, {success_count}/{len(mod_comments)} thread pairs ({success_rate:.1f}%) in {elapsed:.1f}s")
+        worker_logger.info(f"  🎉 {subreddit_name}: {trees_built} trees, {success_count}/{len(mod_comments)} thread pairs ({success_rate:.1f}%) in {elapsed:.1f}s")
 
         # Calculate JSD from uniform distribution
         jsd_score = calculate_jsd_from_uniform(rule_stats)
@@ -549,7 +553,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"❌ Error processing {subreddit_name}: {e}")
+        worker_logger.error(f"❌ Error processing {subreddit_name}: {e}")
         return {
             'subreddit': subreddit_name,
             'status': 'failed',
@@ -563,120 +567,132 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
 
 def main():
     """Main execution function."""
-    print("Stage 6: Build Comment Trees and Discussion Threads")
-    print("=" * 55)
+    # Initialize logging
+    logger = get_stage_logger(6, "build_trees_and_threads")
+    log_stage_start(logger, 6, "Build Comment Trees and Discussion Threads")
 
     start_time = time.time()
 
-    # Create directories
-    create_directories()
+    try:
+        # Create directories
+        create_directories()
 
-    # Load subreddits and rule sets
-    subreddit_languages, subreddit_rules = load_target_subreddits_and_rules()
+        # Load subreddits and rule sets
+        logger.info("📚 Loading target subreddits and rule sets...")
+        subreddit_languages, subreddit_rules = load_target_subreddits_and_rules(logger)
 
-    if not subreddit_languages:
-        print("❌ No subreddits loaded!")
+        if not subreddit_languages:
+            logger.error("❌ No subreddits loaded!")
+            log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
+            return 1
+
+        # Find subreddits with required input files
+        subreddits_to_process = []
+
+        for subreddit in subreddit_languages.keys():
+            submission_comments_file = os.path.join(PATHS['organized_comments'], f"{subreddit}_submission_comments.pkl")
+            match_file = os.path.join(PATHS['matched_comments'], f"{subreddit}_match.jsonl.zst")
+
+            if os.path.exists(submission_comments_file) and os.path.exists(match_file):
+                complete_rule_set = subreddit_rules.get(subreddit, {})
+                subreddits_to_process.append((subreddit, complete_rule_set))
+
+        if not subreddits_to_process:
+            logger.error("❌ No subreddits found with required input files!")
+            log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
+            return 1
+
+        logger.info(f"Found {len(subreddits_to_process)} subreddits to process")
+        logger.info(f"Using {PROCESSES} parallel processes")
+
+        # Process subreddits in parallel
+        logger.info("🌳 Processing subreddits to build trees and discussion threads...")
+        results = process_files_parallel(subreddits_to_process, process_subreddit, PROCESSES)
+
+        # Collect statistics
+        completed_results = [r for r in results if r.get('status') == 'completed']
+        failed_results = [r for r in results if r.get('status') == 'failed']
+
+        total_trees = sum(r.get('trees_built', 0) for r in completed_results)
+        total_comments = sum(r.get('total_comments', 0) for r in completed_results)
+        total_successful_pairs = sum(r.get('successful_pairs', 0) for r in completed_results)
+        total_mod_comments = sum(r.get('total_mod_comments', 0) for r in completed_results)
+        total_trees_size = sum(r.get('trees_file_size_gb', 0) for r in completed_results)
+        total_threads_size = sum(r.get('threads_file_size_gb', 0) for r in completed_results)
+
+        # Filter to subreddits with ≥500 successful pairs for ranking
+        qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= 500]
+
+        # Add language information and rank
+        for result in qualified_results:
+            subreddit_name = result['subreddit']
+            result['language'] = subreddit_languages.get(subreddit_name, 'unknown')
+
+        # Separate English from other languages
+        english_results = [r for r in qualified_results if r.get('language') == 'en']
+        other_language_results = [r for r in qualified_results if r.get('language') != 'en']
+
+        # Rank English by JSD using utility (ascending=True means lower JSD = better rank)
+        english_results = rank_by_score(english_results, 'jsd_from_uniform', ascending=True)
+        top_100_english = english_results[:100]
+
+        # Other languages get no rank
+        for result in other_language_results:
+            result['rank'] = None
+
+        # Create summary statistics
+        elapsed = time.time() - start_time
+
+        summary = {
+            'summary': {
+                'total_subreddits_processed': len(subreddits_to_process),
+                'completed_subreddits': len(completed_results),
+                'failed_subreddits': len(failed_results),
+                'subreddits_with_500_plus_pairs': len(qualified_results),
+                'ranked_english': len(top_100_english),
+                'unranked_other_languages': len(other_language_results),
+                'total_trees_built': total_trees,
+                'total_comments_processed': total_comments,
+                'total_successful_pairs': total_successful_pairs,
+                'total_mod_comments': total_mod_comments,
+                'overall_success_rate': total_successful_pairs / total_mod_comments if total_mod_comments > 0 else 0,
+                'total_trees_size_gb': total_trees_size,
+                'total_threads_size_gb': total_threads_size,
+                'processing_time_seconds': elapsed,
+                'collection_date': time.strftime('%Y-%m-%d %H:%M:%S')
+            },
+            'subreddit_stats': top_100_english + other_language_results,
+            'failed_subreddits': [{'subreddit': r['subreddit'], 'error': r.get('error', 'Unknown')} for r in failed_results]
+        }
+
+        # Save summary
+        summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
+        write_json_file(summary, summary_file)
+
+        logger.info(f"🎉 Stage 6 Complete!")
+        logger.info(f"Time: {elapsed:.1f}s")
+        logger.info(f"📊 Processed {len(completed_results)}/{len(subreddits_to_process)} subreddits")
+        logger.info(f"🌳 Built {total_trees:,} comment trees")
+        logger.info(f"🧵 Created {total_successful_pairs:,} discussion thread pairs")
+        logger.info(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%" if total_mod_comments > 0 else "📈 No mod comments processed")
+        logger.info(f"🏆 Ranked English subreddits: {len(top_100_english)}")
+        logger.info(f"🌍 Other language subreddits: {len(other_language_results)}")
+        logger.info(f"Summary saved to: {summary_file}")
+
+        if failed_results:
+            logger.warning(f"⚠️  Failed subreddits ({len(failed_results)}):")
+            for result in failed_results[:10]:  # Show first 10
+                logger.warning(f"  {result['subreddit']}: {result.get('error', 'Unknown error')}")
+            if len(failed_results) > 10:
+                logger.warning(f"  ... and {len(failed_results) - 10} more")
+
+        log_stage_end(logger, 6, success=True, elapsed_time=elapsed)
+        return 0
+
+    except Exception as e:
+        log_error_and_continue(logger, e, "Stage 6 execution")
+        log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
         return 1
-
-    # Find subreddits with required input files
-    subreddits_to_process = []
-
-    for subreddit in subreddit_languages.keys():
-        submission_comments_file = os.path.join(PATHS['organized_comments'], f"{subreddit}_submission_comments.pkl")
-        match_file = os.path.join(PATHS['matched_comments'], f"{subreddit}_match.jsonl.zst")
-
-        if os.path.exists(submission_comments_file) and os.path.exists(match_file):
-            complete_rule_set = subreddit_rules.get(subreddit, {})
-            subreddits_to_process.append((subreddit, complete_rule_set))
-
-    if not subreddits_to_process:
-        print("❌ No subreddits found with required input files!")
-        return 1
-
-    print(f"Found {len(subreddits_to_process)} subreddits to process")
-    print(f"Using {PROCESSES} parallel processes")
-
-    # Process subreddits in parallel
-    results = process_files_parallel(subreddits_to_process, process_subreddit, PROCESSES)
-
-    # Collect statistics
-    completed_results = [r for r in results if r.get('status') == 'completed']
-    failed_results = [r for r in results if r.get('status') == 'failed']
-
-    total_trees = sum(r.get('trees_built', 0) for r in completed_results)
-    total_comments = sum(r.get('total_comments', 0) for r in completed_results)
-    total_successful_pairs = sum(r.get('successful_pairs', 0) for r in completed_results)
-    total_mod_comments = sum(r.get('total_mod_comments', 0) for r in completed_results)
-    total_trees_size = sum(r.get('trees_file_size_gb', 0) for r in completed_results)
-    total_threads_size = sum(r.get('threads_file_size_gb', 0) for r in completed_results)
-
-    # Filter to subreddits with ≥500 successful pairs for ranking
-    qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= 500]
-
-    # Add language information and rank
-    for result in qualified_results:
-        subreddit_name = result['subreddit']
-        result['language'] = subreddit_languages.get(subreddit_name, 'unknown')
-
-    # Separate English from other languages
-    english_results = [r for r in qualified_results if r.get('language') == 'en']
-    other_language_results = [r for r in qualified_results if r.get('language') != 'en']
-
-    # Rank English by JSD using utility (ascending=True means lower JSD = better rank)
-    english_results = rank_by_score(english_results, 'jsd_from_uniform', ascending=True)
-    top_100_english = english_results[:100]
-
-    # Other languages get no rank
-    for result in other_language_results:
-        result['rank'] = None
-
-    # Create summary statistics
-    elapsed = time.time() - start_time
-
-    summary = {
-        'summary': {
-            'total_subreddits_processed': len(subreddits_to_process),
-            'completed_subreddits': len(completed_results),
-            'failed_subreddits': len(failed_results),
-            'subreddits_with_500_plus_pairs': len(qualified_results),
-            'ranked_english': len(top_100_english),
-            'unranked_other_languages': len(other_language_results),
-            'total_trees_built': total_trees,
-            'total_comments_processed': total_comments,
-            'total_successful_pairs': total_successful_pairs,
-            'total_mod_comments': total_mod_comments,
-            'overall_success_rate': total_successful_pairs / total_mod_comments if total_mod_comments > 0 else 0,
-            'total_trees_size_gb': total_trees_size,
-            'total_threads_size_gb': total_threads_size,
-            'processing_time_seconds': elapsed,
-            'collection_date': time.strftime('%Y-%m-%d %H:%M:%S')
-        },
-        'subreddit_stats': top_100_english + other_language_results,
-        'failed_subreddits': [{'subreddit': r['subreddit'], 'error': r.get('error', 'Unknown')} for r in failed_results]
-    }
-
-    # Save summary
-    summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
-    write_json_file(summary, summary_file)
-
-    print(f"\n🎉 Stage 6 Complete!")
-    print(f"Time: {elapsed:.1f}s")
-    print(f"📊 Processed {len(completed_results)}/{len(subreddits_to_process)} subreddits")
-    print(f"🌳 Built {total_trees:,} comment trees")
-    print(f"🧵 Created {total_successful_pairs:,} discussion thread pairs")
-    print(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%" if total_mod_comments > 0 else "📈 No mod comments processed")
-    print(f"🏆 Ranked English subreddits: {len(top_100_english)}")
-    print(f"🌍 Other language subreddits: {len(other_language_results)}")
-    print(f"Summary saved to: {summary_file}")
-
-    if failed_results:
-        print(f"\n⚠️  Failed subreddits ({len(failed_results)}):")
-        for result in failed_results[:10]:  # Show first 10
-            print(f"  {result['subreddit']}: {result.get('error', 'Unknown error')}")
-        if len(failed_results) > 10:
-            print(f"  ... and {len(failed_results) - 10} more")
-
-    return 0
 
 
 if __name__ == "__main__":
