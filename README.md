@@ -21,31 +21,31 @@ This pipeline processes Reddit data through 4 main phases:
 ## Pipeline Flow
 
 ```mermaid
-flowchart TD
-    subgraph P1 ["Phase 1: Data Collection"]
-        direction LR
+flowchart LR
+    subgraph P1 ["Phase&nbsp;1:&nbsp;Data&nbsp;Collection"]
+        direction TB
         A[Stage 0: Download Data]:::phase1
         B[Stage 1: Collect Mod Comments]:::phase1
         C[Stage 2: Get Top 1000 SFW Subreddits]:::phase1
         A --> B --> C
     end
 
-    subgraph P2 ["Phase 2: Comment Filtering & Matching"]
-        direction LR
+    subgraph P2 ["Phase&nbsp;2:&nbsp;Comment&nbsp;Filtering&nbsp;&&nbsp;Matching"]
+        direction TB
         D[Stage 3: Filter and Consolidate]:::phase2
         E[Stage 4: Match Rules & Rank by JSD]:::phase2
         D --> E
     end
 
-    subgraph P3 ["Phase 3: Thread Construction"]
-        direction LR
+    subgraph P3 ["Phase&nbsp;3:&nbsp;Thread&nbsp;Construction"]
+        direction TB
         F[Stage 5: Collect Submission Comments]:::phase3
         G[Stage 6: Build Trees & Discussion Threads]:::phase3
         F --> G
     end
 
-    subgraph P4 ["Phase 4: Dataset Finalization"]
-        direction LR
+    subgraph P4 ["Phase&nbsp;4:&nbsp;Dataset&nbsp;Finalization"]
+        direction TB
         H[Stage 7: Collect Submissions]:::phase4
         I[Stage 8: Collect Media]:::phase4
         J[Stage 9: Finalize Dataset]:::phase4
