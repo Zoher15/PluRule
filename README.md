@@ -1,13 +1,13 @@
 # Reddit Mod Collection Pipeline
 
-A simple, DRY pipeline for collecting and processing Reddit moderation data. Transforms raw Reddit archives into structured discussion thread pairs for analysis.
+A simple, DRY pipeline for collecting and processing Reddit moderation data. Transforms raw Pushshift archives into structured discussion thread pairs for analysis.
 
 ## Overview
 
-This pipeline processes Reddit data through 4 main phases:
+This pipeline processes Reddit Pushshift data through 4 main phases:
 
 **Phase 1: Data Collection** (Stages 0-2)
-- Download Reddit archives, extract moderator comments, identify target subreddits
+- Download Reddit Pushshift archives, extract moderator comments, identify target subreddits
 
 **Phase 2: Comment Filtering & Matching** (Stages 3-4)
 - Filter comments for target subreddits, match to rules using embeddings, rank by quality
@@ -57,7 +57,7 @@ flowchart TD
     G --> H
 
     subgraph Sources ["Data Sources"]
-        K[Internet Archive<br/>Reddit Data]
+        K[Internet Archive<br/>Reddit Pushshift Data]
     end
 
     subgraph Files ["Downloaded Files"]
@@ -143,7 +143,7 @@ All other paths are generated automatically based on the data flow.
 
 | Stage | Script | Description | Key Outputs |
 |-------|--------|-------------|-------------|
-| 0 | `0_download_data.py` | Download Reddit archives from Internet Archive | RC_*.zst, RS_*.zst |
+| 0 | `0_download_data.py` | Download Reddit Pushshift archives from Internet Archive | RC_*.zst, RS_*.zst |
 | 1 | `1_collect_mod_comments.py` | Extract moderator comments from RC files | Mod comment rankings, filtered comments |
 | 2 | `2_get_top_sfw_subreddits.py` | Identify top 1000 SFW subreddits with rules | Top subreddit list |
 | 3 | `3_filter_and_consolidate.py` | Filter and consolidate mod comments for target subreddits | Consolidated subreddit files |
