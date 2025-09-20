@@ -6,6 +6,7 @@ All other paths are generated automatically based on data flow.
 """
 
 import os
+import multiprocessing
 
 # =============================================================================
 # BASE CONFIGURATION - Edit these for your environment
@@ -23,7 +24,11 @@ MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 1000
 MAX_MATCHED_COMMENTS = 1000
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
 FINAL_SUBREDDITS = 100
-PROCESSES = 128
+# Auto-detect number of CPU cores (use all available cores)
+PROCESSES = multiprocessing.cpu_count()
+
+# Alternative: Use 75% of available cores to leave some for system
+# PROCESSES = max(1, int(multiprocessing.cpu_count() * 0.75))
 
 # =============================================================================
 # DATA FLOW MAPPING - Shows what each stage produces and consumes
