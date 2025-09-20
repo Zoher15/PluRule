@@ -21,6 +21,11 @@ env/
 .idea/
 *.swp
 
+# SLURM job files
+*.err
+*.txt
+bigred3.sh
+
 # OS
 .DS_Store
 Thumbs.db
