@@ -89,10 +89,35 @@ flowchart TD
 
 ## Quick Start
 
+### 1. Environment Setup
+
+**Option A: Automatic setup (recommended)**
 ```bash
-# Install dependencies
+# Run setup script (creates conda env or venv automatically)
+./setup_env.sh
+
+# Activate environment
+conda activate reddit-mod-pipeline  # if conda was used
+# OR
+source venv/bin/activate  # if venv was used
+```
+
+**Option B: Manual setup**
+```bash
+# Create conda environment (recommended for ML dependencies)
+conda create -n reddit-mod-pipeline python=3.10 -y
+conda activate reddit-mod-pipeline
 pip install -r requirements.txt
 
+# OR create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Configure and Run
+
+```bash
 # Edit paths in config.py if needed
 # Then run full pipeline
 python run_pipeline.py
