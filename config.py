@@ -13,7 +13,7 @@ import multiprocessing
 # =============================================================================
 
 # Base directories
-BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline/data"
+BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline/"
 REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
 
 # Processing settings

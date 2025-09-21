@@ -50,8 +50,11 @@ def process_comment_line(line: str, subreddit_counts: dict = None) -> bool:
 
 def process_single_file(file_path: str) -> dict:
     """Process a single RC file and extract moderator comments."""
-    # Create worker logger
-    worker_logger = get_stage_logger(1, "collect_mod_comments")
+    # Extract RC filename for meaningful logging (e.g., "RC_2023-02")
+    rc_filename = os.path.basename(file_path).replace('.zst', '')
+
+    # Create worker logger with meaningful identifier
+    worker_logger = get_stage_logger(1, "collect_mod_comments", worker_identifier=rc_filename)
 
     input_file = file_path
     output_file = os.path.join(

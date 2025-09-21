@@ -252,11 +252,11 @@ def process_subreddit_media(args: tuple) -> Dict[str, Any]:
     """Process media downloads for a single subreddit."""
     subreddit_name, = args
 
-    # Create worker logger (same function works in worker processes)
-    worker_logger = get_stage_logger(8, "collect_media")
-
     # Normalize subreddit name for consistency
     normalized_subreddit = normalize_subreddit_name(subreddit_name)
+
+    # Create worker logger with subreddit identifier
+    worker_logger = get_stage_logger(8, "collect_media", worker_identifier=normalized_subreddit)
 
     worker_logger.info(f"🔄 Processing media for {subreddit_name}")
     start_time = time.time()

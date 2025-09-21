@@ -4,37 +4,53 @@ Simple unified logger that works for both main process and multiprocessing.
 """
 
 import logging
+import multiprocessing
 import os
-import threading
+import re
 from datetime import datetime
 from pathlib import Path
 
 
-def setup_stage_logger(stage_name: str, log_level: str = "INFO") -> logging.Logger:
+def setup_stage_logger(stage_name: str, log_level: str = "INFO", worker_identifier: str = None) -> logging.Logger:
     """
     Set up a unified logger for a pipeline stage that works with multiprocessing.
-    Uses thread-safe file writing and process-safe naming.
+    Creates stage-specific directories and separate logs for main vs worker processes.
 
     Args:
         stage_name: Name of the stage (e.g., "stage1_collect_mod_comments")
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+        worker_identifier: Meaningful name for worker (e.g., "RC_2023-02", "askreddit").
+                          If provided, creates worker log; if None, creates main log.
 
     Returns:
         Configured logger instance that works in both main and worker processes
     """
     from config import PATHS
 
-    # Create logs directory if it doesn't exist
-    log_dir = Path(PATHS['logs'])
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Extract stage number from stage_name (e.g., "stage1_collect_mod_comments" -> "1")
+    stage_match = re.match(r'stage(\d+)_', stage_name)
+    stage_num = stage_match.group(1) if stage_match else "unknown"
+
+    # Create stage-specific log directory using full stage name
+    base_log_dir = Path(PATHS['logs'])
+    stage_log_dir = base_log_dir / stage_name
+    stage_log_dir.mkdir(parents=True, exist_ok=True)
 
     # Create timestamp for log file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"{stage_name}_{timestamp}.log"
+
+    # Simple naming for main vs worker processes
+    if worker_identifier:
+        # Use meaningful worker identifier (e.g., "RC_2023-02", "askreddit")
+        log_file = stage_log_dir / f"{worker_identifier}_{timestamp}.log"
+    else:
+        log_file = stage_log_dir / f"main_{timestamp}.log"
 
     # Create logger with process-safe name
-    process_id = os.getpid()
-    logger_name = f"{stage_name}_{process_id}"
+    if worker_identifier:
+        logger_name = f"{stage_name}_{worker_identifier}"
+    else:
+        logger_name = f"{stage_name}_main"
     logger = logging.getLogger(logger_name)
     logger.setLevel(getattr(logging, log_level.upper()))
 
@@ -56,8 +72,7 @@ def setup_stage_logger(stage_name: str, log_level: str = "INFO") -> logging.Logg
     file_handler.setLevel(logging.DEBUG)  # Log everything to file
     file_handler.setFormatter(file_formatter)
 
-    # Add thread lock for file writing safety
-    file_handler.lock = threading.Lock()
+    # Note: Using default file handler locking for multiprocessing safety
     logger.addHandler(file_handler)
 
     # Console handler (for real-time feedback)
@@ -67,19 +82,24 @@ def setup_stage_logger(stage_name: str, log_level: str = "INFO") -> logging.Logg
     logger.addHandler(console_handler)
 
     # Log the initialization
-    logger.info(f"Logger initialized for {stage_name} (PID: {process_id})")
+    if worker_identifier:
+        logger.info(f"Worker logger initialized for {stage_name} ({worker_identifier})")
+    else:
+        logger.info(f"Main logger initialized for {stage_name}")
     logger.info(f"Log file: {log_file}")
 
     return logger
 
 
-def get_stage_logger(stage_num: int, stage_description: str = None) -> logging.Logger:
+def get_stage_logger(stage_num: int, stage_description: str = None, worker_identifier: str = None) -> logging.Logger:
     """
     Get a logger for a specific stage number.
 
     Args:
         stage_num: Stage number (0-9)
         stage_description: Optional description for the stage
+        worker_identifier: Meaningful name for worker (e.g., "RC_2023-02", "askreddit").
+                          If provided, creates worker log; if None, creates main log.
 
     Returns:
         Configured logger instance
@@ -89,7 +109,7 @@ def get_stage_logger(stage_num: int, stage_description: str = None) -> logging.L
     else:
         stage_name = f"stage{stage_num}"
 
-    return setup_stage_logger(stage_name)
+    return setup_stage_logger(stage_name, worker_identifier=worker_identifier)
 
 
 def log_stage_start(logger: logging.Logger, stage_num: int, stage_name: str):

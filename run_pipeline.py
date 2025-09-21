@@ -14,7 +14,8 @@ import sys
 import os
 import time
 
-from config import DATA_FLOW, print_pipeline_status, validate_stage_inputs
+from config import DATA_FLOW, print_pipeline_status, validate_stage_inputs, PATHS
+from utils.logging import get_stage_logger, setup_stage_logger, log_stage_start, log_stage_end
 
 
 def get_stage_script(stage_num: int) -> str:
@@ -29,12 +30,15 @@ def get_stage_script(stage_num: int) -> str:
     return os.path.join('scripts', script_name)
 
 
-def run_stage(stage_num: int) -> bool:
+def run_stage(stage_num: int, pipeline_logger=None) -> bool:
     """Run a single stage and return success status."""
     script_path = get_stage_script(stage_num)
 
     if not script_path or not os.path.exists(script_path):
-        print(f"❌ Stage {stage_num} script not found: {script_path}")
+        msg = f"❌ Stage {stage_num} script not found: {script_path}"
+        print(msg)
+        if pipeline_logger:
+            pipeline_logger.error(msg)
         return False
 
     stage_key = f"stage{stage_num}_" + list(DATA_FLOW.keys())[stage_num].split('_', 1)[1]
@@ -45,11 +49,23 @@ def run_stage(stage_num: int) -> bool:
     print(f"📜 Script: {script_path}")
     print(f"{'='*60}")
 
+    if pipeline_logger:
+        pipeline_logger.info(f"Starting Stage {stage_num}: {stage_info['name']}")
+        pipeline_logger.info(f"Script: {script_path}")
+
+        # Show where stage logs will be saved
+        stage_log_dir = f"{PATHS['logs']}/stage{stage_num}_{stage_key.split('_', 1)[1]}"
+        pipeline_logger.info(f"📂 Stage logs: {stage_log_dir}/")
+        print(f"📂 Stage logs: {stage_log_dir}/")
+
     # Validate inputs
     valid, msg = validate_stage_inputs(stage_num)
     if not valid:
-        print(f"❌ Input validation failed: {msg}")
+        error_msg = f"❌ Input validation failed: {msg}"
+        print(error_msg)
         print("💡 Make sure previous stages have completed successfully")
+        if pipeline_logger:
+            pipeline_logger.error(error_msg)
         return False
 
     # Run the script
@@ -63,31 +79,48 @@ def run_stage(stage_num: int) -> bool:
         )
 
         elapsed = time.time() - start_time
-        print(f"\n✅ Stage {stage_num} completed successfully in {elapsed:.1f}s")
+        success_msg = f"✅ Stage {stage_num} completed successfully in {elapsed:.1f}s"
+        print(f"\n{success_msg}")
+        if pipeline_logger:
+            pipeline_logger.info(success_msg)
         return True
 
     except subprocess.CalledProcessError as e:
         elapsed = time.time() - start_time
-        print(f"\n❌ Stage {stage_num} failed after {elapsed:.1f}s (exit code: {e.returncode})")
+        error_msg = f"❌ Stage {stage_num} failed after {elapsed:.1f}s (exit code: {e.returncode})"
+        print(f"\n{error_msg}")
+        if pipeline_logger:
+            pipeline_logger.error(error_msg)
         return False
 
     except KeyboardInterrupt:
         elapsed = time.time() - start_time
-        print(f"\n⏹️ Stage {stage_num} interrupted after {elapsed:.1f}s")
+        interrupt_msg = f"⏹️ Stage {stage_num} interrupted after {elapsed:.1f}s"
+        print(f"\n{interrupt_msg}")
+        if pipeline_logger:
+            pipeline_logger.warning(interrupt_msg)
         return False
 
 
 def run_pipeline(start_stage: int = 0, end_stage: int = 9, stop_on_failure: bool = True) -> int:
     """Run multiple pipeline stages."""
+    # Create pipeline logger
+    pipeline_logger = setup_stage_logger("pipeline_runner")
+
     print("🔄 Reddit Mod Collection Pipeline")
     print(f"📊 Running stages {start_stage}-{end_stage}")
+
+    pipeline_logger.info("🔄 Reddit Mod Collection Pipeline Started")
+    pipeline_logger.info(f"📊 Running stages {start_stage}-{end_stage}")
+    pipeline_logger.info(f"📂 Pipeline logs: {PATHS['logs']}/pipeline_runner/")
+    print(f"📂 Pipeline logs: {PATHS['logs']}/pipeline_runner/")
 
     pipeline_start = time.time()
     completed_stages = []
     failed_stages = []
 
     for stage_num in range(start_stage, end_stage + 1):
-        success = run_stage(stage_num)
+        success = run_stage(stage_num, pipeline_logger)
 
         if success:
             completed_stages.append(stage_num)
@@ -95,12 +128,14 @@ def run_pipeline(start_stage: int = 0, end_stage: int = 9, stop_on_failure: bool
             failed_stages.append(stage_num)
 
             if stop_on_failure:
-                print(f"\n🛑 Pipeline stopped due to stage {stage_num} failure")
+                stop_msg = f"🛑 Pipeline stopped due to stage {stage_num} failure"
+                print(f"\n{stop_msg}")
+                pipeline_logger.error(stop_msg)
                 break
 
     pipeline_elapsed = time.time() - pipeline_start
 
-    # Print final summary
+    # Print and log final summary
     print(f"\n{'='*60}")
     print("📋 Pipeline Summary")
     print(f"{'='*60}")
@@ -108,11 +143,21 @@ def run_pipeline(start_stage: int = 0, end_stage: int = 9, stop_on_failure: bool
     print(f"✅ Completed: {len(completed_stages)} stages")
     print(f"❌ Failed: {len(failed_stages)} stages")
 
+    # Log summary
+    pipeline_logger.info("📋 Pipeline Summary")
+    pipeline_logger.info(f"⏱️  Total time: {pipeline_elapsed:.1f}s")
+    pipeline_logger.info(f"✅ Completed: {len(completed_stages)} stages")
+    pipeline_logger.info(f"❌ Failed: {len(failed_stages)} stages")
+
     if completed_stages:
-        print(f"📈 Completed stages: {', '.join(map(str, completed_stages))}")
+        completed_msg = f"📈 Completed stages: {', '.join(map(str, completed_stages))}"
+        print(completed_msg)
+        pipeline_logger.info(completed_msg)
 
     if failed_stages:
-        print(f"📉 Failed stages: {', '.join(map(str, failed_stages))}")
+        failed_msg = f"📉 Failed stages: {', '.join(map(str, failed_stages))}"
+        print(failed_msg)
+        pipeline_logger.error(failed_msg)
 
     # Return appropriate exit code
     return 0 if not failed_stages else 1
@@ -159,7 +204,11 @@ def main():
             if args[0].isdigit():
                 stage_num = int(args[0])
                 if 0 <= stage_num <= 9:
-                    return 0 if run_stage(stage_num) else 1
+                    # Create pipeline logger for single stage run
+                    pipeline_logger = setup_stage_logger("pipeline_runner")
+                    pipeline_logger.info(f"📂 Pipeline logs: {PATHS['logs']}/pipeline_runner/")
+                    print(f"📂 Pipeline logs: {PATHS['logs']}/pipeline_runner/")
+                    return 0 if run_stage(stage_num, pipeline_logger) else 1
                 else:
                     print(f"❌ Invalid stage number: {stage_num} (must be 0-9)")
                     return 1

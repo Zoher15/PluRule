@@ -378,8 +378,8 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
     """Process single subreddit: build trees and create discussion threads."""
     subreddit_name, complete_rule_set = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(6, "build_trees_and_threads")
+    # Create worker logger with subreddit identifier
+    worker_logger = get_stage_logger(6, "build_trees_and_threads", worker_identifier=subreddit_name)
 
     worker_logger.info(f"🔄 Processing {subreddit_name}")
     start_time = time.time()

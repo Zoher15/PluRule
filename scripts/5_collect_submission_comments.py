@@ -76,10 +76,12 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
     """
     rc_file_path, subreddit_to_ids, target_subreddits, temp_dir = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(5, "collect_submission_comments")
-
     rc_filename = os.path.basename(rc_file_path)
+    # Extract RC identifier for meaningful logging (e.g., "RC_2023-02")
+    rc_identifier = rc_filename.replace('.zst', '')
+
+    # Create worker logger with meaningful identifier
+    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=rc_identifier)
     rc_date = rc_filename.split('_')[1].split('.')[0]  # Extract YYYY-MM
 
     def comment_processor(line: str, state: Dict) -> Dict[str, Any]:
@@ -166,8 +168,8 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
     """
     subreddit, target_submission_ids, temp_dir, output_dir = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(5, "collect_submission_comments")
+    # Create worker logger with subreddit identifier
+    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=subreddit)
 
     worker_logger.info(f"🔄 Organizing {subreddit} ({len(target_submission_ids)} target submissions)")
     start_time = time.time()

@@ -114,10 +114,12 @@ def process_rs_file(args: tuple) -> Dict[str, Any]:
     """
     rs_file_path, subreddit_submission_ids, temp_dir = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(7, "collect_submissions")
-
     rs_filename = os.path.basename(rs_file_path)
+    # Extract RS identifier for meaningful logging (e.g., "RS_2023-02")
+    rs_identifier = rs_filename.replace('.zst', '')
+
+    # Create worker logger with meaningful identifier
+    worker_logger = get_stage_logger(7, "collect_submissions", worker_identifier=rs_identifier)
     rs_date = rs_filename.split('_')[1].split('.')[0]  # Extract YYYY-MM
 
     def submission_processor(line: str, state: Dict) -> Dict[str, Any]:
@@ -189,8 +191,8 @@ def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
     """Consolidate temp files for a single subreddit into final output."""
     subreddit, temp_dir = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(7, "collect_submissions")
+    # Create worker logger with subreddit identifier
+    worker_logger = get_stage_logger(7, "collect_submissions", worker_identifier=subreddit)
 
     subreddit_temp_dir = os.path.join(temp_dir, subreddit)
 

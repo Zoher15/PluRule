@@ -99,8 +99,8 @@ def download_file(args: Tuple[str, str, str]) -> dict:
     """
     url, filename, file_type = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(0, "download_data")
+    # Create worker logger with filename identifier
+    worker_logger = get_stage_logger(0, "download_data", worker_identifier=filename)
 
     # Determine output directory
     if file_type == 'comments':

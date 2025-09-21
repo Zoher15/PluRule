@@ -63,10 +63,12 @@ def process_single_file(args: tuple) -> Dict[str, Any]:
     """
     file_path, target_subreddits = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(3, "filter_and_consolidate")
-
     file_name = os.path.basename(file_path)
+    # Extract RC identifier for meaningful logging (e.g., "RC_2023-02")
+    rc_identifier = file_name.replace('_mod_comments.zst', '')
+
+    # Create worker logger with meaningful identifier
+    worker_logger = get_stage_logger(3, "filter_and_consolidate", worker_identifier=rc_identifier)
     rc_date = file_name.replace('_mod_comments.zst', '').replace('RC_', '')
     temp_dir = os.path.join(PATHS['top_subreddits'], 'temp')
 
@@ -142,8 +144,8 @@ def consolidate_subreddit(args: tuple) -> Dict[str, Any]:
     """
     subreddit, _ = args
 
-    # Create worker logger
-    worker_logger = get_stage_logger(3, "filter_and_consolidate")
+    # Create worker logger with subreddit identifier
+    worker_logger = get_stage_logger(3, "filter_and_consolidate", worker_identifier=subreddit)
 
     temp_dir = os.path.join(PATHS['top_subreddits'], 'temp', subreddit)
 
