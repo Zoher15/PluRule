@@ -479,7 +479,7 @@ def main():
 
         # Save summary
         summary_file = os.path.join(PATHS['data'], 'stage8_media_collection_stats.json')
-        write_json_file(summary, summary_file)
+        write_json_file(summary, summary_file, pretty=True)
 
         # Log comprehensive summary
         summary_stats = {

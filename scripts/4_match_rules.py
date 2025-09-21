@@ -23,7 +23,7 @@ from config import (PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
                    SIMILARITY_THRESHOLD, EMBEDDING_MODEL, MIN_MATCHED_COMMENTS,
                    MAX_MATCHED_COMMENTS, create_directories)
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
-from utils.files import (read_json_file, write_json_file, process_files_parallel,
+from utils.files import (read_json_file, write_json_file,
                         read_zst_lines, json_loads, write_zst_json_objects)
 from utils.reddit import clean_rule_text, normalize_subreddit_name, validate_comment_structure, extract_submission_id
 from utils.stats import calculate_jsd_from_uniform, rank_by_score, analyze_rule_distribution
@@ -41,8 +41,8 @@ except ImportError:
     # Will log warning from main function when logger is available
 
 
-def load_subreddit_rules(logger) -> Dict[str, List[Dict[str, Any]]]:
-    """Load subreddit rules from Stage 2 output."""
+def load_subreddit_rules(logger) -> tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """Load subreddit rules and comment counts from Stage 2 output."""
     rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
 
     if not os.path.exists(rules_file):
@@ -53,12 +53,16 @@ def load_subreddit_rules(logger) -> Dict[str, List[Dict[str, Any]]]:
     data = read_json_file(rules_file)
 
     subreddit_rules = {}
+    subreddit_comment_counts = {}
     for entry in data['subreddits']:
         subreddit_data = entry['subreddit']
         subreddit_name = subreddit_data.get('display_name', '').lower()
 
         if not subreddit_name:
             continue
+
+        # Store comment count
+        subreddit_comment_counts[subreddit_name] = subreddit_data.get('mod_comment_count', 0)
 
         rules = []
         for rule in entry.get('rules', []):
@@ -81,7 +85,7 @@ def load_subreddit_rules(logger) -> Dict[str, List[Dict[str, Any]]]:
         subreddit_rules[subreddit_name] = rules
 
     logger.info(f"Loaded rules for {len(subreddit_rules)} subreddits")
-    return subreddit_rules
+    return subreddit_rules, subreddit_comment_counts
 
 
 def pretokenize_inputs(comments: List[Dict[str, Any]], rules: List[Dict[str, Any]],
@@ -193,9 +197,10 @@ class SimpleCommentRuleMatcher:
             self.model = LLM(
                 model=self.model_name,
                 task="embed",
-                gpu_memory_utilization=0.95,
+                gpu_memory_utilization=0.97,
                 enforce_eager=True,
-                max_model_len=max_model_len + 50  # Add buffer for safety
+                max_model_len=max_model_len + 50,  # Add buffer for safety
+                seed=0  # Ensure deterministic results
             )
             print("✅ Embedding model loaded successfully")
         except Exception as e:
@@ -272,14 +277,22 @@ class SimpleCommentRuleMatcher:
                     rule_match_counts[best_rule['rule_index']] += 1
                     matched_count += 1
 
-            # Prepare statistics
+            # Prepare statistics with all rules (including those with 0 matches)
+            rule_matches = {}
+            for rule in rules:
+                rule_index = rule['rule_index']
+                rule_matches[str(rule_index)] = rule_match_counts.get(rule_index, 0)
+
+            # Sort by rule index (convert back to int for sorting, then to string)
+            rule_matches = dict(sorted(rule_matches.items(), key=lambda x: int(x[0])))
+
             stats = {
                 "total_comments": len(comments),
                 "matched_comments": matched_count,
                 "ambiguous_matches": ambiguous_count,
                 "match_percentage": (matched_count / len(comments) * 100) if comments else 0.0,
                 "ambiguous_percentage": (ambiguous_count / len(comments) * 100) if comments else 0.0,
-                "rule_matches": dict(rule_match_counts)
+                "rule_matches": rule_matches
             }
 
             return matched_comments, stats
@@ -297,146 +310,10 @@ class SimpleCommentRuleMatcher:
             }
 
 
-def process_single_subreddit(args: tuple) -> Dict[str, Any]:
-    """Process a single subreddit for comment-rule matching."""
-    subreddit_name, subreddit_rules, cuda_device = args
-
-    # Set CUDA device for this process
-    if cuda_device is not None:
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(cuda_device)
-        print(f"🔄 Processing r/{subreddit_name} on CUDA:{cuda_device}")
-    else:
-        print(f"🔄 Processing r/{subreddit_name} (CPU mode)")
-
-    input_file = os.path.join(PATHS['top_subreddits'], f"{subreddit_name}_mod_comments.jsonl.zst")
-    output_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
-    stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
-
-    print(f"🔄 Processing r/{subreddit_name}")
-
-    # Check if input file exists
-    if not os.path.exists(input_file):
-        return {
-            "subreddit": subreddit_name,
-            "error": f"Input file not found: {input_file}"
-        }
-
-    # Load comments with validation and normalization
-    try:
-        lines = read_zst_lines(input_file)
-
-        # Parse and validate comments
-        all_comments = []
-        for line in lines:
-            if line.strip():
-                try:
-                    comment = json_loads(line)
-
-                    # Validate comment structure
-                    if validate_comment_structure(comment):
-                        # Normalize subreddit name for consistency
-                        comment['subreddit'] = normalize_subreddit_name(comment.get('subreddit', ''))
-                        all_comments.append(comment)
-
-                except Exception:
-                    continue  # Skip malformed comments
-
-        comments = all_comments
-        rules = subreddit_rules.get(subreddit_name, [])
-
-        print(f"  Loaded {len(comments)} valid comments and {len(rules)} rules")
-
-    except Exception as e:
-        return {
-            "subreddit": subreddit_name,
-            "error": f"Error loading comments: {e}"
-        }
-
-    # Skip if only one rule (no point in similarity matching)
-    if len(rules) <= 1:
-        stats = {
-            "total_comments": len(comments),
-            "matched_comments": 0,
-            "ambiguous_matches": 0,
-            "match_percentage": 0.0,
-            "ambiguous_percentage": 0.0,
-            "rule_matches": {},
-            "skipped_reason": "Only one rule or no rules - no similarity matching needed"
-        }
-        matched_comments = []
-    else:
-        # Pretokenize inputs to get optimal max_model_len
-        task_description = "Which rule is this moderator's comment referring to?"
-        print(f"  Pretokenizing inputs...")
-        tokenized_comments, tokenized_rules, max_length = pretokenize_inputs(
-            comments, rules, EMBEDDING_MODEL, task_description
-        )
-
-        # Calculate optimal max_model_len with buffer
-        optimal_max_len = max(max_length + 50, 512)  # At least 512, plus 50 token buffer
-        print(f"  Using optimal max_model_len={optimal_max_len}")
-
-        # Initialize matcher with optimal settings
-        matcher = SimpleCommentRuleMatcher(
-            similarity_threshold=SIMILARITY_THRESHOLD,
-            max_model_len=optimal_max_len
-        )
-
-        # Match using pretokenized inputs
-        matched_comments, stats = matcher.match_comments_to_rules_pretokenized(
-            comments, rules, tokenized_comments, tokenized_rules
-        )
-
-        # Add tokenization stats
-        stats['max_token_length'] = max_length
-        stats['optimal_max_len'] = optimal_max_len
-
-        # Sample matched comments and extract submission IDs
-        if matched_comments:
-            import random
-            random.seed(0)  # Consistent sampling
-            sample_size = min(len(matched_comments), MAX_MATCHED_COMMENTS)
-            sampled_comments = random.sample(matched_comments, sample_size)
-            submission_ids = extract_submission_ids(sampled_comments)
-            stats['submission_ids'] = submission_ids
-            stats['sampled_comments_count'] = len(sampled_comments)
-            stats['unique_submission_ids'] = len(submission_ids)
-            print(f"  📋 Sampled {len(sampled_comments)} comments, found {len(submission_ids)} unique submission IDs")
-        else:
-            stats['submission_ids'] = []
-            stats['sampled_comments_count'] = 0
-            stats['unique_submission_ids'] = 0
-
-
-    # Add subreddit info to stats
-    stats['subreddit'] = subreddit_name
-    stats['total_rules'] = len(rules)
-
-    # Save matched comments if any
-    if matched_comments:
-        try:
-            write_zst_json_objects(output_file, matched_comments)
-            print(f"  ✅ Saved {len(matched_comments)} matched comments")
-        except Exception as e:
-            stats['save_error'] = str(e)
-            print(f"  ❌ Error saving matched comments: {e}")
-
-    # Save stats
-    try:
-        write_json_file(stats, stats_file)
-    except Exception as e:
-        print(f"  ⚠️  Error saving stats: {e}")
-
-    match_pct = stats.get('match_percentage', 0)
-    ambiguous_count = stats.get('ambiguous_matches', 0)
-    ambiguous_pct = stats.get('ambiguous_percentage', 0)
-    print(f"  📊 {len(comments)} comments, {len(matched_comments)} matched ({match_pct:.1f}%), {ambiguous_count} ambiguous ({ambiguous_pct:.1f}%)")
-
-    return stats
-
-
 def main():
     """Main execution function."""
+    # No longer need multiprocessing start method since we use subprocess
+
     # Initialize logging
     logger = get_stage_logger(4, "match_rules")
     log_stage_start(logger, 4, "Match Comments to Rules")
@@ -454,17 +331,17 @@ def main():
             log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        # Load subreddit rules
+        # Load subreddit rules and comment counts
         logger.info("📚 Loading subreddit rules...")
-        subreddit_rules = load_subreddit_rules(logger)
+        subreddit_rules, subreddit_comment_counts = load_subreddit_rules(logger)
 
         if not subreddit_rules:
             logger.error("❌ No subreddit rules loaded!")
             log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        # Get subreddit files to process
-        subreddit_files = []
+        # Get subreddit files to process, sorted by mod comment count (highest first)
+        available_subreddits = []
         top_subreddits_dir = PATHS['top_subreddits']
 
         if not os.path.exists(top_subreddits_dir):
@@ -476,12 +353,29 @@ def main():
             if filename.endswith('_mod_comments.jsonl.zst'):
                 subreddit = filename.replace('_mod_comments.jsonl.zst', '')
                 if subreddit in subreddit_rules:
-                    subreddit_files.append(subreddit)
+                    # Skip subreddits with only one rule (no ambiguity to resolve)
+                    rule_count = len(subreddit_rules[subreddit])
+                    if rule_count <= 1:
+                        logger.info(f"⏭️  Skipping r/{subreddit}: only {rule_count} rule(s)")
+                        continue
 
-        if not subreddit_files:
+                    comment_count = subreddit_comment_counts.get(subreddit, 0)
+                    available_subreddits.append((subreddit, comment_count))
+
+        if not available_subreddits:
             logger.error("❌ No subreddit files found to process!")
             log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
             return 1
+
+        # Sort by mod comment count (highest first)
+        available_subreddits.sort(key=lambda x: x[1], reverse=True)
+        subreddit_files = [subreddit for subreddit, _ in available_subreddits]
+
+        logger.info(f"📊 Processing {len(subreddit_files)} subreddits (sorted by mod comment count):")
+        for i, (subreddit, count) in enumerate(available_subreddits[:10]):  # Show top 10
+            logger.info(f"  {i+1:2d}. r/{subreddit}: {count:,} mod comments")
+        if len(available_subreddits) > 10:
+            logger.info(f"  ... and {len(available_subreddits) - 10} more subreddits")
 
         # Get available CUDA devices
         cuda_devices = get_available_cuda_devices()
@@ -497,14 +391,98 @@ def main():
 
         logger.info(f"Found {len(subreddit_files)} subreddit files to process")
 
-        # Assign CUDA devices to subreddits in round-robin fashion
-        process_args = []
-        for i, subreddit in enumerate(subreddit_files):
-            cuda_device = cuda_devices[i % len(cuda_devices)]
-            process_args.append((subreddit, subreddit_rules, cuda_device))
+        logger.info("🚀 Processing subreddits using dynamic CUDA assignment...")
 
-        logger.info("🚀 Processing subreddits...")
-        results = process_files_parallel(process_args, process_single_subreddit, num_workers, logger)
+        # Save rules to temporary file for subprocess
+        import tempfile
+        rules_temp_file = os.path.join(PATHS['data'], 'temp_rules.json')
+        write_json_file(subreddit_rules, rules_temp_file, pretty=False)
+
+        # Process subreddits using subprocess calls with dynamic CUDA assignment
+        import subprocess
+        import concurrent.futures
+        import queue
+        import threading
+
+        def run_single_subreddit(subreddit_name, cuda_device):
+            cmd = [
+                sys.executable,
+                'scripts/4_match_rules_single.py',
+                subreddit_name,
+                str(cuda_device) if cuda_device is not None else "None",
+                rules_temp_file
+            ]
+
+            try:
+                print(f"🚀 Starting r/{subreddit_name} on CUDA:{cuda_device}")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 min timeout
+
+                # Show subprocess output for debugging
+                if result.stdout.strip():
+                    print(f"📝 r/{subreddit_name} output: {result.stdout.strip()}")
+
+                if result.returncode == 0:
+                    print(f"✅ Completed r/{subreddit_name}")
+                    # Load the stats file to return results
+                    stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
+                    if os.path.exists(stats_file):
+                        return read_json_file(stats_file)
+                    else:
+                        return {"subreddit": subreddit_name, "error": "Stats file not created"}
+                else:
+                    error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                    print(f"❌ Failed r/{subreddit_name}: {error_msg}")
+                    if result.stderr.strip():
+                        print(f"🔍 r/{subreddit_name} stderr: {result.stderr.strip()}")
+                    return {"subreddit": subreddit_name, "error": error_msg}
+            except subprocess.TimeoutExpired:
+                return {"subreddit": subreddit_name, "error": "Process timeout (30 min)"}
+            except Exception as e:
+                return {"subreddit": subreddit_name, "error": str(e)}
+
+        # Create work queue and assign each CUDA device as a worker
+        subreddit_queue = queue.Queue()
+        for subreddit in subreddit_files:
+            subreddit_queue.put(subreddit)
+
+        def worker_with_cuda(cuda_device):
+            """Worker function that continuously processes subreddits on assigned CUDA device"""
+            results = []
+            while True:
+                try:
+                    subreddit_name = subreddit_queue.get(timeout=1)  # 1 second timeout
+                except queue.Empty:
+                    break  # No more subreddits to process
+
+                # Process this subreddit on the assigned CUDA device
+                result = run_single_subreddit(subreddit_name, cuda_device)
+                results.append(result)
+                subreddit_queue.task_done()
+
+            return results
+
+        # Use ThreadPoolExecutor with exactly num_workers (one per CUDA device)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit one worker per CUDA device
+            future_to_cuda = {executor.submit(worker_with_cuda, cuda_device): cuda_device
+                             for cuda_device in cuda_devices}
+
+            # Collect all results
+            all_results = []
+            for future in concurrent.futures.as_completed(future_to_cuda):
+                cuda_device = future_to_cuda[future]
+                try:
+                    worker_results = future.result()
+                    all_results.extend(worker_results)
+                    print(f"🏁 CUDA:{cuda_device} worker completed")
+                except Exception as e:
+                    print(f"❌ CUDA:{cuda_device} worker failed: {e}")
+
+        results = all_results
+
+        # Cleanup temp file
+        if os.path.exists(rules_temp_file):
+            os.remove(rules_temp_file)
 
         # Aggregate results
         successful_results = [r for r in results if not r.get("error")]
@@ -557,11 +535,11 @@ def main():
         }
 
         summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary.json')
-        write_json_file(summary, summary_file)
+        write_json_file(summary, summary_file, pretty=True)
 
         # Save ranked subreddits for Stage 5 (replaces the need for separate stage)
         rankings_file = os.path.join(PATHS['data'], 'subreddit_match_rankings.json')
-        write_json_file(ranked_results, rankings_file)
+        write_json_file(ranked_results, rankings_file, pretty=True)
 
         # Create submission IDs file for Stage 5 (replaces the need for separate stage)
         submission_ids_data = {}
@@ -586,7 +564,7 @@ def main():
         }
 
         submission_ids_file = os.path.join(PATHS['data'], 'subreddit_submission_ids.json')
-        write_json_file(submission_ids_output, submission_ids_file)
+        write_json_file(submission_ids_output, submission_ids_file, pretty=True)
 
         elapsed = time.time() - start_time
 

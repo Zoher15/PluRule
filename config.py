@@ -18,7 +18,7 @@ REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
 
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
-TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 1000
+TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 2000
 SIMILARITY_THRESHOLD = 0.8
 MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 1000
 MAX_MATCHED_COMMENTS = 1000
@@ -212,7 +212,9 @@ def get_input_paths_for_stage(stage_num):
 
     # Add specific files
     for file_name in stage_info.get('input_files', []):
-        input_paths.append(os.path.join(PATHS['data'], file_name))
+        # Substitute template variables
+        resolved_file_name = file_name.format(TOP_N_SUBREDDITS_WITH_MOD_COMMENTS=TOP_N_SUBREDDITS_WITH_MOD_COMMENTS)
+        input_paths.append(os.path.join(PATHS['data'], resolved_file_name))
 
     return input_paths
 

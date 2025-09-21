@@ -13,19 +13,24 @@ import multiprocessing
 from typing import Callable, List, Tuple, Dict, Any
 
 
+
+
 # JSON parsing with fallback
 try:
     import orjson
     json_loads = orjson.loads
     json_dumps = lambda obj: orjson.dumps(obj).decode('utf-8')
+    json_dumps_pretty = lambda obj: orjson.dumps(obj, option=orjson.OPT_INDENT_2).decode('utf-8')
 except ImportError:
     try:
         import ujson
         json_loads = ujson.loads
         json_dumps = ujson.dumps
+        json_dumps_pretty = lambda obj: ujson.dumps(obj, indent=2)
     except ImportError:
         json_loads = json.loads
         json_dumps = json.dumps
+        json_dumps_pretty = lambda obj: json.dumps(obj, indent=2)
 
 
 def read_and_decode(reader, chunk_size=2**24, max_window_size=(2**29)*2, previous_chunk=None, bytes_read=0):
@@ -241,12 +246,22 @@ def read_zst_lines(file_path: str, max_lines: int = None) -> List[str]:
     return lines
 
 
-def write_json_file(data: Any, file_path: str):
-    """Write data to JSON file."""
+def write_json_file(data: Any, file_path: str, pretty: bool = False):
+    """Write data to JSON file.
+
+    Args:
+        data: Data to write
+        file_path: Path to write to
+        pretty: If True, use indentation for readability (for stats/summary files)
+                If False, use compact format (for data files like comments/submissions)
+    """
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     with open(file_path, 'w') as f:
-        f.write(json_dumps(data))
+        if pretty:
+            f.write(json_dumps_pretty(data))
+        else:
+            f.write(json_dumps(data))
 
 
 def read_json_file(file_path: str) -> Any:

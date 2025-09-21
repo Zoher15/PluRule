@@ -188,7 +188,7 @@ def main():
         logger.info("📈 Generating subreddit rankings...")
         rankings_data = generate_rankings(subreddit_counts)
         rankings_file = os.path.join(PATHS['data'], 'stage1_subreddit_mod_comment_rankings.json')
-        write_json_file(rankings_data, rankings_file)
+        write_json_file(rankings_data, rankings_file, pretty=True)
 
         # Print summary
         elapsed = time.time() - start_time

@@ -135,6 +135,48 @@ def extract_community_rules(reddit: object, subreddit_name: str, logger) -> List
         return []
 
 
+def process_subreddit_with_retry(reddit: object, subreddit_name: str, original_rank: int, mod_comment_count: int, logger) -> Optional[Dict[str, Any]]:
+    """Process a single subreddit with retry logic for rate limiting."""
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        try:
+            # Check if NSFW
+            is_nsfw = check_nsfw_status(reddit, subreddit_name, logger)
+            if is_nsfw:
+                return None  # NSFW, skip
+
+            # Get subreddit data
+            subreddit_data = extract_subreddit_data(reddit, subreddit_name, original_rank, mod_comment_count, logger)
+            if not subreddit_data:
+                return None
+
+            # Get community rules
+            rules_data = extract_community_rules(reddit, subreddit_name, logger)
+
+            # Add SFW rank (will be set by caller)
+            return {
+                'subreddit': subreddit_data,
+                'rules': rules_data
+            }
+
+        except Exception as e:
+            error_str = str(e)
+            # Only retry on rate limiting (429) or server errors (5xx)
+            if "429" in error_str or any(code in error_str for code in ["500", "502", "503", "504"]):
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5  # 5s, 10s, 15s backoff for rate limits
+                    logger.warning(f"⚠️  Rate limited/server error for r/{subreddit_name} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+            # For non-retryable errors or final attempt, log and skip
+            logger.warning(f"⚠️  Error processing r/{subreddit_name}: {e}")
+            return None
+
+    return None
+
+
 def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger) -> List[Dict[str, Any]]:
     """Collect top N SFW subreddits with full metadata and rules."""
     logger.info(f"🚀 Collecting top {TOP_N_SUBREDDITS_WITH_MOD_COMMENTS} SFW subreddits...")
@@ -160,34 +202,20 @@ def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger
 
             checked_count += 1
 
-            # Check if NSFW
-            is_nsfw = check_nsfw_status(reddit, subreddit_name, logger)
+            # Process subreddit with retry logic
+            sfw_entry = process_subreddit_with_retry(reddit, subreddit_name, original_rank, mod_comment_count, logger)
 
-            if is_nsfw:
+            if not sfw_entry:
                 nsfw_skipped += 1
-                logger.info(f"🔒 Skipping r/{subreddit_name} (NSFW) - rank {original_rank}")
+                logger.info(f"🔒 Skipping r/{subreddit_name} (NSFW or error) - rank {original_rank}")
                 continue
-
-            # Get subreddit data
-            subreddit_data = extract_subreddit_data(reddit, subreddit_name, original_rank, mod_comment_count, logger)
-            if not subreddit_data:
-                continue
-
-            # Get community rules
-            rules_data = extract_community_rules(reddit, subreddit_name, logger)
 
             # Add SFW rank
-            subreddit_data['sfw_rank'] = len(sfw_subreddits) + 1
-
-            # Create entry
-            sfw_entry = {
-                'subreddit': subreddit_data,
-                'rules': rules_data
-            }
+            sfw_entry['subreddit']['sfw_rank'] = len(sfw_subreddits) + 1
 
             sfw_subreddits.append(sfw_entry)
 
-            logger.info(f"✅ r/{subreddit_name} - SFW rank {len(sfw_subreddits)} (mod rank {original_rank}) - {len(rules_data)} rules")
+            logger.info(f"✅ r/{subreddit_name} - SFW rank {len(sfw_subreddits)} (mod rank {original_rank}) - {len(sfw_entry['rules'])} rules")
 
             if progress_bar:
                 progress_bar.update(1)
@@ -262,7 +290,7 @@ def main():
 
         # Save results
         output_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
-        write_json_file(output_data, output_file)
+        write_json_file(output_data, output_file, pretty=True)
 
         # Print summary
         elapsed = time.time() - start_time

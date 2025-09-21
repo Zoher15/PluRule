@@ -362,7 +362,7 @@ def main():
             ]
         }
 
-        write_json_file(stats_data, stats_file)
+        write_json_file(stats_data, stats_file, pretty=True)
 
         # Final summary
         overall_elapsed = time.time() - overall_start

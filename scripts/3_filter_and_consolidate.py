@@ -347,7 +347,7 @@ def main():
         }
 
         summary_file = os.path.join(PATHS['data'], 'stage3_filter_and_consolidate_summary.json')
-        write_json_file(summary, summary_file)
+        write_json_file(summary, summary_file, pretty=True)
 
         logger.info(f"🎉 Stage 3 Complete!")
         logger.info(f"Time: {elapsed:.1f}s")
