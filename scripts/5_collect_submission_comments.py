@@ -51,14 +51,15 @@ def load_submission_ids(logger):
     logger.info(f"📋 Loaded {len(all_submission_ids)} submission IDs from {len(subreddit_to_ids)} subreddits")
     return all_submission_ids, subreddit_to_ids, target_subreddits
 
-def get_rc_files():
+def get_rc_files(logger=None):
     """Get list of RC files in date range."""
     from utils.files import get_files_in_date_range
 
     return get_files_in_date_range(
         PATHS['reddit_comments'],
         'RC_',
-        DATE_RANGE
+        DATE_RANGE,
+        logger
     )
 
 
@@ -125,7 +126,7 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
 
     try:
         # Process with multi-output utility
-        stats = process_zst_file_multi(rc_file_path, comment_processor, {})
+        stats = process_zst_file_multi(rc_file_path, comment_processor, {}, logger=worker_logger)
 
         elapsed = time.time() - start_time
         subreddits_with_comments = len(stats["output_stats"])
@@ -270,7 +271,7 @@ def main():
         _, subreddit_to_ids, target_subreddits = load_submission_ids(logger)
 
         # Get RC files to process
-        rc_files = get_rc_files()
+        rc_files = get_rc_files(logger)
         if not rc_files:
             logger.error("❌ No RC files found to process")
             log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
@@ -285,7 +286,7 @@ def main():
         phase1_start = time.time()
 
         rc_args = [(rc_file, subreddit_to_ids, target_subreddits, temp_dir) for rc_file in rc_files]
-        rc_results = process_files_parallel(rc_args, process_rc_file, PROCESSES)
+        rc_results = process_files_parallel(rc_args, process_rc_file, PROCESSES, logger)
 
         phase1_elapsed = time.time() - phase1_start
         successful_rc = [r for r in rc_results if r['success']]
@@ -302,7 +303,7 @@ def main():
 
         subreddit_args = [(subreddit, target_ids, temp_dir, PATHS['organized_comments'])
                           for subreddit, target_ids in subreddit_to_ids.items()]
-        org_results = process_files_parallel(subreddit_args, organize_subreddit_comments, PROCESSES)
+        org_results = process_files_parallel(subreddit_args, organize_subreddit_comments, PROCESSES, logger)
 
         phase2_elapsed = time.time() - phase2_start
         successful_orgs = [r for r in org_results if r['success']]

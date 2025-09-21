@@ -413,7 +413,7 @@ def main():
 
         # Process subreddits in parallel
         subreddit_args = [(subreddit,) for subreddit in qualified_subreddits]
-        results = process_files_parallel(subreddit_args, process_subreddit_media, PROCESSES)
+        results = process_files_parallel(subreddit_args, process_subreddit_media, PROCESSES, logger)
 
         # Collect statistics
         successful_results = [r for r in results if r.get('success', False)]

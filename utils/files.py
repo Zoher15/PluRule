@@ -45,7 +45,7 @@ def read_and_decode(reader, chunk_size=2**24, max_window_size=(2**29)*2, previou
 
 
 def process_zst_file(input_file: str, output_file: str, line_processor: Callable[[str], bool],
-                     progress_interval: int = 10_000_000) -> Dict[str, int]:
+                     progress_interval: int = 10_000_000, logger=None) -> Dict[str, int]:
     """
     Process a compressed file line by line with single output.
 
@@ -54,6 +54,7 @@ def process_zst_file(input_file: str, output_file: str, line_processor: Callable
         output_file: Path to output .zst file
         line_processor: Function that takes a line and returns True if it should be kept
         progress_interval: Log progress every N lines
+        logger: Optional logger for progress messages (if None, uses print)
 
     Returns:
         Dictionary with processing statistics
@@ -64,11 +65,11 @@ def process_zst_file(input_file: str, output_file: str, line_processor: Callable
             return {'matched': True, 'output_files': [output_file], 'data': line}
         return {'matched': False}
 
-    return process_zst_file_multi(input_file, single_output_processor, {}, progress_interval)
+    return process_zst_file_multi(input_file, single_output_processor, {}, progress_interval, logger)
 
 
 def process_zst_file_multi(input_file: str, line_processor: Callable[[str, Dict], Dict[str, Any]],
-                          processor_state: Dict[str, Any], progress_interval: int = 10_000_000) -> Dict[str, int]:
+                          processor_state: Dict[str, Any], progress_interval: int = 10_000_000, logger=None) -> Dict[str, int]:
     """
     Process a compressed file line by line with multi-output support.
 
@@ -79,6 +80,7 @@ def process_zst_file_multi(input_file: str, line_processor: Callable[[str, Dict]
                        or {'matched': False} for skipped lines
         processor_state: Mutable state dict passed to line_processor
         progress_interval: Log progress every N lines
+        logger: Optional logger for progress messages (if None, uses print)
 
     Returns:
         Dictionary with processing statistics including per-output stats
@@ -92,7 +94,11 @@ def process_zst_file_multi(input_file: str, line_processor: Callable[[str, Dict]
     start_time = time.time()
 
     file_size = os.path.getsize(input_file)
-    print(f"Processing {os.path.basename(input_file)} ({file_size / (1024**3):.1f} GB)")
+    msg = f"Processing {os.path.basename(input_file)} ({file_size / (1024**3):.1f} GB)"
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
 
     # Track open writers for multiple outputs
     open_writers = {}
@@ -118,8 +124,12 @@ def process_zst_file_multi(input_file: str, line_processor: Callable[[str, Dict]
                         if stats["lines_processed"] % progress_interval == 0:
                             elapsed = time.time() - start_time
                             rate = stats["lines_processed"] / elapsed if elapsed > 0 else 0
-                            print(f"  Progress: {stats['lines_processed']:,} lines, "
-                                  f"{stats['lines_matched']:,} matched ({rate:,.0f} lines/sec)")
+                            progress_msg = (f"  Progress: {stats['lines_processed']:,} lines, "
+                                          f"{stats['lines_matched']:,} matched ({rate:,.0f} lines/sec)")
+                            if logger:
+                                logger.info(progress_msg)
+                            else:
+                                print(progress_msg)
 
                         try:
                             result = line_processor(line.strip(), processor_state)
@@ -171,13 +181,21 @@ def process_zst_file_multi(input_file: str, line_processor: Callable[[str, Dict]
                 writer.close()
             except:
                 pass
-        print(f"Error processing {input_file}: {e}")
+        msg = f"Error processing {input_file}: {e}"
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
         raise
 
     elapsed = time.time() - start_time
     rate = stats["lines_processed"] / elapsed if elapsed > 0 else 0
-    print(f"Completed {os.path.basename(input_file)}: {stats['lines_processed']:,} lines, "
-          f"{stats['lines_matched']:,} matched in {elapsed:.1f}s ({rate:,.0f} lines/sec)")
+    msg = (f"Completed {os.path.basename(input_file)}: {stats['lines_processed']:,} lines, "
+           f"{stats['lines_matched']:,} matched in {elapsed:.1f}s ({rate:,.0f} lines/sec)")
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
 
     return stats
 
@@ -237,7 +255,7 @@ def read_json_file(file_path: str) -> Any:
         return json.loads(f.read())
 
 
-def get_files_in_date_range(folder: str, prefix: str, date_range: Tuple[str, str]) -> List[str]:
+def get_files_in_date_range(folder: str, prefix: str, date_range: Tuple[str, str], logger=None) -> List[str]:
     """
     Get files in a folder that match prefix and fall within date range.
 
@@ -245,12 +263,17 @@ def get_files_in_date_range(folder: str, prefix: str, date_range: Tuple[str, str
         folder: Directory to search
         prefix: File prefix (e.g., "RC_", "RS_")
         date_range: Tuple of (start_date, end_date) in YYYY-MM format
+        logger: Optional logger for messages (if None, uses print)
 
     Returns:
         List of file paths sorted by date (newest first)
     """
     if not os.path.exists(folder):
-        print(f"Warning: Directory {folder} does not exist")
+        msg = f"Warning: Directory {folder} does not exist"
+        if logger:
+            logger.warning(msg)
+        else:
+            print(msg)
         return []
 
     start_date, end_date = date_range
@@ -266,16 +289,24 @@ def get_files_in_date_range(folder: str, prefix: str, date_range: Tuple[str, str
                     files.append(os.path.join(folder, filename))
 
             except (IndexError, ValueError):
-                print(f"Warning: Could not parse date from filename: {filename}")
+                msg = f"Warning: Could not parse date from filename: {filename}"
+                if logger:
+                    logger.warning(msg)
+                else:
+                    print(msg)
 
     # Sort by date (newest first)
     files.sort(reverse=True)
-    print(f"Found {len(files)} {prefix} files in date range {start_date} to {end_date}")
+    msg = f"Found {len(files)} {prefix} files in date range {start_date} to {end_date}"
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
 
     return files
 
 
-def process_files_parallel(files: List[str], process_func: Callable, processes: int = None) -> List[Any]:
+def process_files_parallel(files: List[str], process_func: Callable, processes: int = None, logger=None) -> List[Any]:
     """
     Process multiple files in parallel.
 
@@ -283,6 +314,7 @@ def process_files_parallel(files: List[str], process_func: Callable, processes: 
         files: List of file paths or argument tuples
         process_func: Function to process each file
         processes: Number of parallel processes (default: from config)
+        logger: Optional logger for messages (if None, uses print)
 
     Returns:
         List of results from processing
@@ -291,14 +323,22 @@ def process_files_parallel(files: List[str], process_func: Callable, processes: 
         from config import PROCESSES
         processes = PROCESSES
 
-    print(f"Processing {len(files)} files with {processes} processes")
+    msg = f"Processing {len(files)} files with {processes} processes"
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
     start_time = time.time()
 
     with multiprocessing.Pool(processes=processes) as pool:
         results = pool.map(process_func, files)
 
     elapsed = time.time() - start_time
-    print(f"Parallel processing completed in {elapsed:.1f}s")
+    msg = f"Parallel processing completed in {elapsed:.1f}s"
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
 
     return results
 

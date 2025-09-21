@@ -158,7 +158,7 @@ def process_rs_file(args: tuple) -> Dict[str, Any]:
 
     try:
         # Process with multi-output utility
-        stats = process_zst_file_multi(rs_file_path, submission_processor, {})
+        stats = process_zst_file_multi(rs_file_path, submission_processor, {}, logger=worker_logger)
 
         # Build output info from stats
         subreddits_with_submissions = len(stats["output_stats"])
@@ -315,7 +315,8 @@ def main():
         rs_files = get_files_in_date_range(
             PATHS['reddit_submissions'],
             'RS_',
-            DATE_RANGE
+            DATE_RANGE,
+            logger
         )
 
         if not rs_files:
@@ -332,7 +333,7 @@ def main():
 
         # Process RS files in parallel
         rs_args = [(rs_file, subreddit_submission_ids, temp_dir) for rs_file in rs_files]
-        rs_results = process_files_parallel(rs_args, process_rs_file, PROCESSES)
+        rs_results = process_files_parallel(rs_args, process_rs_file, PROCESSES, logger)
 
         # Check results
         successful_rs = [r for r in rs_results if r.get('success', False)]
@@ -369,7 +370,7 @@ def main():
 
         # Consolidate in parallel
         consolidate_args = [(subreddit, temp_dir) for subreddit in subreddits_with_data]
-        consolidate_results = process_files_parallel(consolidate_args, consolidate_subreddit_submissions, PROCESSES)
+        consolidate_results = process_files_parallel(consolidate_args, consolidate_subreddit_submissions, PROCESSES, logger)
 
             # Phase 4: Cleanup and statistics
         logger.info("🧹 Phase 4: Cleanup and statistics...")

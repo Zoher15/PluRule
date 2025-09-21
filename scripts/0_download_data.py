@@ -234,7 +234,7 @@ def main():
 
         # Download files in parallel
         logger.info("🚀 Starting parallel downloads...")
-        results = process_files_parallel(download_urls, download_file, PROCESSES)
+        results = process_files_parallel(download_urls, download_file, PROCESSES, logger)
 
         # Analyze results
         successful = len([r for r in results if r.get('status') == 'success'])

@@ -504,7 +504,7 @@ def main():
             process_args.append((subreddit, subreddit_rules, cuda_device))
 
         logger.info("🚀 Processing subreddits...")
-        results = process_files_parallel(process_args, process_single_subreddit, num_workers)
+        results = process_files_parallel(process_args, process_single_subreddit, num_workers, logger)
 
         # Aggregate results
         successful_results = [r for r in results if not r.get("error")]

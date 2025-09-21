@@ -607,7 +607,7 @@ def main():
 
         # Process subreddits in parallel
         logger.info("🌳 Processing subreddits to build trees and discussion threads...")
-        results = process_files_parallel(subreddits_to_process, process_subreddit, PROCESSES)
+        results = process_files_parallel(subreddits_to_process, process_subreddit, PROCESSES, logger)
 
         # Collect statistics
         completed_results = [r for r in results if r.get('status') == 'completed']

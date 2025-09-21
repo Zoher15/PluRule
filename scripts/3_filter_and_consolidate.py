@@ -109,7 +109,7 @@ def process_single_file(args: tuple) -> Dict[str, Any]:
 
     try:
         # Process with multi-output utility
-        stats = process_zst_file_multi(file_path, comment_processor, {})
+        stats = process_zst_file_multi(file_path, comment_processor, {}, logger=worker_logger)
 
         # Build written_files info from output_stats
         written_files = {}
@@ -267,7 +267,7 @@ def main():
         process_args = [(file_path, target_subreddits) for file_path in mod_comment_files]
 
         logger.info("🚀 Phase 1: Processing RC files to temp subdirs...")
-        results = process_files_parallel(process_args, process_single_file, PROCESSES)
+        results = process_files_parallel(process_args, process_single_file, PROCESSES, logger)
 
         # Check for processing errors
         failed_files = [r for r in results if r.get("error")]
@@ -296,7 +296,7 @@ def main():
         consolidate_args = [(subreddit, target_subreddits) for subreddit in subreddits_with_data]
 
         logger.info(f"🚀 Phase 2: Consolidating {len(subreddits_with_data)} subreddits...")
-        consolidate_results = process_files_parallel(consolidate_args, consolidate_subreddit, PROCESSES)
+        consolidate_results = process_files_parallel(consolidate_args, consolidate_subreddit, PROCESSES, logger)
 
         # Collect final statistics
         successful_subreddits = 0

@@ -73,7 +73,7 @@ def process_single_file(file_path: str) -> dict:
             return process_comment_line(line, subreddit_counts)
 
         # Process file with statistics collection
-        stats = process_zst_file(input_file, output_file, process_line_with_stats, progress_interval=50_000_000)
+        stats = process_zst_file(input_file, output_file, process_line_with_stats, progress_interval=50_000_000, logger=worker_logger)
 
         return {
             "file": input_file,
@@ -143,7 +143,7 @@ def main():
         create_directories()
 
         # Get RC files to process
-        files = get_files_in_date_range(PATHS['reddit_comments'], 'RC_', DATE_RANGE)
+        files = get_files_in_date_range(PATHS['reddit_comments'], 'RC_', DATE_RANGE, logger)
 
         if not files:
             logger.error("No RC files found to process!")
@@ -155,7 +155,7 @@ def main():
 
         # Process files in parallel
         logger.info("🚀 Processing RC files...")
-        results = process_files_parallel(files, process_single_file, PROCESSES)
+        results = process_files_parallel(files, process_single_file, PROCESSES, logger)
 
         # Count results
         successful = len([r for r in results if not r.get("error") and not r.get("skipped")])

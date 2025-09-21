@@ -13,8 +13,8 @@ import multiprocessing
 # =============================================================================
 
 # Base directories
-BASE_DATA = "/N/scratch/zkachwal/reddit-mod-collection-pipeline"
-REDDIT_DATA = "/N/project/cnets/datasets/reddit/comments_submissions"
+BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline/data"
+REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
 
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
