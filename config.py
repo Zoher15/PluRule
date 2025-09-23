@@ -20,7 +20,7 @@ REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
 TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 2000
 SIMILARITY_THRESHOLD = 0.8
-MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 1000
+MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 500
 MAX_MATCHED_COMMENTS = 1000
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
 FINAL_SUBREDDITS = 100
@@ -176,6 +176,7 @@ def _generate_paths():
         'mod_comments': f"{BASE_DATA}/data/mod_comments",
         'top_subreddits': f"{BASE_DATA}/data/top_subreddits",
         'matched_comments': f"{BASE_DATA}/output/matched_comments",
+        'matched_comments_sample': f"{BASE_DATA}/output/matched_comments_sample",
         'submission_comments': f"{BASE_DATA}/data/submission_comments",
         'organized_comments': f"{BASE_DATA}/output/organized_comments",
         'comment_trees': f"{BASE_DATA}/output/comment_trees",

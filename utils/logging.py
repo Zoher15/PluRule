@@ -9,6 +9,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from utils.files import ensure_directory
 
 
 def setup_stage_logger(stage_name: str, log_level: str = "INFO", worker_identifier: str = None) -> logging.Logger:
@@ -41,8 +42,10 @@ def setup_stage_logger(stage_name: str, log_level: str = "INFO", worker_identifi
 
     # Simple naming for main vs worker processes
     if worker_identifier:
-        # Use meaningful worker identifier (e.g., "RC_2023-02", "askreddit")
+        # Use meaningful worker identifier (e.g., "RC_2023-02", "askreddit", "subreddits/askreddit")
         log_file = stage_log_dir / f"{worker_identifier}_{timestamp}.log"
+        # Ensure parent directory exists for the log file (handles subdirectories in worker_identifier)
+        ensure_directory(str(log_file))
     else:
         log_file = stage_log_dir / f"main_{timestamp}.log"
 

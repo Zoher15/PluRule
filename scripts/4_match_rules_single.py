@@ -18,6 +18,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Set deterministic behavior for reproducible results
 os.environ['PYTHONHASHSEED'] = '0'
+# Disable vLLM's default logging configuration to avoid conflicts
+os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
+# Disable tqdm progress bars to avoid log spam
+os.environ['TQDM_DISABLE'] = '1'
+# Enable debug logging for vLLM engine processes
+os.environ['VLLM_ENGINE_LOG_LEVEL'] = 'DEBUG'
 
 from config import (PATHS, SIMILARITY_THRESHOLD, EMBEDDING_MODEL, MAX_MATCHED_COMMENTS)
 from utils.files import (read_json_file, write_json_file, read_zst_lines, json_loads, write_zst_json_objects)
@@ -53,6 +59,8 @@ def import_from_main_script():
     spec.loader.exec_module(module)
     return module
 
+
+
 # Import the needed classes and functions
 main_module = import_from_main_script()
 SimpleCommentRuleMatcher = main_module.SimpleCommentRuleMatcher
@@ -68,12 +76,41 @@ def main():
     cuda_device = sys.argv[2]
     rules_file = sys.argv[3]
 
+    # Set up subreddit-specific logging in subdirectory
+    from utils.logging import get_stage_logger
+    from config import create_directories
+    import logging
+
+    # Ensure base directories exist
+    create_directories()
+
+    # Use a path-like identifier to create subdirectory
+    logger = get_stage_logger(4, "match_rules", worker_identifier=f"subreddits/{subreddit_name}")
+
+    # Redirect ALL vLLM related loggers to our subreddit logger with DEBUG level
+    vllm_loggers = [
+        'vllm', 'vllm.engine', 'vllm.engine.llm_engine', 'vllm.worker',
+        'vllm.model_executor', 'vllm.core', 'vllm.core.scheduler',
+        'vllm.distributed', 'vllm.config', 'ray'  # Ray is used by vLLM
+    ]
+
+    for logger_name in vllm_loggers:
+        vllm_logger = logging.getLogger(logger_name)
+        vllm_logger.handlers = logger.handlers
+        vllm_logger.setLevel(logging.DEBUG)
+        vllm_logger.propagate = False  # Prevent duplicate logs
+
+    logger.info(f"🔍 Enabled comprehensive DEBUG logging for all vLLM components")
+
+    logger.info(f"🚀 Starting rule matching for r/{subreddit_name} on CUDA:{cuda_device}")
+    start_time = time.time()
+
     # Set CUDA device
     if cuda_device != "None":
         os.environ['CUDA_VISIBLE_DEVICES'] = str(cuda_device)
-        print(f"🔄 Processing r/{subreddit_name} on CUDA:{cuda_device}")
+        logger.info(f"🎯 Processing r/{subreddit_name} on CUDA:{cuda_device}")
     else:
-        print(f"🔄 Processing r/{subreddit_name} (CPU mode)")
+        logger.info(f"💻 Processing r/{subreddit_name} (CPU mode)")
 
     # Load rules
     subreddit_rules = read_json_file(rules_file)
@@ -81,13 +118,14 @@ def main():
 
     input_file = os.path.join(PATHS['top_subreddits'], f"{subreddit_name}_mod_comments.jsonl.zst")
     output_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
+    sample_output_file = os.path.join(PATHS['matched_comments_sample'], f"{subreddit_name}_match.jsonl.zst")
     stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
 
     # Check if input file exists
     if not os.path.exists(input_file):
         stats = {"subreddit": subreddit_name, "error": f"Input file not found: {input_file}"}
         write_json_file(stats, stats_file, pretty=True)
-        print(f"❌ Input file not found: {input_file}")
+        logger.error(f"❌ Input file not found: {input_file}")
         sys.exit(1)
 
     # Load and validate comments
@@ -105,12 +143,12 @@ def main():
                     continue
 
         comments = all_comments
-        print(f"  Loaded {len(comments)} valid comments and {len(rules)} rules")
+        logger.info(f"📚 Loaded {len(comments)} valid comments and {len(rules)} rules")
 
     except Exception as e:
         stats = {"subreddit": subreddit_name, "error": f"Error loading comments: {e}"}
         write_json_file(stats, stats_file, pretty=True)
-        print(f"❌ Error loading comments: {e}")
+        logger.error(f"❌ Error loading comments: {e}")
         sys.exit(1)
 
     # Process rules and comments
@@ -128,22 +166,42 @@ def main():
     else:
         # Pretokenize and match
         task_description = "Which rule is this moderator's comment referring to?"
-        print(f"  Pretokenizing inputs...")
+        logger.info(f"🧩 Starting pretokenization for {len(comments)} comments and {len(rules)} rules...")
+        logger.info(f"🤖 Using embedding model: {EMBEDDING_MODEL}")
         tokenized_comments, tokenized_rules, max_length = pretokenize_inputs(
             comments, rules, EMBEDDING_MODEL, task_description
         )
+        logger.info(f"✅ Pretokenization completed. Max token length: {max_length}")
 
         optimal_max_len = max(max_length + 50, 512)
-        print(f"  Using optimal max_model_len={optimal_max_len}")
+        logger.info(f"📏 Using optimal max_model_len={optimal_max_len}")
 
-        matcher = SimpleCommentRuleMatcher(
-            similarity_threshold=SIMILARITY_THRESHOLD,
-            max_model_len=optimal_max_len
-        )
+        logger.info(f"🏗️  Initializing SimpleCommentRuleMatcher...")
+        try:
+            matcher = SimpleCommentRuleMatcher(
+                similarity_threshold=SIMILARITY_THRESHOLD,
+                max_model_len=optimal_max_len
+            )
 
-        matched_comments, stats = matcher.match_comments_to_rules_pretokenized(
-            comments, rules, tokenized_comments, tokenized_rules
-        )
+            # Explicit validation - fail fast if model didn't load
+            if not matcher.model:
+                logger.error("❌ CRITICAL: Model failed to load - cannot perform matching")
+                sys.exit(1)
+
+            logger.info(f"✅ SimpleCommentRuleMatcher initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Model initialization failed: {e}")
+            sys.exit(1)
+
+        logger.info(f"🔄 Starting comment-rule matching for {len(comments)} comments and {len(rules)} rules...")
+        try:
+            matched_comments, stats = matcher.match_comments_to_rules_pretokenized(
+                comments, rules, tokenized_comments, tokenized_rules
+            )
+            logger.info(f"✅ Comment-rule matching completed successfully")
+        except Exception as e:
+            logger.error(f"❌ Comment-rule matching failed: {e}")
+            raise
 
         stats['max_token_length'] = max_length
         stats['optimal_max_len'] = optimal_max_len
@@ -160,7 +218,7 @@ def main():
             stats['submission_ids'] = submission_ids
             stats['sampled_comments_count'] = len(sampled_comments)
             stats['unique_submission_ids'] = len(submission_ids)
-            print(f"  📋 Sampled {len(sampled_comments)} comments, found {len(submission_ids)} unique submission IDs")
+            logger.info(f"📋 Sampled {len(sampled_comments)} comments, found {len(submission_ids)} unique submission IDs")
         else:
             stats['submission_ids'] = []
             stats['sampled_comments_count'] = 0
@@ -174,22 +232,48 @@ def main():
     if matched_comments:
         try:
             write_zst_json_objects(output_file, matched_comments)
-            print(f"  ✅ Saved {len(matched_comments)} matched comments")
+            logger.info(f"✅ Saved {len(matched_comments)} matched comments")
         except Exception as e:
             stats['save_error'] = str(e)
-            print(f"  ❌ Error saving matched comments: {e}")
+            logger.error(f"❌ Error saving matched comments: {e}")
+
+        # Save sampled comments if sampling was performed
+        if sampled_comments:
+            try:
+                os.makedirs(os.path.dirname(sample_output_file), exist_ok=True)
+                write_zst_json_objects(sample_output_file, sampled_comments)
+                logger.info(f"✅ Saved {len(sampled_comments)} sampled comments")
+            except Exception as e:
+                stats['sample_save_error'] = str(e)
+                logger.error(f"❌ Error saving sampled comments: {e}")
 
     try:
         write_json_file(stats, stats_file, pretty=True)
     except Exception as e:
-        print(f"  ⚠️  Error saving stats: {e}")
+        logger.error(f"⚠️  Error saving stats: {e}")
 
     match_pct = stats.get('match_percentage', 0)
     ambiguous_count = stats.get('ambiguous_matches', 0)
     ambiguous_pct = stats.get('ambiguous_percentage', 0)
-    print(f"  📊 {len(comments)} comments, {len(matched_comments)} matched ({match_pct:.1f}%), {ambiguous_count} ambiguous ({ambiguous_pct:.1f}%)")
+    logger.info(f"📊 {len(comments)} comments, {len(matched_comments)} matched ({match_pct:.1f}%), {ambiguous_count} ambiguous ({ambiguous_pct:.1f}%)")
 
-    print(f"✅ Completed r/{subreddit_name}")
+    elapsed = time.time() - start_time
+    logger.info(f"✅ Completed r/{subreddit_name} in {elapsed:.1f}s")
+
+    # Explicit cleanup to avoid vLLM cleanup SIGABRT issues
+    logger.info("🧹 Cleaning up vLLM resources...")
+    try:
+        if 'matcher' in locals() and hasattr(matcher, 'model') and matcher.model:
+            del matcher.model
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        logger.info("✅ Cleanup completed successfully")
+    except Exception as e:
+        logger.warning(f"⚠️ Cleanup warning: {e}")
+
+    logger.info("🏁 Process exiting normally...")
 
 
 if __name__ == "__main__":

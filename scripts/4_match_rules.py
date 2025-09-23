@@ -12,6 +12,10 @@ Output: matched_comments/{subreddit}_match.jsonl.zst + {subreddit}_stats.json fi
 
 import sys
 import os
+
+# Set vLLM multiprocessing method BEFORE any imports to prevent SIGABRT cleanup issues
+os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+
 import time
 from collections import defaultdict
 from typing import Dict, List, Any, Optional
@@ -163,6 +167,20 @@ def extract_submission_ids(comments: List[Dict[str, Any]]) -> List[str]:
     return list(submission_ids)
 
 
+def is_cuda_memory_available(device_id: int, threshold: float = 0.85) -> bool:
+    """Check if CUDA device has enough free memory (less than threshold used)."""
+    try:
+        import torch
+        if torch.cuda.is_available() and device_id < torch.cuda.device_count():
+            torch.cuda.set_device(device_id)
+            total_memory = torch.cuda.get_device_properties(device_id).total_memory
+            allocated_memory = torch.cuda.memory_allocated(device_id)
+            memory_usage = allocated_memory / total_memory
+            return memory_usage < threshold
+        return False
+    except Exception:
+        return False
+
 def get_available_cuda_devices() -> List[int]:
     """Get list of available CUDA devices."""
     if not EMBEDDINGS_AVAILABLE:
@@ -172,7 +190,10 @@ def get_available_cuda_devices() -> List[int]:
         import torch
         if torch.cuda.is_available():
             device_count = torch.cuda.device_count()
-            return list(range(device_count))
+            all_devices = list(range(device_count))
+            # Temporarily skip CUDA 0 and 4 (they are busy)
+            excluded_devices = {4}
+            return [device for device in all_devices if device not in excluded_devices]
         else:
             return []
     except Exception:
@@ -197,7 +218,7 @@ class SimpleCommentRuleMatcher:
             self.model = LLM(
                 model=self.model_name,
                 task="embed",
-                gpu_memory_utilization=0.97,
+                gpu_memory_utilization=0.93,  # Lower to prevent memory fragmentation and cleanup issues
                 enforce_eager=True,
                 max_model_len=max_model_len + 50,  # Add buffer for safety
                 seed=0  # Ensure deterministic results
@@ -207,11 +228,14 @@ class SimpleCommentRuleMatcher:
             print(f"❌ Failed to load embedding model: {e}")
             self.model = None
 
-
     def match_comments_to_rules_pretokenized(self, comments: List[Dict[str, Any]], rules: List[Dict[str, Any]],
                                            tokenized_comments: List[List[int]], tokenized_rules: List[List[int]]) -> tuple:
         """Match comments to rules using cosine similarity with pretokenized inputs."""
-        if not self.model or not comments or not rules:
+        if not self.model:
+            print("❌ CRITICAL: Model is None - cannot perform matching")
+            raise RuntimeError("Model initialization failed - cannot perform matching")
+
+        if not comments or not rules:
             return [], {"total_comments": len(comments), "matched_comments": 0, "match_percentage": 0.0, "rule_matches": {}}
 
         # Skip if only one rule
@@ -253,11 +277,11 @@ class SimpleCommentRuleMatcher:
                 max_similarity = torch.max(comment_similarities)
 
                 if max_similarity >= self.similarity_threshold:
-                    # Check for ambiguous matches (multiple rules with same max score)
-                    max_indices = torch.where(comment_similarities == max_similarity)[0]
+                    # Check for ambiguous matches (multiple rules above threshold)
+                    above_threshold = comment_similarities >= self.similarity_threshold
 
-                    if len(max_indices) > 1:
-                        # Multiple rules have the same max score - ambiguous match, skip
+                    if torch.sum(above_threshold) > 1:
+                        # Multiple rules above threshold - ambiguous match, skip
                         ambiguous_count += 1
                         continue
 
@@ -394,7 +418,6 @@ def main():
         logger.info("🚀 Processing subreddits using dynamic CUDA assignment...")
 
         # Save rules to temporary file for subprocess
-        import tempfile
         rules_temp_file = os.path.join(PATHS['data'], 'temp_rules.json')
         write_json_file(subreddit_rules, rules_temp_file, pretty=False)
 
@@ -402,7 +425,6 @@ def main():
         import subprocess
         import concurrent.futures
         import queue
-        import threading
 
         def run_single_subreddit(subreddit_name, cuda_device):
             cmd = [
@@ -414,15 +436,12 @@ def main():
             ]
 
             try:
-                print(f"🚀 Starting r/{subreddit_name} on CUDA:{cuda_device}")
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 min timeout
-
-                # Show subprocess output for debugging
-                if result.stdout.strip():
-                    print(f"📝 r/{subreddit_name} output: {result.stdout.strip()}")
+                logger.info(f"🚀 Starting r/{subreddit_name} on CUDA:{cuda_device}")
+                # Redirect subprocess output to /dev/null to prevent cluttering main process stdout
+                result = subprocess.run(cmd, timeout=3600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 if result.returncode == 0:
-                    print(f"✅ Completed r/{subreddit_name}")
+                    logger.info(f"✅ Completed r/{subreddit_name}")
                     # Load the stats file to return results
                     stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
                     if os.path.exists(stats_file):
@@ -430,11 +449,9 @@ def main():
                     else:
                         return {"subreddit": subreddit_name, "error": "Stats file not created"}
                 else:
-                    error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
-                    print(f"❌ Failed r/{subreddit_name}: {error_msg}")
-                    if result.stderr.strip():
-                        print(f"🔍 r/{subreddit_name} stderr: {result.stderr.strip()}")
-                    return {"subreddit": subreddit_name, "error": error_msg}
+                    logger.error(f"❌ Failed r/{subreddit_name} (exit code: {result.returncode})")
+                    logger.info(f"🔍 Check logs/stage4_match_rules/subreddits/{subreddit_name}.log for details")
+                    return {"subreddit": subreddit_name, "error": f"Process failed with exit code {result.returncode}"}
             except subprocess.TimeoutExpired:
                 return {"subreddit": subreddit_name, "error": "Process timeout (30 min)"}
             except Exception as e:
@@ -454,11 +471,15 @@ def main():
                 except queue.Empty:
                     break  # No more subreddits to process
 
-                # Process this subreddit on the assigned CUDA device
-                result = run_single_subreddit(subreddit_name, cuda_device)
+                # Check if CUDA device memory is available before processing
+                if not is_cuda_memory_available(cuda_device):
+                    logger.warning(f"⚠️ CUDA:{cuda_device} memory usage > 95%, skipping {subreddit_name}")
+                    result = {"subreddit": subreddit_name, "error": "CUDA device memory not available"}
+                else:
+                    # Process this subreddit on the assigned CUDA device
+                    result = run_single_subreddit(subreddit_name, cuda_device)
                 results.append(result)
                 subreddit_queue.task_done()
-
             return results
 
         # Use ThreadPoolExecutor with exactly num_workers (one per CUDA device)
