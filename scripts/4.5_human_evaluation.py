@@ -64,7 +64,7 @@ def authenticate():
 
 def load_matched_comments(subreddit_name: str) -> List[Dict[str, Any]]:
     """Load matched comments for a subreddit."""
-    comments_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
+    comments_file = os.path.join(PATHS['matched_comments_sample'], f"{subreddit_name}_match.jsonl.zst")
 
     if not os.path.exists(comments_file):
         return []
@@ -193,15 +193,23 @@ def prepare_evaluation_data(sampled_comments: List[Dict], subreddit_rules: Dict[
 
     return evaluation_questions
 
-def create_google_form_data(evaluation_questions: List[Dict]) -> Dict:
+def create_google_form_data(evaluation_questions: List[Dict], form_part: int = 1, total_forms: int = 1) -> Dict:
     """Prepare data structure for Google Form creation."""
+    title = 'Reddit Moderation Rule Matching Evaluation'
+    if total_forms > 1:
+        title += f' (Part {form_part} of {total_forms})'
+
+    description = (
+        'Please help evaluate how well our AI system matches moderator comments to subreddit rules. '
+        'For each question, read the moderator comment and select which rule it most likely refers to. '
+        f'This form contains {len(evaluation_questions)} questions.'
+    )
+    if total_forms > 1:
+        description += f' This is part {form_part} of {total_forms} forms.'
+
     form_data = {
-        'title': 'Reddit Moderation Rule Matching Evaluation',
-        'description': (
-            'Please help evaluate how well our AI system matches moderator comments to subreddit rules. '
-            'For each question, read the moderator comment and select which rule it most likely refers to. '
-            f'Total questions: {len(evaluation_questions)}'
-        ),
+        'title': title,
+        'description': description,
         'questions': evaluation_questions,
         'metadata': {
             'total_questions': len(evaluation_questions),
@@ -213,12 +221,16 @@ def create_google_form_data(evaluation_questions: List[Dict]) -> Dict:
 
     return form_data
 
-def create_evaluation_form(service, evaluation_questions: List[Dict]) -> str:
+def create_evaluation_form(service, evaluation_questions: List[Dict], form_part: int = 1, total_forms: int = 1) -> str:
     """Create the actual Google Form with evaluation questions."""
     # Step 1: Create the basic form with our title
+    title = "Reddit Moderation Rule Matching Evaluation"
+    if total_forms > 1:
+        title += f" (Part {form_part} of {total_forms})"
+
     form = {
         "info": {
-            "title": "Reddit Moderation Rule Matching Evaluation"
+            "title": title
         }
     }
     result = service.forms().create(body=form).execute()
@@ -231,11 +243,12 @@ def create_evaluation_form(service, evaluation_questions: List[Dict]) -> str:
         {
             "updateFormInfo": {
                 "info": {
-                    "title": "Reddit Moderation Rule Matching Evaluation",
+                    "title": title,
                     "description": (
                         "Please help evaluate how well our AI system matches moderator comments to subreddit rules. "
                         "For each question, read the moderator comment and select which rule it most likely refers to. "
-                        f"Total questions: {len(evaluation_questions)}"
+                        f"This form contains {len(evaluation_questions)} questions."
+                        + (f" This is part {form_part} of {total_forms} forms." if total_forms > 1 else "")
                     )
                 },
                 "updateMask": "title,description"
@@ -347,10 +360,11 @@ def main():
         # Determine which subreddits to evaluate
         if SUBREDDITS_TO_EVALUATE is None:
             # Load all ranked subreddits from the updated summary
-            summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary_updated.json')
+            summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary.json')
             if os.path.exists(summary_file):
                 summary_data = read_json_file(summary_file)
-                subreddits_to_evaluate = [s['subreddit'] for s in summary_data['top_subreddits']]
+                # Only include subreddits that have been properly ranked (not 999999)
+                subreddits_to_evaluate = [s['subreddit'] for s in summary_data['subreddit_stats'] if s.get('rank', 999999) != 999999]
                 print(f"🎯 Evaluating all {len(subreddits_to_evaluate)} ranked subreddits")
             else:
                 logger.error("❌ No ranked subreddits summary found!")
@@ -411,53 +425,94 @@ def main():
         evaluation_questions = prepare_evaluation_data(sampled_comments, subreddit_rules)
         print(f"✅ Created {len(evaluation_questions)} evaluation questions")
 
-        # Create form data structure
-        print("\n📋 Preparing Google Form data...")
-        form_data = create_google_form_data(evaluation_questions)
+        # Split questions into chunks for multiple forms (20 pages = 60 questions per form)
+        questions_per_page = 3
+        pages_per_form = 20
+        questions_per_form = questions_per_page * pages_per_form  # 60 questions per form
 
-        # Authenticate and create the actual Google Form
+        question_chunks = []
+        for i in range(0, len(evaluation_questions), questions_per_form):
+            chunk = evaluation_questions[i:i + questions_per_form]
+            question_chunks.append(chunk)
+
+        print(f"📊 Splitting into {len(question_chunks)} forms with up to {questions_per_form} questions each")
+
+        # Authenticate once for all forms
         print("\n🔐 Authenticating with Google APIs...")
         creds = authenticate()
         service = build('forms', 'v1', credentials=creds)
 
-        print("\n📝 Creating Google Form...")
-        form_id = create_evaluation_form(service, evaluation_questions)
-        form_url = f"https://docs.google.com/forms/d/{form_id}/edit"
-        public_url = f"https://docs.google.com/forms/d/{form_id}/viewform"
+        # Create multiple forms
+        all_forms_data = []
+        for form_index, question_chunk in enumerate(question_chunks):
+            form_part = form_index + 1
+            total_forms = len(question_chunks)
 
-        # Update form data with creation info
-        form_data['metadata']['created_date'] = time.time()
-        form_data['metadata']['form_id'] = form_id
-        form_data['metadata']['form_url'] = form_url
-        form_data['metadata']['public_url'] = public_url
+            print(f"\n📝 Creating Google Form {form_part}/{total_forms} ({len(question_chunk)} questions)...")
 
-        # Save evaluation data
+            form_id = create_evaluation_form(service, question_chunk, form_part, total_forms)
+            form_url = f"https://docs.google.com/forms/d/{form_id}/edit"
+            public_url = f"https://docs.google.com/forms/d/{form_id}/viewform"
+
+            # Create form data structure for this form
+            form_data = create_google_form_data(question_chunk, form_part, total_forms)
+            form_data['metadata']['created_date'] = time.time()
+            form_data['metadata']['form_id'] = form_id
+            form_data['metadata']['form_url'] = form_url
+            form_data['metadata']['public_url'] = public_url
+            form_data['metadata']['form_part'] = form_part
+            form_data['metadata']['total_forms'] = total_forms
+
+            all_forms_data.append(form_data)
+
+        # Save evaluation data for all forms
         output_dir = os.path.join(PATHS['data'], 'evaluation')
         os.makedirs(output_dir, exist_ok=True)
 
-        evaluation_file = os.path.join(output_dir, 'stage4.5_human_evaluation_data.json')
-        save_evaluation_data(form_data, evaluation_file)
+        # Save individual form data and collect summary
+        all_form_ids = []
+        all_public_urls = []
+
+        for i, form_data in enumerate(all_forms_data):
+            evaluation_file = os.path.join(output_dir, f'stage4.5_human_evaluation_data_part{i+1}.json')
+            save_evaluation_data(form_data, evaluation_file)
+            all_form_ids.append(form_data['metadata']['form_id'])
+            all_public_urls.append(form_data['metadata']['public_url'])
+
+        # Save combined summary
+        combined_summary = {
+            'total_forms': len(all_forms_data),
+            'total_questions': len(evaluation_questions),
+            'questions_per_form': [len(form_data['questions']) for form_data in all_forms_data],
+            'all_forms': all_forms_data
+        }
+        summary_file = os.path.join(output_dir, 'stage4.5_human_evaluation_summary.json')
+        save_evaluation_data(combined_summary, summary_file)
 
         # Print summary
         print(f"\n📊 Evaluation Summary:")
         print(f"  Total questions: {len(evaluation_questions)}")
+        print(f"  Number of forms: {len(all_forms_data)}")
+        for i, form_data in enumerate(all_forms_data):
+            print(f"  Form {i+1}: {len(form_data['questions'])} questions")
 
         subreddit_counts = defaultdict(int)
         for q in evaluation_questions:
             subreddit_counts[q['subreddit']] += 1
 
-        for subreddit, count in subreddit_counts.items():
+        print(f"\n📋 Subreddit distribution:")
+        for subreddit, count in sorted(subreddit_counts.items()):
             print(f"  r/{subreddit}: {count} questions")
 
         print(f"\n✅ Stage 4.5 completed successfully!")
-        print(f"📁 Evaluation data saved to: {evaluation_file}")
-        print(f"\n📝 Google Form Created:")
-        print(f"  📋 Form ID: {form_id}")
-        print(f"  ✏️  Edit URL: {form_url}")
-        print(f"  👥 Public URL: {public_url}")
+        print(f"📁 Evaluation data saved to: {output_dir}")
+        print(f"\n📝 Google Forms Created ({len(all_forms_data)} forms):")
+        for i, (form_id, public_url) in enumerate(zip(all_form_ids, all_public_urls)):
+            print(f"  Form {i+1}: {public_url}")
+
         print(f"\n🚀 Next steps:")
-        print(f"  1. Share the public URL with human evaluators")
-        print(f"  2. Collect responses")
+        print(f"  1. Share the public URLs with human evaluators")
+        print(f"  2. Collect responses from all forms")
         print(f"  3. Analyze agreement between embedding and human ratings")
 
         log_stage_end(logger, 4.5, success=True, elapsed_time=time.time() - start_time)

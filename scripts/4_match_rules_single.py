@@ -2,7 +2,7 @@
 """
 Single Subreddit Rule Matcher
 
-Processes a single subreddit for comment-rule matching using embeddings.
+Processes a single subreddit for comment-rule matching using Qwen3-reranker.
 Designed to be called as a subprocess to avoid multiprocessing issues with vLLM.
 
 Usage: python 4_match_rules_single.py <subreddit_name> <cuda_device> <rules_file>
@@ -25,7 +25,7 @@ os.environ['TQDM_DISABLE'] = '1'
 # Enable debug logging for vLLM engine processes
 os.environ['VLLM_ENGINE_LOG_LEVEL'] = 'DEBUG'
 
-from config import (PATHS, SIMILARITY_THRESHOLD, EMBEDDING_MODEL, MAX_MATCHED_COMMENTS)
+from config import (PATHS, SCORE_THRESHOLD, RERANKER_MODEL, MAX_MATCHED_COMMENTS)
 from utils.files import (read_json_file, write_json_file, read_zst_lines, json_loads, write_zst_json_objects)
 from utils.reddit import normalize_subreddit_name, validate_comment_structure, extract_submission_id
 
@@ -64,7 +64,6 @@ def import_from_main_script():
 # Import the needed classes and functions
 main_module = import_from_main_script()
 SimpleCommentRuleMatcher = main_module.SimpleCommentRuleMatcher
-pretokenize_inputs = main_module.pretokenize_inputs
 
 
 def main():
@@ -160,34 +159,19 @@ def main():
             "match_percentage": 0.0,
             "ambiguous_percentage": 0.0,
             "rule_matches": {},
-            "skipped_reason": "Only one rule or no rules - no similarity matching needed"
+            "skipped_reason": "Only one rule or no rules - no reranking needed"
         }
         matched_comments = []
     else:
-        # Pretokenize and match
-        task_description = "Which rule is this moderator's comment referring to?"
-        logger.info(f"🧩 Starting pretokenization for {len(comments)} comments and {len(rules)} rules...")
-        logger.info(f"🤖 Using embedding model: {EMBEDDING_MODEL}")
-        tokenized_comments, tokenized_rules, max_length = pretokenize_inputs(
-            comments, rules, EMBEDDING_MODEL, task_description
-        )
-        logger.info(f"✅ Pretokenization completed. Max token length: {max_length}")
-
-        optimal_max_len = max(max_length + 50, 512)
-        logger.info(f"📏 Using optimal max_model_len={optimal_max_len}")
+        # Match using reranker
+        task_description = "Given a moderator's comment, retrieve the exact rule that it mentions."
+        logger.info(f"🤖 Using reranker model: {RERANKER_MODEL}")
 
         logger.info(f"🏗️  Initializing SimpleCommentRuleMatcher...")
         try:
             matcher = SimpleCommentRuleMatcher(
-                similarity_threshold=SIMILARITY_THRESHOLD,
-                max_model_len=optimal_max_len
+                score_threshold=SCORE_THRESHOLD  # Using same threshold value but now it's score threshold
             )
-
-            # Explicit validation - fail fast if model didn't load
-            if not matcher.model:
-                logger.error("❌ CRITICAL: Model failed to load - cannot perform matching")
-                sys.exit(1)
-
             logger.info(f"✅ SimpleCommentRuleMatcher initialized successfully")
         except Exception as e:
             logger.error(f"❌ Model initialization failed: {e}")
@@ -195,16 +179,11 @@ def main():
 
         logger.info(f"🔄 Starting comment-rule matching for {len(comments)} comments and {len(rules)} rules...")
         try:
-            matched_comments, stats = matcher.match_comments_to_rules_pretokenized(
-                comments, rules, tokenized_comments, tokenized_rules
-            )
+            matched_comments, stats = matcher.match_comments_to_rules(comments, rules)
             logger.info(f"✅ Comment-rule matching completed successfully")
         except Exception as e:
             logger.error(f"❌ Comment-rule matching failed: {e}")
             raise
-
-        stats['max_token_length'] = max_length
-        stats['optimal_max_len'] = optimal_max_len
 
         # Sample matched comments and extract submission IDs
         if matched_comments:
@@ -212,7 +191,7 @@ def main():
             random.seed(0)
             sample_size = min(len(matched_comments), MAX_MATCHED_COMMENTS)
             sampled_comments = random.sample(matched_comments, sample_size)
-            submission_ids = [extract_submission_id(c.get('parent_id', '')) for c in sampled_comments]
+            submission_ids = [extract_submission_id(c.get('link_id', '')) for c in sampled_comments]
             submission_ids = list(set(filter(None, submission_ids)))
 
             stats['submission_ids'] = submission_ids

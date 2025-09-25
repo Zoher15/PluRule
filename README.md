@@ -37,6 +37,12 @@ flowchart TD
         D --> E
     end
 
+    subgraph Eval ["Manual Evaluation"]
+        direction TB
+        E1[Stage 4.5: Human Evaluation]:::eval
+        E -.-> E1
+    end
+
     subgraph P3 ["Phase&nbsp;3:&nbsp;Thread&nbsp;Construction"]
         direction TB
         F[Stage 5: Collect Comments]:::phase3
@@ -84,6 +90,7 @@ flowchart TD
     classDef phase2 fill:#2e7d32,stroke:#1b5e20,stroke-width:3px,color:#ffffff,font-size:16px
     classDef phase3 fill:#ef6c00,stroke:#e65100,stroke-width:3px,color:#ffffff,font-size:16px
     classDef phase4 fill:#6a1b9a,stroke:#4a148c,stroke-width:3px,color:#ffffff,font-size:16px
+    classDef eval fill:#fbc02d,stroke:#f57f17,stroke-width:2px,color:#000000,font-size:14px
     classDef default font-size:16px
 ```
 
@@ -148,11 +155,28 @@ All other paths are generated automatically based on the data flow.
 | 2 | `2_get_top_sfw_subreddits.py` | Identify top 1000 SFW subreddits with rules | Top subreddit list |
 | 3 | `3_filter_and_consolidate.py` | Filter and consolidate mod comments for target subreddits | Consolidated subreddit files |
 | 4 | `4_match_rules.py` | Match comments to rules using embeddings, rank by JSD | Matched comments, submission IDs |
+| **4.5** | `4.5_human_evaluation.py` | Generate Google Forms for manual rule matching evaluation | Human evaluation survey |
 | 5 | `5_collect_submission_comments.py` | Collect all comments for target submissions | Organized submission comments |
 | 6 | `6_build_trees_and_threads.py` | Build comment trees and create discussion thread pairs | Comment trees, thread pairs |
 | 7 | `7_collect_submissions.py` | Collect submission objects from discussion threads | Submission metadata |
 | 8 | `8_collect_media.py` | Download media files for submissions | Downloaded media files |
 | 9 | `9_finalize_dataset.py` | Create final structured dataset using discussion threads and media | Final dataset manifest |
+
+## Manual Evaluation
+
+Stage 4.5 provides a manual evaluation step to validate the quality of embedding-based rule matching:
+
+```bash
+# Run after Stage 4 completes
+python scripts/4.5_human_evaluation.py
+```
+
+This creates a Google Form survey where human evaluators can:
+- Review moderator comments and their matched rules
+- Validate or correct the AI-generated rule matches
+- Provide feedback on matching accuracy
+
+**Note:** This is a quality assessment tool, not part of the main pipeline. The pipeline continues with Stage 5 regardless of evaluation results.
 
 ## Architecture
 

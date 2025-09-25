@@ -19,10 +19,10 @@ REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
 TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 2000
-SIMILARITY_THRESHOLD = 0.8
+SCORE_THRESHOLD = 0.7
 MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 500
 MAX_MATCHED_COMMENTS = 1000
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
+RERANKER_MODEL = "Qwen/Qwen3-Reranker-4B"
 FINAL_SUBREDDITS = 100
 # Auto-detect number of CPU cores (use all available cores)
 PROCESSES = multiprocessing.cpu_count()
@@ -229,9 +229,13 @@ def get_output_path_for_stage(stage_num):
     return PATHS.get(output_dir)
 
 def create_directories():
-    """Create all necessary directories."""
-    for path in PATHS.values():
-        os.makedirs(path, exist_ok=True)
+    """Create necessary output directories (excludes read-only input paths)."""
+    # Skip input directories that should already exist
+    skip_paths = {'reddit_comments', 'reddit_submissions', 'reddit_data'}
+
+    for name, path in PATHS.items():
+        if name not in skip_paths:
+            os.makedirs(path, exist_ok=True)
 
 def validate_stage_inputs(stage_num):
     """Check if inputs exist for a stage."""
