@@ -19,10 +19,10 @@ REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
 TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 2000
-SCORE_THRESHOLD = 0.7
+SIMILARITY_THRESHOLD = 0.8
 MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 500
 MAX_MATCHED_COMMENTS = 1000
-RERANKER_MODEL = "Qwen/Qwen3-Reranker-4B"
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
 FINAL_SUBREDDITS = 100
 # Auto-detect number of CPU cores (use all available cores)
 PROCESSES = multiprocessing.cpu_count()

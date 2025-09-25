@@ -12,7 +12,6 @@ Output: matched_comments/{subreddit}_match.jsonl.zst + {subreddit}_stats.json fi
 
 import sys
 import os
-import math
 
 # Set vLLM multiprocessing method BEFORE any imports to prevent SIGABRT cleanup issues
 os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
@@ -25,7 +24,7 @@ from typing import Dict, List, Any, Optional
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
-                   SCORE_THRESHOLD, RERANKER_MODEL, MIN_MATCHED_COMMENTS,
+                   SIMILARITY_THRESHOLD, EMBEDDING_MODEL, MIN_MATCHED_COMMENTS,
                    MAX_MATCHED_COMMENTS, create_directories)
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import (read_json_file, write_json_file,
@@ -36,7 +35,7 @@ from utils.stats import calculate_jsd_from_uniform, rank_by_score, analyze_rule_
 # Try to import embedding dependencies
 try:
     import torch
-    from vllm import LLM, SamplingParams
+    from vllm import LLM
     from vllm.inputs import TokensPrompt
     from transformers import AutoTokenizer
     from tqdm import tqdm
@@ -93,6 +92,64 @@ def load_subreddit_rules(logger) -> tuple[Dict[str, List[Dict[str, Any]]], Dict[
     return subreddit_rules, subreddit_comment_counts
 
 
+def pretokenize_inputs(comments: List[Dict[str, Any]], rules: List[Dict[str, Any]],
+                      model_name: str, task_description: str) -> tuple:
+    """
+    Pretokenize comments and rules to find optimal max_model_len.
+
+    Returns:
+        - tokenized_comments: List of token IDs for each comment
+        - tokenized_rules: List of token IDs for each rule
+        - max_length: Maximum token length across all inputs
+    """
+    if not EMBEDDINGS_AVAILABLE:
+        return [], [], 512
+
+    print(f"Loading tokenizer for {model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Tokenize comments with instruction
+    print(f"Tokenizing {len(comments)} comments...")
+    tokenized_comments = []
+    comment_lengths = []
+
+    for comment in tqdm(comments, desc="Tokenizing comments"):
+        body = comment.get('body_clean', '') or comment.get('removal_reason_clean', '')
+        formatted_comment = f'Instruct: {task_description}\nQuery: {body}'
+
+        tokens = tokenizer.encode(formatted_comment, add_special_tokens=True)
+        tokenized_comments.append(tokens)
+        comment_lengths.append(len(tokens))
+
+    # Tokenize rules (documents, no instruction)
+    print(f"Tokenizing {len(rules)} rules...")
+    tokenized_rules = []
+    rule_lengths = []
+
+    for rule in tqdm(rules, desc="Tokenizing rules"):
+        rule_text = rule['combined_text']
+        tokens = tokenizer.encode(rule_text, add_special_tokens=True)
+        tokenized_rules.append(tokens)
+        rule_lengths.append(len(tokens))
+
+    # Calculate statistics
+    max_comment_len = max(comment_lengths) if comment_lengths else 0
+    max_rule_len = max(rule_lengths) if rule_lengths else 0
+    max_length = max(max_comment_len, max_rule_len)
+
+    avg_comment_len = sum(comment_lengths) / len(comment_lengths) if comment_lengths else 0
+    avg_rule_len = sum(rule_lengths) / len(rule_lengths) if rule_lengths else 0
+
+    print(f"Tokenization complete:")
+    print(f"  Max comment length: {max_comment_len}")
+    print(f"  Max rule length: {max_rule_len}")
+    print(f"  Overall max length: {max_length}")
+    print(f"  Avg comment length: {avg_comment_len:.1f}")
+    print(f"  Avg rule length: {avg_rule_len:.1f}")
+
+    return tokenized_comments, tokenized_rules, max_length
+
+
 def extract_submission_ids(comments: List[Dict[str, Any]]) -> List[str]:
     """Extract unique submission IDs from comments using utility function."""
     submission_ids = set()
@@ -144,13 +201,12 @@ def get_available_cuda_devices() -> List[int]:
 
 
 class SimpleCommentRuleMatcher:
-    """Comment-rule matcher using Qwen3-reranker with score threshold."""
+    """Simplified comment-rule matcher using embeddings."""
 
-    def __init__(self, model_name: str = None, score_threshold: float = 0.7):
-        self.model_name = model_name or RERANKER_MODEL
-        self.score_threshold = score_threshold
-        self.max_length = 8192 # Qwen3-reranker max length is 8192 in the documentation
-        self.task_description = "Given a moderator's comment, retrieve the exact rule that it mentions."
+    def __init__(self, model_name: str = None, similarity_threshold: float = 0.8, max_model_len: int = 2048):
+        self.model_name = model_name or EMBEDDING_MODEL
+        self.similarity_threshold = similarity_threshold
+        self.task_description = "Which exactrule is this comment referring to?"
 
         if not EMBEDDINGS_AVAILABLE:
             print("⚠️  Embedding libraries not available - will skip matching")
@@ -158,150 +214,60 @@ class SimpleCommentRuleMatcher:
             return
 
         try:
-            print(f"Initializing tokenizer for: {self.model_name}")
-
-            # Initialize tokenizer for Qwen3-reranker (but not the LLM model yet)
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self.tokenizer.padding_side = "left"
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-            # Setup suffix tokens for reranking
-            self.suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-            self.suffix_tokens = self.tokenizer.encode(self.suffix, add_special_tokens=False)
-            self.true_token = self.tokenizer("yes", add_special_tokens=False).input_ids[0]
-            self.false_token = self.tokenizer("no", add_special_tokens=False).input_ids[0]
-
-            # LLM model will be loaded later after we know the actual max token length
-            self.model = None
-
-            print("✅ Tokenizer initialized successfully")
-        except Exception as e:
-            print(f"❌ Failed to initialize tokenizer: {e}")
-            self.model = None
-
-    def initialize_model(self, actual_max_len: int):
-        """Initialize the LLM model with the actual maximum token length."""
-        try:
-            print(f"Loading reranker model with actual max_model_len={actual_max_len}")
-
-            number_of_gpu = torch.cuda.device_count()
+            print(f"Loading embedding model: {self.model_name} with max_model_len={max_model_len}")
             self.model = LLM(
                 model=self.model_name,
-                tensor_parallel_size=number_of_gpu,
-                max_model_len=actual_max_len+1,
-                enable_prefix_caching=True,
-                gpu_memory_utilization=0.95
+                task="embed",
+                gpu_memory_utilization=0.95,  # Lower to prevent memory fragmentation and cleanup issues
+                enforce_eager=True,
+                max_model_len=max_model_len + 50,  # Add buffer for safety
+                seed=0  # Ensure deterministic results
             )
-
-            self.sampling_params = SamplingParams(
-                temperature=0,
-                max_tokens=1,
-                logprobs=20,
-                allowed_token_ids=[self.true_token, self.false_token],
-            )
-
-            print("✅ Reranker model loaded successfully")
+            print("✅ Embedding model loaded successfully")
         except Exception as e:
-            print(f"❌ Failed to load reranker model: {e}")
+            print(f"❌ Failed to load embedding model: {e}")
             self.model = None
 
-    def format_instruction(self, instruction: str, query: str, doc: str):
-        """Format input for Qwen3-reranker using chat template."""
-        text = [
-            {"role": "system", "content": "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."},
-            {"role": "user", "content": f"<Instruct>: {instruction}\n\n<Query>: {query}\n\n<Document>: {doc}"}
-        ]
-        return text
-
-    def process_inputs(self, pairs, instruction):
-        """Process input pairs into TokensPrompt format and return actual max length."""
-
-        # Format all messages first
-        formatted_messages = [self.format_instruction(instruction, query, doc) for query, doc in pairs]
-
-        # Batch tokenize all messages at once - much faster!
-        print(f"🚀 Batch tokenizing {len(formatted_messages)} messages...")
-        messages = self.tokenizer.apply_chat_template(
-            formatted_messages,
-            tokenize=True,
-            add_generation_prompt=False,
-            enable_thinking=False,
-            padding=False  # Don't pad, we'll truncate individually
-        )
-
-        # Truncate and add suffix tokens
-        max_content_len = self.max_length - len(self.suffix_tokens)
-        messages = [msg[:max_content_len] + self.suffix_tokens for msg in messages]
-
-        # Find the actual maximum length from all tokenized messages
-        actual_max_len = max(len(msg) for msg in messages) if messages else 0
-        print(f"Actual max token length from data: {actual_max_len}")
-
-        # Convert to TokensPrompt format
-        messages = [TokensPrompt(prompt_token_ids=msg) for msg in messages]
-        return messages, actual_max_len
-
-    def compute_logits(self, messages):
-        """Compute relevance scores using logits."""
-
-        outputs = self.model.generate(messages, self.sampling_params, use_tqdm=False)
-        scores = []
-
-        for i in range(len(outputs)):
-            final_logits = outputs[i].outputs[0].logprobs[-1]
-
-            if self.true_token not in final_logits:
-                true_logit = -10
-            else:
-                true_logit = final_logits[self.true_token].logprob
-
-            if self.false_token not in final_logits:
-                false_logit = -10
-            else:
-                false_logit = final_logits[self.false_token].logprob
-
-            true_score = math.exp(true_logit)
-            false_score = math.exp(false_logit)
-            score = true_score / (true_score + false_score)
-            scores.append(score)
-
-        return scores
-
-    def save_score_matrix(self, all_scores, valid_comments, rules, subreddit_name):
-        """Save score matrix to disk in efficient PyTorch format."""
+    def save_similarity_matrix(self, cosine_similarities, softmax_probs, comments, rules, subreddit_name):
+        """Save similarity and softmax matrices to disk in efficient PyTorch format."""
         try:
             import torch
             import os
 
-            score_matrix = torch.tensor(all_scores).reshape(len(valid_comments), len(rules)).float()
-            comment_mapping = {comment['id']: row_idx for row_idx, (_, comment) in enumerate(valid_comments)}
+            # Both matrices are already torch tensors
+            comment_mapping = {comment['id']: row_idx for row_idx, comment in enumerate(comments)}
             rule_indices = [rule.get("rule_index", i) for i, rule in enumerate(rules)]
 
-            score_data = {
-                'score_matrix': score_matrix,
+            similarity_data = {
+                'cosine_similarity_matrix': cosine_similarities.float(),
+                'softmax_probability_matrix': softmax_probs.float(),
                 'comment_mapping': comment_mapping,
                 'rule_indices': rule_indices,
                 'subreddit': subreddit_name,
-                'num_comments': len(valid_comments),
+                'num_comments': len(comments),
                 'num_rules': len(rules),
-                'score_threshold': self.score_threshold
+                'similarity_threshold': self.similarity_threshold,
+                'scoring_method': 'cosine_similarity_with_softmax_for_analysis'
             }
 
             # Save to matched_comments directory
             output_dir = PATHS.get('matched_comments')
             if output_dir and os.path.exists(output_dir):
-                matrix_file = os.path.join(output_dir, f"{subreddit_name}_score_matrix.pt")
-                torch.save(score_data, matrix_file)
-                print(f"💾 Saved score matrix to {matrix_file}")
+                matrix_file = os.path.join(output_dir, f"{subreddit_name}_similarity_matrix.pt")
+                torch.save(similarity_data, matrix_file)
+                print(f"💾 Saved similarity matrices (cosine, softmax) to {matrix_file}")
             else:
-                print(f"⚠️  Could not save score matrix - output directory not found")
+                print(f"⚠️  Could not save similarity matrices - output directory not found")
 
         except Exception as e:
-            print(f"❌ Failed to save score matrix: {e}")
+            print(f"❌ Failed to save similarity matrices: {e}")
 
-    def match_comments_to_rules(self, comments: List[Dict[str, Any]], rules: List[Dict[str, Any]]) -> tuple:
-        """Match comments to rules using Qwen3-reranker with score threshold."""
-        # Model will be initialized after tokenization
+    def match_comments_to_rules_pretokenized(self, comments: List[Dict[str, Any]], rules: List[Dict[str, Any]],
+                                           tokenized_comments: List[List[int]], tokenized_rules: List[List[int]]) -> tuple:
+        """Match comments to rules using cosine similarity with pretokenized inputs."""
+        if not self.model:
+            print("❌ CRITICAL: Model is None - cannot perform matching")
+            raise RuntimeError("Model initialization failed - cannot perform matching")
 
         if not comments or not rules:
             return [], {"total_comments": len(comments), "matched_comments": 0, "match_percentage": 0.0, "rule_matches": {}}
@@ -317,118 +283,91 @@ class SimpleCommentRuleMatcher:
             }
 
         try:
-            print(f"🔄 Processing {len(comments)} comments against {len(rules)} rules using reranker")
+            # Use pretokenized inputs directly with TokensPrompt
+            print(f"Creating TokensPrompt objects for {len(tokenized_comments)} comments and {len(tokenized_rules)} rules...")
+            comment_prompts = [TokensPrompt(prompt_token_ids=tokens) for tokens in tokenized_comments]
+            rule_prompts = [TokensPrompt(prompt_token_ids=tokens) for tokens in tokenized_rules]
 
-            # Step 1: Create ALL comment-rule pairs at once
-            print("🔄 Creating all comment-rule pairs for batch processing...")
-            all_pairs = []
-            comment_indices = []  # Track which comment each pair belongs to
-            valid_comments = []   # Only comments with valid text
+            print(f"Embedding {len(comment_prompts)} comments...")
+            comment_outputs = self.model.embed(comment_prompts)
+            comment_embeddings = torch.tensor([o.outputs.embedding for o in comment_outputs])
 
-            for i, comment in enumerate(comments):
-                comment_text = comment.get('body_clean', '') or comment.get('removal_reason_clean', '')
-                if not comment_text or len(comment_text.strip()) < 10:
-                    continue
+            print(f"Embedding {len(rule_prompts)} rule documents...")
+            rule_outputs = self.model.embed(rule_prompts)
+            rule_embeddings = torch.tensor([o.outputs.embedding for o in rule_outputs])
 
-                valid_comments.append((i, comment))  # Store original index and comment
+            # Compute cosine similarities
+            print("Computing similarities...")
+            similarities = comment_embeddings @ rule_embeddings.T
 
-                # Create pairs for this comment with all rules
-                for rule in rules:
-                    rule_text = rule['combined_text']
-                    all_pairs.append((comment_text, rule_text))
-                    comment_indices.append(len(valid_comments) - 1)  # Index in valid_comments
+            # Compute softmax for analysis (not used in matching)
+            print("Computing softmax probabilities for analysis...")
+            softmax_probs = torch.softmax(similarities, dim=1)
 
-            if not all_pairs:
-                print("❌ No valid comment-rule pairs found")
-                return [], {"total_comments": len(comments), "matched_comments": 0, "ambiguous_matches": 0, "match_percentage": 0.0, "ambiguous_percentage": 0.0, "rule_matches": {}}
-
-            print(f"📦 Created {len(all_pairs)} pairs from {len(valid_comments)} comments and {len(rules)} rules")
-
-            # Step 2: Process ALL pairs in one batch
-            messages, actual_max_len = self.process_inputs(all_pairs, self.task_description)
-
-            # Initialize model if not already done
-            if self.model is None:
-                self.initialize_model(actual_max_len)
-
-            if self.model is None:
-                print("❌ CRITICAL: Failed to initialize model")
-                return [], {"total_comments": len(comments), "matched_comments": 0, "ambiguous_matches": 0, "match_percentage": 0.0, "ambiguous_percentage": 0.0, "rule_matches": {}, "error": "Model initialization failed"}
-
-            # Step 3: Get ALL scores in one batch
-            print("🚀 Getting reranking scores for all pairs in batch...")
-            all_scores = self.compute_logits(messages)
-
-            # Step 4: Group scores by comment and find matches
+            # Find matches above threshold (with uniqueness check)
             matched_comments = []
-            rule_match_counts = {rule.get("rule_index", rule.get("name", i)): 0 for i, rule in enumerate(rules)}
+            rule_match_counts = defaultdict(int)
+            matched_count = 0
             ambiguous_count = 0
 
-            print("🎯 Analyzing scores and finding matches...")
-            for valid_idx, (_, comment) in enumerate(valid_comments):
-                # Extract scores for this comment (len(rules) consecutive scores)
-                start_idx = valid_idx * len(rules)
-                end_idx = start_idx + len(rules)
-                comment_scores = all_scores[start_idx:end_idx]
+            for i, comment in enumerate(comments):
+                comment_similarities = similarities[i]
+                max_similarity = torch.max(comment_similarities)
 
-                # Check for ambiguous matches first
-                above_lower_threshold = [s for s in comment_scores if s >= 0.5]
+                # First check for ambiguous matches (multiple rules > 0.7)
+                above_07_threshold = comment_similarities > 0.7
+                num_above_07 = torch.sum(above_07_threshold)
 
-                if len(above_lower_threshold) > 1:
-                    # Multiple rules above lower threshold - ambiguous match, skip
+                if num_above_07 > 1:
+                    # Multiple rules above 0.7 - ambiguous match, skip
                     ambiguous_count += 1
                     continue
 
-                # Find best rule
-                best_rule_idx = max(range(len(comment_scores)), key=lambda x: comment_scores[x])
-                best_score = comment_scores[best_rule_idx]
-
-                if best_score >= self.score_threshold:
+                # Then check if the top score meets the similarity threshold
+                if max_similarity >= self.similarity_threshold:
+                    # Unambiguous match with score above threshold
+                    best_rule_idx = torch.argmax(comment_similarities).item()
                     best_rule = rules[best_rule_idx]
-                    rule_key = best_rule.get("rule_index", best_rule.get("name", best_rule_idx))
 
                     matched_comment = comment.copy()
                     matched_comment['matched_rule'] = {
-                        'rule_index': best_rule.get('rule_index', best_rule_idx),
-                        'short_name': best_rule.get('short_name', best_rule.get('name', f'Rule_{best_rule_idx}')),
-                        'description': best_rule.get('description', best_rule.get('text', '')),
-                        'score': float(best_score),
-                        'method': 'reranker'
+                        'rule_index': best_rule['rule_index'],
+                        'short_name': best_rule['short_name'],
+                        'description': best_rule['description'],
+                        'similarity_score': float(max_similarity)
                     }
 
                     matched_comments.append(matched_comment)
-                    rule_match_counts[rule_key] += 1
-
-                if (valid_idx + 1) % 1000 == 0:
-                    print(f"  Analyzed {valid_idx + 1}/{len(valid_comments)} valid comments")
+                    rule_match_counts[best_rule['rule_index']] += 1
+                    matched_count += 1
 
             # Prepare statistics with all rules (including those with 0 matches)
             rule_matches = {}
             for rule in rules:
-                rule_key = rule.get('rule_index', rule.get('name', rules.index(rule)))
-                rule_matches[str(rule_key)] = rule_match_counts.get(rule_key, 0)
+                rule_index = rule['rule_index']
+                rule_matches[str(rule_index)] = rule_match_counts.get(rule_index, 0)
 
-            # Sort by rule index/key
-            rule_matches = dict(sorted(rule_matches.items(), key=lambda x: int(x[0]) if x[0].isdigit() else x[0]))
+            # Sort by rule index (convert back to int for sorting, then to string)
+            rule_matches = dict(sorted(rule_matches.items(), key=lambda x: int(x[0])))
 
             stats = {
                 "total_comments": len(comments),
-                "matched_comments": len(matched_comments),
+                "matched_comments": matched_count,
                 "ambiguous_matches": ambiguous_count,
-                "match_percentage": (len(matched_comments) / len(comments) * 100) if comments else 0.0,
+                "match_percentage": (matched_count / len(comments) * 100) if comments else 0.0,
                 "ambiguous_percentage": (ambiguous_count / len(comments) * 100) if comments else 0.0,
                 "rule_matches": rule_matches
             }
 
-            # Save score matrix for analysis
-            subreddit_name = valid_comments[0][1].get('subreddit', 'unknown') if valid_comments else 'unknown'
-            self.save_score_matrix(all_scores, valid_comments, rules, subreddit_name)
+            # Save matrices for analysis
+            subreddit_name = comments[0].get('subreddit', 'unknown') if comments else 'unknown'
+            self.save_similarity_matrix(similarities, softmax_probs, comments, rules, subreddit_name)
 
             print(f"✅ Matched {len(matched_comments)}/{len(comments)} comments ({stats['match_percentage']:.1f}%), {ambiguous_count} ambiguous ({stats['ambiguous_percentage']:.1f}%)")
             return matched_comments, stats
 
         except Exception as e:
-            print(f"❌ Error during reranker matching: {e}")
+            print(f"❌ Error during pretokenized matching: {e}")
             return [], {
                 "total_comments": len(comments),
                 "matched_comments": 0,
@@ -659,13 +598,13 @@ def main():
             'overall_match_rate': overall_match_rate,
             'overall_ambiguous_rate': overall_ambiguous_rate,
             'embedding_model': EMBEDDING_MODEL,
-            'score_threshold': SCORE_THRESHOLD,
+            'similarity_threshold': SIMILARITY_THRESHOLD,
             'cuda_devices_used': cuda_devices if cuda_devices[0] is not None else [],
             'parallel_workers': num_workers,
             'processing_time_seconds': time.time() - start_time,
             'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
             'rule_analysis': rule_analysis,
-            'subreddit_stats': clean_ranked_results  # Now includes ranks and JSD, without submission_ids
+            'subreddit_stats': ranked_results  # Now includes ranks and JSD
         }
 
         summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary.json')
@@ -705,9 +644,10 @@ def main():
         logger.info(f"🎯 Total matched: {total_matched:,} ({overall_match_rate:.1f}%)")
         logger.info(f"❓ Total ambiguous: {total_ambiguous:,} ({overall_ambiguous_rate:.1f}%)")
         logger.info(f"📋 Total submission IDs: {total_submission_ids:,}")
-        logger.info(f"🤖 Model: {RERANKER_MODEL}")
-        logger.info(f"📏 Score Threshold: {SCORE_THRESHOLD}")
+        logger.info(f"🤖 Model: {EMBEDDING_MODEL}")
+        logger.info(f"📏 Threshold: {SIMILARITY_THRESHOLD}")
         logger.info(f"Summary saved to: {summary_file}")
+        logger.info(f"Rankings saved to: {rankings_file}")
         logger.info(f"Submission IDs saved to: {submission_ids_file}")
 
         if failed_results:
