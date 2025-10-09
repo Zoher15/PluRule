@@ -13,13 +13,15 @@ import multiprocessing
 # =============================================================================
 
 # Base directories
-BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline/"
+BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline"
 REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
 
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
 TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 2000
 SIMILARITY_THRESHOLD = 0.8
+GOLD_PERCENTILE = 99  # Top 1% of similarity scores considered gold matches
+AMBIGUOUS_PERCENTILE = 95  # Top 5% of similarity scores considered ambiguous matches
 MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 500
 MAX_MATCHED_COMMENTS = 1000
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"

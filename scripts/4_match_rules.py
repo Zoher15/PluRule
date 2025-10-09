@@ -12,142 +12,34 @@ Output: matched_comments/{subreddit}_match.jsonl.zst + {subreddit}_stats.json fi
 
 import sys
 import os
+from collections import defaultdict
 
 # Set vLLM multiprocessing method BEFORE any imports to prevent SIGABRT cleanup issues
 os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
 import time
-from collections import defaultdict
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
-                   SIMILARITY_THRESHOLD, EMBEDDING_MODEL, MIN_MATCHED_COMMENTS,
-                   MAX_MATCHED_COMMENTS, create_directories)
-from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
-from utils.files import (read_json_file, write_json_file,
-                        read_zst_lines, json_loads, write_zst_json_objects)
-from utils.reddit import clean_rule_text, normalize_subreddit_name, validate_comment_structure, extract_submission_id
+from config import (PATHS, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
+                   EMBEDDING_MODEL, MIN_MATCHED_COMMENTS,
+                   MAX_MATCHED_COMMENTS, GOLD_PERCENTILE, AMBIGUOUS_PERCENTILE,
+                   create_directories)
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
+from utils.files import read_json_file, write_json_file, read_zst_lines, json_loads, write_zst_json_objects
+from utils.reddit import extract_submission_id, validate_comment_structure
 from utils.stats import calculate_jsd_from_uniform, rank_by_score, analyze_rule_distribution
 
-# Try to import embedding dependencies
-try:
-    import torch
-    from vllm import LLM
-    from vllm.inputs import TokensPrompt
-    from transformers import AutoTokenizer
-    from tqdm import tqdm
-    EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    EMBEDDINGS_AVAILABLE = False
-    # Will log warning from main function when logger is available
-
-
-def load_subreddit_rules(logger) -> tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
-    """Load subreddit rules and comment counts from Stage 2 output."""
-    rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
-
-    if not os.path.exists(rules_file):
-        logger.error(f"❌ Rules file not found: {rules_file}")
-        return {}
-
-    logger.info(f"Loading subreddit rules from: {rules_file}")
-    data = read_json_file(rules_file)
-
-    subreddit_rules = {}
-    subreddit_comment_counts = {}
-    for entry in data['subreddits']:
-        subreddit_data = entry['subreddit']
-        subreddit_name = subreddit_data.get('display_name', '').lower()
-
-        if not subreddit_name:
-            continue
-
-        # Store comment count
-        subreddit_comment_counts[subreddit_name] = subreddit_data.get('mod_comment_count', 0)
-
-        rules = []
-        for rule in entry.get('rules', []):
-            cleaned_rule = {
-                'rule_index': rule.get('rule_index', 0),
-                'short_name': rule.get('short_name_clean', ''),
-                'description': rule.get('description_clean', ''),
-                'kind': rule.get('kind', ''),
-                'violation_reason': rule.get('violation_reason_clean', '')
-            }
-
-            # Combine relevant fields for embedding
-            rule_text = f"Short Name: {cleaned_rule['short_name']}\nDescription: {cleaned_rule['description']}"
-            if cleaned_rule['violation_reason']:
-                rule_text += f"\nViolation Reason: {cleaned_rule['violation_reason']}"
-
-            cleaned_rule['combined_text'] = rule_text.strip()
-            rules.append(cleaned_rule)
-
-        subreddit_rules[subreddit_name] = rules
-
-    logger.info(f"Loaded rules for {len(subreddit_rules)} subreddits")
-    return subreddit_rules, subreddit_comment_counts
-
-
-def pretokenize_inputs(comments: List[Dict[str, Any]], rules: List[Dict[str, Any]],
-                      model_name: str, task_description: str) -> tuple:
-    """
-    Pretokenize comments and rules to find optimal max_model_len.
-
-    Returns:
-        - tokenized_comments: List of token IDs for each comment
-        - tokenized_rules: List of token IDs for each rule
-        - max_length: Maximum token length across all inputs
-    """
-    if not EMBEDDINGS_AVAILABLE:
-        return [], [], 512
-
-    print(f"Loading tokenizer for {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    # Tokenize comments with instruction
-    print(f"Tokenizing {len(comments)} comments...")
-    tokenized_comments = []
-    comment_lengths = []
-
-    for comment in tqdm(comments, desc="Tokenizing comments"):
-        body = comment.get('body_clean', '') or comment.get('removal_reason_clean', '')
-        formatted_comment = f'Instruct: {task_description}\nQuery: {body}'
-
-        tokens = tokenizer.encode(formatted_comment, add_special_tokens=True)
-        tokenized_comments.append(tokens)
-        comment_lengths.append(len(tokens))
-
-    # Tokenize rules (documents, no instruction)
-    print(f"Tokenizing {len(rules)} rules...")
-    tokenized_rules = []
-    rule_lengths = []
-
-    for rule in tqdm(rules, desc="Tokenizing rules"):
-        rule_text = rule['combined_text']
-        tokens = tokenizer.encode(rule_text, add_special_tokens=True)
-        tokenized_rules.append(tokens)
-        rule_lengths.append(len(tokens))
-
-    # Calculate statistics
-    max_comment_len = max(comment_lengths) if comment_lengths else 0
-    max_rule_len = max(rule_lengths) if rule_lengths else 0
-    max_length = max(max_comment_len, max_rule_len)
-
-    avg_comment_len = sum(comment_lengths) / len(comment_lengths) if comment_lengths else 0
-    avg_rule_len = sum(rule_lengths) / len(rule_lengths) if rule_lengths else 0
-
-    print(f"Tokenization complete:")
-    print(f"  Max comment length: {max_comment_len}")
-    print(f"  Max rule length: {max_rule_len}")
-    print(f"  Overall max length: {max_length}")
-    print(f"  Avg comment length: {avg_comment_len:.1f}")
-    print(f"  Avg rule length: {avg_rule_len:.1f}")
-
-    return tokenized_comments, tokenized_rules, max_length
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import subprocess
+import concurrent.futures
+import queue
+import glob
+import random
 
 
 def extract_submission_ids(comments: List[Dict[str, Any]]) -> List[str]:
@@ -166,11 +58,9 @@ def extract_submission_ids(comments: List[Dict[str, Any]]) -> List[str]:
 
     return list(submission_ids)
 
-
 def is_cuda_memory_available(device_id: int, threshold: float = 0.85) -> bool:
     """Check if CUDA device has enough free memory (less than threshold used)."""
     try:
-        import torch
         if torch.cuda.is_available() and device_id < torch.cuda.device_count():
             torch.cuda.set_device(device_id)
             total_memory = torch.cuda.get_device_properties(device_id).total_memory
@@ -183,11 +73,7 @@ def is_cuda_memory_available(device_id: int, threshold: float = 0.85) -> bool:
 
 def get_available_cuda_devices() -> List[int]:
     """Get list of available CUDA devices."""
-    if not EMBEDDINGS_AVAILABLE:
-        return []
-
     try:
-        import torch
         if torch.cuda.is_available():
             device_count = torch.cuda.device_count()
             all_devices = list(range(device_count))
@@ -199,189 +85,193 @@ def get_available_cuda_devices() -> List[int]:
     except Exception:
         return []
 
+def create_distribution_plot(output_dir: str, all_similarities: List[np.ndarray], gold_percentile: int, ambiguous_percentile: int, logger=None):
+    """Create cosine similarity distribution plot with percentiles."""
 
-class SimpleCommentRuleMatcher:
-    """Simplified comment-rule matcher using embeddings."""
+    # Find all .pt files
+    pt_files = glob.glob(os.path.join(output_dir, '*.pt'))
+    if not pt_files:
+        if logger:
+            logger.warning("⚠️  No .pt files found for distribution plot")
+        return None, None
 
-    def __init__(self, model_name: str = None, similarity_threshold: float = 0.8, max_model_len: int = 2048):
-        self.model_name = model_name or EMBEDDING_MODEL
-        self.similarity_threshold = similarity_threshold
-        self.task_description = "Which exactrule is this comment referring to?"
+    if logger:
+        logger.info(f"Creating distribution plot from {len(pt_files)} similarity matrices...")
 
-        if not EMBEDDINGS_AVAILABLE:
-            print("⚠️  Embedding libraries not available - will skip matching")
-            self.model = None
-            return
+    # Calculate percentiles
+    p25 = np.percentile(all_similarities, 25)
+    p75 = np.percentile(all_similarities, 75)
+    ambiguous_threshold = np.percentile(all_similarities, ambiguous_percentile)
+    gold_threshold = np.percentile(all_similarities, gold_percentile)
+    mean_sim = np.mean(all_similarities)
+    median_sim = np.median(all_similarities)
 
-        try:
-            print(f"Loading embedding model: {self.model_name} with max_model_len={max_model_len}")
-            self.model = LLM(
-                model=self.model_name,
-                task="embed",
-                gpu_memory_utilization=0.95,  # Lower to prevent memory fragmentation and cleanup issues
-                enforce_eager=True,
-                max_model_len=max_model_len + 50,  # Add buffer for safety
-                seed=0  # Ensure deterministic results
-            )
-            print("✅ Embedding model loaded successfully")
-        except Exception as e:
-            print(f"❌ Failed to load embedding model: {e}")
-            self.model = None
+    # Create plot
+    plt.figure(figsize=(15, 8))
+    plt.hist(all_similarities, bins=100, alpha=0.7, edgecolor='black', density=True)
+    plt.xlabel('Cosine Similarity Score')
+    plt.ylabel('Normalized Density')
+    plt.title(f'Distribution of Cosine Similarity Scores\nAcross All Subreddits (n={len(all_similarities):,})')
+    plt.grid(True, alpha=0.3)
 
-    def save_similarity_matrix(self, cosine_similarities, softmax_probs, comments, rules, subreddit_name):
-        """Save similarity and softmax matrices to disk in efficient PyTorch format."""
-        try:
-            import torch
-            import os
+    # Add statistical lines
+    plt.axvline(mean_sim, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_sim:.3f}')
+    plt.axvline(median_sim, color='green', linestyle='--', linewidth=2, label=f'Median: {median_sim:.3f}')
+    plt.axvline(p25, color='orange', linestyle=':', linewidth=1.5, label=f'25th percentile: {p25:.3f}')
+    plt.axvline(p75, color='purple', linestyle=':', linewidth=1.5, label=f'75th percentile: {p75:.3f}')
+    plt.axvline(ambiguous_threshold, color='cyan', linestyle=':', linewidth=1.5, label=f'{ambiguous_percentile}th percentile: {ambiguous_threshold:.3f}')
+    plt.axvline(gold_threshold, color='darkred', linestyle=':', linewidth=1.5, label=f'{gold_percentile}th percentile: {gold_threshold:.3f}')
 
-            # Both matrices are already torch tensors
-            comment_mapping = {comment['id']: row_idx for row_idx, comment in enumerate(comments)}
-            rule_indices = [rule.get("rule_index", i) for i, rule in enumerate(rules)]
+    plt.legend(loc='upper right', fontsize=8)
+    plt.tight_layout()
 
-            similarity_data = {
-                'cosine_similarity_matrix': cosine_similarities.float(),
-                'softmax_probability_matrix': softmax_probs.float(),
-                'comment_mapping': comment_mapping,
-                'rule_indices': rule_indices,
-                'subreddit': subreddit_name,
-                'num_comments': len(comments),
-                'num_rules': len(rules),
-                'similarity_threshold': self.similarity_threshold,
-                'scoring_method': 'cosine_similarity_with_softmax_for_analysis'
-            }
+    plot_file = os.path.join(output_dir, 'cosine_similarity_distribution_all_percentiles.png')
+    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+    plt.close()
 
-            # Save to matched_comments directory
-            output_dir = PATHS.get('matched_comments')
-            if output_dir and os.path.exists(output_dir):
-                matrix_file = os.path.join(output_dir, f"{subreddit_name}_similarity_matrix.pt")
-                torch.save(similarity_data, matrix_file)
-                print(f"💾 Saved similarity matrices (cosine, softmax) to {matrix_file}")
-            else:
-                print(f"⚠️  Could not save similarity matrices - output directory not found")
+    if logger:
+        logger.info(f"📈 Distribution plot saved to: {plot_file}")
+        logger.info(f"Gold threshold (99th percentile): {gold_threshold:.4f}")
+        logger.info(f"Ambiguous threshold (90th percentile): {ambiguous_threshold:.4f}")
+    return float(gold_threshold), float(ambiguous_threshold)  # Return thresholds for use in matching
 
-        except Exception as e:
-            print(f"❌ Failed to save similarity matrices: {e}")
+def load_similarity_matrix(matrix_file):
+    """Load a single similarity matrix and extract all scores."""
+    try:
+        subreddit_name = os.path.basename(matrix_file).replace('_similarity_matrix.pt', '')
+        similarity_data = torch.load(matrix_file, map_location='cpu')
+        similarities = similarity_data['cosine_similarity_matrix']
+        all_scores = similarities.flatten().numpy()
 
-    def match_comments_to_rules_pretokenized(self, comments: List[Dict[str, Any]], rules: List[Dict[str, Any]],
-                                           tokenized_comments: List[List[int]], tokenized_rules: List[List[int]]) -> tuple:
-        """Match comments to rules using cosine similarity with pretokenized inputs."""
-        if not self.model:
-            print("❌ CRITICAL: Model is None - cannot perform matching")
-            raise RuntimeError("Model initialization failed - cannot perform matching")
+        return {
+            'subreddit': subreddit_name,
+            'similarity_data': similarity_data,
+            'all_scores': all_scores
+        }
+    except Exception as e:
+        return {'subreddit': os.path.basename(matrix_file).replace('_similarity_matrix.pt', ''), 'error': str(e)}
 
-        if not comments or not rules:
-            return [], {"total_comments": len(comments), "matched_comments": 0, "match_percentage": 0.0, "rule_matches": {}}
+def process_subreddit_matching(load_result, logger=None):
+    """Apply thresholds and create matches for one subreddit."""
+    try:
+        subreddit_name = load_result['subreddit']
+        similarity_data = load_result['similarity_data']
+        similarities = similarity_data['cosine_similarity_matrix']
 
-        # Skip if only one rule
-        if len(rules) <= 1:
-            return [], {
-                "total_comments": len(comments),
-                "matched_comments": 0,
-                "match_percentage": 0.0,
-                "rule_matches": {},
-                "skipped_reason": "Only one rule or no rules - no similarity matching needed"
-            }
+        # Get thresholds from the load_result (passed from Phase 2)
+        gold_threshold = load_result.get('gold_threshold')
+        ambiguous_threshold = load_result.get('ambiguous_threshold')
 
-        try:
-            # Use pretokenized inputs directly with TokensPrompt
-            print(f"Creating TokensPrompt objects for {len(tokenized_comments)} comments and {len(tokenized_rules)} rules...")
-            comment_prompts = [TokensPrompt(prompt_token_ids=tokens) for tokens in tokenized_comments]
-            rule_prompts = [TokensPrompt(prompt_token_ids=tokens) for tokens in tokenized_rules]
+        # Load comments
+        input_file = os.path.join(PATHS['top_subreddits'], f"{subreddit_name}_mod_comments.jsonl.zst")
+        if not os.path.exists(input_file):
+            return {"subreddit": subreddit_name, "error": f"Input file not found: {input_file}"}
 
-            print(f"Embedding {len(comment_prompts)} comments...")
-            comment_outputs = self.model.embed(comment_prompts)
-            comment_embeddings = torch.tensor([o.outputs.embedding for o in comment_outputs])
-
-            print(f"Embedding {len(rule_prompts)} rule documents...")
-            rule_outputs = self.model.embed(rule_prompts)
-            rule_embeddings = torch.tensor([o.outputs.embedding for o in rule_outputs])
-
-            # Compute cosine similarities
-            print("Computing similarities...")
-            similarities = comment_embeddings @ rule_embeddings.T
-
-            # Compute softmax for analysis (not used in matching)
-            print("Computing softmax probabilities for analysis...")
-            softmax_probs = torch.softmax(similarities, dim=1)
-
-            # Find matches above threshold (with uniqueness check)
-            matched_comments = []
-            rule_match_counts = defaultdict(int)
-            matched_count = 0
-            ambiguous_count = 0
-
-            for i, comment in enumerate(comments):
-                comment_similarities = similarities[i]
-                max_similarity = torch.max(comment_similarities)
-
-                # First check for ambiguous matches (multiple rules > 0.7)
-                above_07_threshold = comment_similarities > 0.7
-                num_above_07 = torch.sum(above_07_threshold)
-
-                if num_above_07 > 1:
-                    # Multiple rules above 0.7 - ambiguous match, skip
-                    ambiguous_count += 1
+        lines = read_zst_lines(input_file)
+        comments = []
+        for line in lines:
+            if line.strip():
+                try:
+                    comment = json_loads(line)
+                    if validate_comment_structure(comment):
+                        comments.append(comment)
+                except Exception:
                     continue
 
-                # Then check if the top score meets the similarity threshold
-                if max_similarity >= self.similarity_threshold:
-                    # Unambiguous match with score above threshold
-                    best_rule_idx = torch.argmax(comment_similarities).item()
-                    best_rule = rules[best_rule_idx]
+        # Get pre-loaded rules from load_result
+        rules = load_result.get('rules', [])
 
-                    matched_comment = comment.copy()
-                    matched_comment['matched_rule'] = {
-                        'rule_index': best_rule['rule_index'],
-                        'short_name': best_rule['short_name'],
-                        'description': best_rule['description'],
-                        'similarity_score': float(max_similarity)
-                    }
+        # Apply matching with global thresholds
+        matched_comments = []
+        rule_match_counts = defaultdict(int)
+        matched_count = 0
+        ambiguous_count = 0
 
-                    matched_comments.append(matched_comment)
-                    rule_match_counts[best_rule['rule_index']] += 1
-                    matched_count += 1
+        for i, comment in enumerate(comments):
+            if i >= similarities.shape[0]:
+                break  # Don't go beyond similarity matrix bounds
 
-            # Prepare statistics with all rules (including those with 0 matches)
-            rule_matches = {}
-            for rule in rules:
-                rule_index = rule['rule_index']
-                rule_matches[str(rule_index)] = rule_match_counts.get(rule_index, 0)
+            comment_similarities = similarities[i]
+            max_similarity = torch.max(comment_similarities)
 
-            # Sort by rule index (convert back to int for sorting, then to string)
-            rule_matches = dict(sorted(rule_matches.items(), key=lambda x: int(x[0])))
+            # Check for ambiguous matches
+            above_ambiguous = comment_similarities >= ambiguous_threshold
+            num_above_ambiguous = torch.sum(above_ambiguous)
 
-            stats = {
-                "total_comments": len(comments),
-                "matched_comments": matched_count,
-                "ambiguous_matches": ambiguous_count,
-                "match_percentage": (matched_count / len(comments) * 100) if comments else 0.0,
-                "ambiguous_percentage": (ambiguous_count / len(comments) * 100) if comments else 0.0,
-                "rule_matches": rule_matches
-            }
+            if num_above_ambiguous > 1:
+                ambiguous_count += 1
+                continue
 
-            # Save matrices for analysis
-            subreddit_name = comments[0].get('subreddit', 'unknown') if comments else 'unknown'
-            self.save_similarity_matrix(similarities, softmax_probs, comments, rules, subreddit_name)
+            # Check gold threshold
+            if max_similarity >= gold_threshold:
+                best_rule_idx = torch.argmax(comment_similarities).item()
+                best_rule = rules[best_rule_idx]
 
-            print(f"✅ Matched {len(matched_comments)}/{len(comments)} comments ({stats['match_percentage']:.1f}%), {ambiguous_count} ambiguous ({stats['ambiguous_percentage']:.1f}%)")
-            return matched_comments, stats
+                matched_comment = comment.copy()
+                matched_comment['matched_rule'] = {
+                    'rule_index': best_rule['rule_index'],
+                    'short_name': best_rule['short_name_clean'],
+                    'description': best_rule['description_clean'],
+                    'similarity_score': float(max_similarity)  # Convert to Python float
+                }
 
-        except Exception as e:
-            print(f"❌ Error during pretokenized matching: {e}")
-            return [], {
-                "total_comments": len(comments),
-                "matched_comments": 0,
-                "ambiguous_matches": 0,
-                "match_percentage": 0.0,
-                "ambiguous_percentage": 0.0,
-                "rule_matches": {},
-                "error": str(e)
-            }
+                matched_comments.append(matched_comment)
+                rule_match_counts[best_rule['rule_index']] += 1
+                matched_count += 1
 
+        # Prepare statistics
+        rule_matches = {}
+        for rule in rules:
+            rule_index = rule['rule_index']
+            rule_matches[str(rule_index)] = rule_match_counts.get(rule_index, 0)
+
+        submission_ids = extract_submission_ids(matched_comments)
+
+        # Sample if too many
+        if len(matched_comments) > MAX_MATCHED_COMMENTS:
+            random.seed(0)
+            matched_comments = random.sample(matched_comments, MAX_MATCHED_COMMENTS)
+
+        # Save files
+        if matched_comments:
+            match_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
+            write_zst_json_objects(match_file, matched_comments)
+
+        stats = {
+            "subreddit": subreddit_name,
+            "total_comments": len(comments),
+            "total_rules": len(rules),
+            "matched_comments": matched_count,
+            "ambiguous_matches": ambiguous_count,
+            "match_percentage": (matched_count / len(comments) * 100) if comments else 0.0,
+            "ambiguous_percentage": (ambiguous_count / len(comments) * 100) if comments else 0.0,
+            "rule_matches": rule_matches,
+            "gold_threshold": float(gold_threshold),
+            "ambiguous_threshold": float(ambiguous_threshold),
+            "submission_ids": submission_ids,
+            "sampled_comments_count": len(matched_comments)
+        }
+
+        stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
+        write_json_file(stats, stats_file, pretty=True)
+
+        # Log progress for this subreddit
+        if logger:
+            logger.info(f"✅ r/{subreddit_name}: {matched_count}/{len(comments)} matched ({stats['match_percentage']:.1f}%), {len(rules)} rules")
+
+        return stats
+
+    except Exception as e:
+        return {"subreddit": load_result['subreddit'], "error": str(e)}
 
 def main():
     """Main execution function."""
-    # No longer need multiprocessing start method since we use subprocess
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Stage 4: Match Comments to Rules")
+    parser.add_argument("--phase2-only", action="store_true",
+                       help="Skip Phase 1 (similarity matrix creation) and run only Phase 2 (matching)")
+    args = parser.parse_args()
 
     # Initialize logging
     logger = get_stage_logger(4, "match_rules")
@@ -393,23 +283,12 @@ def main():
         # Create directories
         create_directories()
 
-        # Check if embeddings are available
-        if not EMBEDDINGS_AVAILABLE:
-            logger.error("❌ Embedding libraries not available!")
-            logger.error("Install with: pip install vllm transformers torch")
-            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
-            return 1
+        # Load Stage 2 data for comment counts and rule validation
+        logger.info("📚 Loading subreddit data...")
+        rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+        stage2_data = read_json_file(rules_file)
 
-        # Load subreddit rules and comment counts
-        logger.info("📚 Loading subreddit rules...")
-        subreddit_rules, subreddit_comment_counts = load_subreddit_rules(logger)
-
-        if not subreddit_rules:
-            logger.error("❌ No subreddit rules loaded!")
-            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
-            return 1
-
-        # Get subreddit files to process, sorted by mod comment count (highest first)
+        # Get subreddits with >1 rule and existing comment files, sorted by mod comment count (highest first)
         available_subreddits = []
         top_subreddits_dir = PATHS['top_subreddits']
 
@@ -418,18 +297,20 @@ def main():
             log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        for filename in os.listdir(top_subreddits_dir):
-            if filename.endswith('_mod_comments.jsonl.zst'):
-                subreddit = filename.replace('_mod_comments.jsonl.zst', '')
-                if subreddit in subreddit_rules:
-                    # Skip subreddits with only one rule (no ambiguity to resolve)
-                    rule_count = len(subreddit_rules[subreddit])
-                    if rule_count <= 1:
-                        logger.info(f"⏭️  Skipping r/{subreddit}: only {rule_count} rule(s)")
-                        continue
+        for entry in stage2_data['subreddits']:
+            subreddit_name = entry['subreddit']['display_name'].lower()
+            rule_count = len(entry.get('rules', []))
 
-                    comment_count = subreddit_comment_counts.get(subreddit, 0)
-                    available_subreddits.append((subreddit, comment_count))
+            # Skip subreddits with only one rule (no ambiguity to resolve)
+            if rule_count <= 1:
+                logger.info(f"⏭️  Skipping r/{subreddit_name}: only {rule_count} rule(s)")
+                continue
+
+            # Check if comment file exists
+            comment_file = os.path.join(top_subreddits_dir, f"{subreddit_name}_mod_comments.jsonl.zst")
+            if os.path.exists(comment_file):
+                comment_count = entry['subreddit'].get('mod_comment_count', 0)
+                available_subreddits.append((subreddit_name, comment_count))
 
         if not available_subreddits:
             logger.error("❌ No subreddit files found to process!")
@@ -454,101 +335,171 @@ def main():
             logger.info(f"Found {len(cuda_devices)} CUDA devices: {cuda_devices}")
             logger.info(f"Using {num_workers} parallel GPU processes")
         else:
-            num_workers = min(PROCESSES, len(subreddit_files))  # Limit to available subreddits
+            num_workers = min(1, len(subreddit_files))  # Limit to available subreddits
             cuda_devices = [None] * num_workers  # CPU mode
             logger.info(f"No CUDA devices found - using {num_workers} CPU processes")
 
-        logger.info(f"Found {len(subreddit_files)} subreddit files to process")
+        if args.phase2_only:
+            logger.info("⏭️  Skipping Phase 1 (--phase2-only flag set)")
+            all_results = []  # No Phase 1 results
+        else:
+            logger.info(f"Found {len(subreddit_files)} subreddit files to process")
 
-        logger.info("🚀 Processing subreddits using dynamic CUDA assignment...")
+            logger.info("🚀 Phase 1: Processing subreddits using dynamic CUDA assignment...")
 
-        # Save rules to temporary file for subprocess
-        rules_temp_file = os.path.join(PATHS['data'], 'temp_rules.json')
-        write_json_file(subreddit_rules, rules_temp_file, pretty=False)
+            # Process subreddits using subprocess calls with dynamic CUDA assignment
+            def run_single_subreddit(subreddit_name, cuda_device):
+                cmd = [
+                    sys.executable,
+                    'scripts/4_match_rules_single.py',
+                    '--subreddit', subreddit_name,
+                    '--cuda-device', str(cuda_device) if cuda_device is not None else "None"
+                ]
 
-        # Process subreddits using subprocess calls with dynamic CUDA assignment
-        import subprocess
-        import concurrent.futures
-        import queue
+                try:
+                    logger.info(f"🚀 Starting r/{subreddit_name} on CUDA:{cuda_device}")
+                    # Redirect subprocess output to /dev/null to prevent cluttering main process stdout
+                    result = subprocess.run(cmd, timeout=3600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        def run_single_subreddit(subreddit_name, cuda_device):
-            cmd = [
-                sys.executable,
-                'scripts/4_match_rules_single.py',
-                subreddit_name,
-                str(cuda_device) if cuda_device is not None else "None",
-                rules_temp_file
-            ]
-
-            try:
-                logger.info(f"🚀 Starting r/{subreddit_name} on CUDA:{cuda_device}")
-                # Redirect subprocess output to /dev/null to prevent cluttering main process stdout
-                result = subprocess.run(cmd, timeout=3600, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-                if result.returncode == 0:
-                    logger.info(f"✅ Completed r/{subreddit_name}")
-                    # Load the stats file to return results
-                    stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
-                    if os.path.exists(stats_file):
-                        return read_json_file(stats_file)
+                    if result.returncode == 0:
+                        logger.info(f"✅ Completed r/{subreddit_name}")
+                        # Load the stats file to return results
+                        stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
+                        if os.path.exists(stats_file):
+                            return read_json_file(stats_file)
+                        else:
+                            return {"subreddit": subreddit_name, "error": "Stats file not created"}
                     else:
-                        return {"subreddit": subreddit_name, "error": "Stats file not created"}
-                else:
-                    logger.error(f"❌ Failed r/{subreddit_name} (exit code: {result.returncode})")
-                    logger.info(f"🔍 Check logs/stage4_match_rules/subreddits/{subreddit_name}.log for details")
-                    return {"subreddit": subreddit_name, "error": f"Process failed with exit code {result.returncode}"}
-            except subprocess.TimeoutExpired:
-                return {"subreddit": subreddit_name, "error": "Process timeout (30 min)"}
-            except Exception as e:
-                return {"subreddit": subreddit_name, "error": str(e)}
-
-        # Create work queue and assign each CUDA device as a worker
-        subreddit_queue = queue.Queue()
-        for subreddit in subreddit_files:
-            subreddit_queue.put(subreddit)
-
-        def worker_with_cuda(cuda_device):
-            """Worker function that continuously processes subreddits on assigned CUDA device"""
-            results = []
-            while True:
-                try:
-                    subreddit_name = subreddit_queue.get(timeout=1)  # 1 second timeout
-                except queue.Empty:
-                    break  # No more subreddits to process
-
-                # Check if CUDA device memory is available before processing
-                if not is_cuda_memory_available(cuda_device):
-                    logger.warning(f"⚠️ CUDA:{cuda_device} memory usage > 95%, skipping {subreddit_name}")
-                    result = {"subreddit": subreddit_name, "error": "CUDA device memory not available"}
-                else:
-                    # Process this subreddit on the assigned CUDA device
-                    result = run_single_subreddit(subreddit_name, cuda_device)
-                results.append(result)
-                subreddit_queue.task_done()
-            return results
-
-        # Use ThreadPoolExecutor with exactly num_workers (one per CUDA device)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            # Submit one worker per CUDA device
-            future_to_cuda = {executor.submit(worker_with_cuda, cuda_device): cuda_device
-                             for cuda_device in cuda_devices}
-
-            # Collect all results
-            all_results = []
-            for future in concurrent.futures.as_completed(future_to_cuda):
-                cuda_device = future_to_cuda[future]
-                try:
-                    worker_results = future.result()
-                    all_results.extend(worker_results)
-                    print(f"🏁 CUDA:{cuda_device} worker completed")
+                        logger.error(f"❌ Failed r/{subreddit_name} (exit code: {result.returncode})")
+                        logger.info(f"🔍 Check logs/stage4_match_rules/subreddits/{subreddit_name}.log for details")
+                        return {"subreddit": subreddit_name, "error": f"Process failed with exit code {result.returncode}"}
+                except subprocess.TimeoutExpired:
+                    return {"subreddit": subreddit_name, "error": "Process timeout (30 min)"}
                 except Exception as e:
-                    print(f"❌ CUDA:{cuda_device} worker failed: {e}")
+                    return {"subreddit": subreddit_name, "error": str(e)}
+
+            # Create work queue and assign each CUDA device as a worker
+            subreddit_queue = queue.Queue()
+            for subreddit in subreddit_files:
+                subreddit_queue.put(subreddit)
+
+            def worker_with_cuda(cuda_device):
+                """Worker function that continuously processes subreddits on assigned CUDA device"""
+                results = []
+                while True:
+                    try:
+                        subreddit_name = subreddit_queue.get(timeout=1)  # 1 second timeout
+                    except queue.Empty:
+                        break  # No more subreddits to process
+
+                    # Check if CUDA device memory is available before processing
+                    if not is_cuda_memory_available(cuda_device):
+                        logger.warning(f"⚠️ CUDA:{cuda_device} memory usage > 95%, skipping {subreddit_name}")
+                        result = {"subreddit": subreddit_name, "error": "CUDA device memory not available"}
+                    else:
+                        # Process this subreddit on the assigned CUDA device
+                        result = run_single_subreddit(subreddit_name, cuda_device)
+                    results.append(result)
+                    subreddit_queue.task_done()
+                return results
+
+            # Use ThreadPoolExecutor with exactly num_workers (one per CUDA device)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                # Submit one worker per CUDA device
+                future_to_cuda = {executor.submit(worker_with_cuda, cuda_device): cuda_device
+                                for cuda_device in cuda_devices}
+
+                # Collect all results
+                all_results = []
+                for future in concurrent.futures.as_completed(future_to_cuda):
+                    cuda_device = future_to_cuda[future]
+                    try:
+                        worker_results = future.result()
+                        all_results.extend(worker_results)
+                        logger.info(f"🏁 CUDA:{cuda_device} worker completed")
+                    except Exception as e:
+                        logger.error(f"❌ CUDA:{cuda_device} worker failed: {e}")
 
         results = all_results
 
-        # Cleanup temp file
-        if os.path.exists(rules_temp_file):
-            os.remove(rules_temp_file)
+        # Phase 2: Load similarity matrices, compute thresholds, and perform matching
+        logger.info("🚀 Phase 2: Loading similarity matrices and computing global thresholds...")
+
+
+        # Find all similarity matrix files
+        output_dir = PATHS.get('matched_comments')
+        matrix_files = glob.glob(os.path.join(output_dir, '*_similarity_matrix.pt'))
+        logger.info(f"Found {len(matrix_files)} similarity matrices for Phase 2")
+
+        # Load all matrices sequentially to avoid memory issues
+        logger.info(f"Loading {len(matrix_files)} similarity matrices sequentially...")
+        phase2_loads = []
+        for i, matrix_file in enumerate(matrix_files):
+            if i % 200 == 0:  # Progress every 200 files
+                logger.info(f"Loading matrix {i+1}/{len(matrix_files)}: {os.path.basename(matrix_file)}")
+            try:
+                result = load_similarity_matrix(matrix_file)
+                phase2_loads.append(result)
+            except Exception as load_error:
+                logger.error(f"❌ Failed to load {matrix_file}: {load_error}")
+                phase2_loads.append({'subreddit': os.path.basename(matrix_file).replace('_similarity_matrix.pt', ''), 'error': str(load_error)})
+
+        successful_loads = [r for r in phase2_loads if 'error' not in r]
+        failed_loads = [r for r in phase2_loads if 'error' in r]
+
+        if failed_loads:
+            logger.warning(f"⚠️  Failed to load {len(failed_loads)} matrices in Phase 2")
+
+        # Compute global thresholds
+        logger.info("🧮 Computing global thresholds from all similarity scores...")
+        all_similarity_scores = np.concatenate([r['all_scores'] for r in successful_loads])
+
+        gold_threshold, ambiguous_threshold = create_distribution_plot(output_dir, all_similarity_scores, GOLD_PERCENTILE, AMBIGUOUS_PERCENTILE, logger)
+
+
+        logger.info(f"📊 Gold threshold (99th percentile): {gold_threshold:.4f}")
+        logger.info(f"📊 Ambiguous threshold (90th percentile): {ambiguous_threshold:.4f}")
+
+        # Load Stage 2 rules once for all subreddits
+        logger.info("📚 Loading rules from Stage 2 data...")
+        rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+        stage2_data = read_json_file(rules_file)
+
+        # Create a mapping of subreddit name to rules
+        subreddit_rules = {}
+        for entry in stage2_data['subreddits']:
+            subreddit_name = entry['subreddit']['display_name'].lower()
+            subreddit_rules[subreddit_name] = entry['rules']
+
+        # Add thresholds and rules to each load result for the matching function
+        for load_result in successful_loads:
+            load_result['gold_threshold'] = gold_threshold
+            load_result['ambiguous_threshold'] = ambiguous_threshold
+            # Add the rules for this subreddit
+            subreddit_name = load_result['subreddit']
+            load_result['rules'] = subreddit_rules.get(subreddit_name, [])
+
+        # Process matching sequentially to avoid segfaults
+        logger.info(f"🚀 Phase 2: Processing {len(successful_loads)} subreddits sequentially...")
+
+        phase2_results = []
+        total = len(successful_loads)
+
+        for i, load_result in enumerate(successful_loads):
+            subreddit_name = load_result['subreddit']
+            try:
+                result = process_subreddit_matching(load_result, logger)
+                phase2_results.append(result)
+
+                if (i + 1) % 50 == 0 or (i + 1) == total:  # Progress every 50 subreddits
+                    logger.info(f"📊 Completed {i + 1}/{total} subreddits ({(i + 1)/total*100:.1f}%) - Latest: r/{subreddit_name}")
+
+            except Exception as e:
+                logger.error(f"❌ Failed r/{subreddit_name}: {e}")
+                phase2_results.append({"subreddit": subreddit_name, "error": str(e)})
+
+        # Update results to use Phase 2 outputs
+        results = phase2_results
 
         # Aggregate results
         successful_results = [r for r in results if not r.get("error")]
@@ -560,7 +511,10 @@ def main():
         # Add JSD scores to each subreddit
         for stats in successful_results:
             rule_matches = stats.get('rule_matches', {})
-            stats['jsd_from_uniform'] = calculate_jsd_from_uniform(rule_matches)
+            if rule_matches:  # Only calculate JSD if we have rule matches
+                stats['jsd_from_uniform'] = calculate_jsd_from_uniform(rule_matches)
+            else:
+                stats['jsd_from_uniform'] = float('inf')  # No matches = worst JSD
 
         # Rank subreddits by JSD (using generic ranking utility)
         def has_enough_matches(item):
@@ -598,13 +552,14 @@ def main():
             'overall_match_rate': overall_match_rate,
             'overall_ambiguous_rate': overall_ambiguous_rate,
             'embedding_model': EMBEDDING_MODEL,
-            'similarity_threshold': SIMILARITY_THRESHOLD,
-            'cuda_devices_used': cuda_devices if cuda_devices[0] is not None else [],
+            'gold_threshold': gold_threshold,
+            'ambiguous_threshold': ambiguous_threshold,
+            'cuda_devices_used': cuda_devices if cuda_devices and cuda_devices[0] is not None else [],
             'parallel_workers': num_workers,
             'processing_time_seconds': time.time() - start_time,
             'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
             'rule_analysis': rule_analysis,
-            'subreddit_stats': ranked_results  # Now includes ranks and JSD
+            'subreddit_stats': clean_ranked_results  # Now includes ranks and JSD
         }
 
         summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary.json')
@@ -645,9 +600,9 @@ def main():
         logger.info(f"❓ Total ambiguous: {total_ambiguous:,} ({overall_ambiguous_rate:.1f}%)")
         logger.info(f"📋 Total submission IDs: {total_submission_ids:,}")
         logger.info(f"🤖 Model: {EMBEDDING_MODEL}")
-        logger.info(f"📏 Threshold: {SIMILARITY_THRESHOLD}")
+        logger.info(f"📏 Gold threshold: {gold_threshold:.4f} ({GOLD_PERCENTILE}th percentile)")
+        logger.info(f"📏 Ambiguous threshold: {ambiguous_threshold:.4f} ({AMBIGUOUS_PERCENTILE}th percentile)")
         logger.info(f"Summary saved to: {summary_file}")
-        logger.info(f"Rankings saved to: {rankings_file}")
         logger.info(f"Submission IDs saved to: {submission_ids_file}")
 
         if failed_results:
@@ -685,7 +640,6 @@ def main():
         log_error_and_continue(logger, e, "Stage 4 execution")
         log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
         return 1
-
 
 if __name__ == "__main__":
     exit(main())

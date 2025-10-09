@@ -10,8 +10,10 @@ Usage: python 4_match_rules_single.py <subreddit_name> <cuda_device> <rules_file
 
 import sys
 import os
-import json
 import time
+import gc
+import logging
+import argparse
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,61 +27,208 @@ os.environ['TQDM_DISABLE'] = '1'
 # Enable debug logging for vLLM engine processes
 os.environ['VLLM_ENGINE_LOG_LEVEL'] = 'DEBUG'
 
-from config import (PATHS, SIMILARITY_THRESHOLD, EMBEDDING_MODEL, MAX_MATCHED_COMMENTS)
-from utils.files import (read_json_file, write_json_file, read_zst_lines, json_loads, write_zst_json_objects)
-from utils.reddit import normalize_subreddit_name, validate_comment_structure, extract_submission_id
+from config import (PATHS, SIMILARITY_THRESHOLD, EMBEDDING_MODEL, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS)
+from utils.files import (read_json_file, write_json_file, read_zst_lines, json_loads)
+from utils.reddit import normalize_subreddit_name, validate_comment_structure
 
-# Try to import embedding dependencies
-try:
-    import torch
-    from vllm import LLM
-    from vllm.inputs import TextPrompt
-    from transformers import AutoTokenizer
+import torch
+from transformers import AutoTokenizer
+from tqdm import tqdm
+from vllm import LLM
+from vllm.inputs import TokensPrompt
+# Set up subreddit-specific logging in subdirectory
+from utils.logging import get_stage_logger
+from config import create_directories
 
-    # Set deterministic behavior for PyTorch
-    torch.manual_seed(0)
-    torch.cuda.manual_seed_all(0)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+# Set deterministic behavior for PyTorch
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
-    EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    EMBEDDINGS_AVAILABLE = False
+class SimpleCommentRuleMatcher:
+    """Simplified comment-rule matcher using embeddings - Phase 1 only."""
 
-# Import from the main script using importlib to handle numeric filename
-import importlib.util
-import sys as sys_module
+    def __init__(self, model_name: str = None, max_model_len: int = 2048):
+        self.model_name = model_name or EMBEDDING_MODEL
 
-def import_from_main_script():
-    """Import functions from the main 4_match_rules script."""
-    main_script_path = os.path.join(os.path.dirname(__file__), '4_match_rules.py')
-    spec = importlib.util.spec_from_file_location("match_rules_main", main_script_path)
-    module = importlib.util.module_from_spec(spec)
-    sys_module.modules["match_rules_main"] = module
-    spec.loader.exec_module(module)
-    return module
+        try:
+            # Import now at top level
 
+            print(f"Loading embedding model: {self.model_name} with max_model_len={max_model_len + 50}")
+            self.model = LLM(
+                model=self.model_name,
+                task="embed",
+                gpu_memory_utilization=0.95,
+                enforce_eager=True,
+                max_model_len=max_model_len + 50,
+                seed=0
+            )
+            print("✅ Embedding model loaded successfully")
+        except Exception as e:
+            print(f"❌ Failed to load embedding model: {e}")
+            self.model = None
+            raise
 
+    @staticmethod
+    def save_similarity_matrix(cosine_similarities, comments, rules, subreddit_name):
+        """Save similarity matrix to disk in efficient PyTorch format."""
+        try:
+            comment_mapping = {comment['id']: row_idx for row_idx, comment in enumerate(comments)}
+            rule_indices = [rule.get("rule_index", i) for i, rule in enumerate(rules)]
 
-# Import the needed classes and functions
-main_module = import_from_main_script()
-SimpleCommentRuleMatcher = main_module.SimpleCommentRuleMatcher
-pretokenize_inputs = main_module.pretokenize_inputs
+            similarity_data = {
+                'cosine_similarity_matrix': cosine_similarities.float(),
+                'comment_mapping': comment_mapping,
+                'rule_indices': rule_indices,
+                'subreddit': subreddit_name,
+                'num_comments': len(comments),
+                'num_rules': len(rules),
+                'scoring_method': 'cosine_similarity'
+            }
+
+            output_dir = PATHS.get('matched_comments')
+            if not output_dir:
+                raise ValueError("Output directory path not configured")
+            if not os.path.exists(output_dir):
+                raise FileNotFoundError(f"Output directory does not exist: {output_dir}")
+
+            matrix_file = os.path.join(output_dir, f"{subreddit_name}_similarity_matrix.pt")
+            torch.save(similarity_data, matrix_file)
+            print(f"💾 Saved similarity matrix to {matrix_file}")
+
+        except Exception as e:
+            print(f"❌ Failed to save similarity matrix: {e}")
+            raise
+
+    def calculate_similarities_pretokenized(self, comments, rules, tokenized_comments, tokenized_rules):
+        """Phase 1: Calculate cosine similarities and save to .pt files."""
+        # Early validation
+        if not comments or not rules:
+            print("⚠️  No comments or rules to process")
+            return False
+
+        if len(rules) <= 1:
+            print("⚠️  Only one rule or no rules - skipping similarity calculation")
+            return False
+
+        if not tokenized_comments or not tokenized_rules:
+            print("⚠️  No tokenized data provided")
+            return False
+
+        if len(tokenized_comments) != len(comments) or len(tokenized_rules) != len(rules):
+            print("❌ Mismatch between original and tokenized data lengths")
+            return False
+
+        if not self.model:
+            print("❌ CRITICAL: Model is None - cannot perform similarity calculation")
+            raise RuntimeError("Model initialization failed - cannot perform similarity calculation")
+
+        try:
+            # Import now at top level
+
+            print(f"Creating TokensPrompt objects for {len(tokenized_comments)} comments and {len(tokenized_rules)} rules...")
+            comment_prompts = [TokensPrompt(prompt_token_ids=tokens) for tokens in tokenized_comments]
+            rule_prompts = [TokensPrompt(prompt_token_ids=tokens) for tokens in tokenized_rules]
+
+            print(f"Embedding {len(comment_prompts)} comments...")
+            comment_outputs = self.model.embed(comment_prompts)
+            comment_embeddings = torch.tensor([o.outputs.embedding for o in comment_outputs])
+
+            print(f"Embedding {len(rule_prompts)} rule documents...")
+            rule_outputs = self.model.embed(rule_prompts)
+            rule_embeddings = torch.tensor([o.outputs.embedding for o in rule_outputs])
+
+            print("Computing similarities...")
+            similarities = comment_embeddings @ rule_embeddings.T
+
+            subreddit_name = comments[0].get('subreddit', 'unknown') if comments else 'unknown'
+            self.save_similarity_matrix(similarities, comments, rules, subreddit_name)
+
+            print(f"✅ Calculated similarities for {len(comments)} comments and {len(rules)} rules")
+            return True
+
+        except Exception as e:
+            print(f"❌ Error during similarity calculation: {e}")
+            return False
+
+    @classmethod
+    def pretokenize_inputs(cls, comments, rules, model_name, task_description):
+        """
+        Pretokenize comments and rules to find optimal max_model_len.
+
+        Returns:
+            - tokenized_comments: List of token IDs for each comment
+            - tokenized_rules: List of token IDs for each rule
+            - max_length: Maximum token length across all inputs
+        """
+        # Early validation
+        if not comments or not rules:
+            print("⚠️  No comments or rules to tokenize")
+            return [], [], 0
+
+        if len(rules) <= 1:
+            print("⚠️  Only one rule or no rules - skipping tokenization")
+            return [], [], 0
+
+        print(f"Loading tokenizer for {model_name}...")
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        # Tokenize comments with instruction
+        print(f"Tokenizing {len(comments)} comments...")
+        tokenized_comments = []
+        comment_lengths = []
+
+        for comment in tqdm(comments, desc="Tokenizing comments"):
+            body = comment.get('body_clean', '') or comment.get('removal_reason_clean', '')
+            formatted_comment = f'Instruct: {task_description}\nQuery: {body}'
+
+            tokens = tokenizer.encode(formatted_comment, add_special_tokens=True)
+            tokenized_comments.append(tokens)
+            comment_lengths.append(len(tokens))
+
+        # Tokenize rules (documents, no instruction)
+        print(f"Tokenizing {len(rules)} rules...")
+        tokenized_rules = []
+        rule_lengths = []
+
+        for rule in tqdm(rules, desc="Tokenizing rules"):
+            rule_text = rule['rule_comprehensive']
+            tokens = tokenizer.encode(rule_text, add_special_tokens=True)
+            tokenized_rules.append(tokens)
+            rule_lengths.append(len(tokens))
+
+        # Calculate statistics
+        max_comment_len = max(comment_lengths) if comment_lengths else 0
+        max_rule_len = max(rule_lengths) if rule_lengths else 0
+        max_length = max(max_comment_len, max_rule_len)
+
+        avg_comment_len = sum(comment_lengths) / len(comment_lengths) if comment_lengths else 0
+        avg_rule_len = sum(rule_lengths) / len(rule_lengths) if rule_lengths else 0
+
+        print(f"Tokenization complete:")
+        print(f"  Max comment length: {max_comment_len}")
+        print(f"  Max rule length: {max_rule_len}")
+        print(f"  Overall max length: {max_length}")
+        print(f"  Avg comment length: {avg_comment_len:.1f}")
+        print(f"  Avg rule length: {avg_rule_len:.1f}")
+
+        return tokenized_comments, tokenized_rules, max_length
 
 
 def main():
-    if len(sys.argv) != 4:
-        print("Usage: python 4_match_rules_single.py <subreddit_name> <cuda_device> <rules_file>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Process a single subreddit for comment-rule matching using embeddings.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--subreddit", required=True, help="Name of the subreddit to process")
+    parser.add_argument("--cuda-device", required=True, help="CUDA device ID to use (or 'None' for CPU)")
 
-    subreddit_name = sys.argv[1]
-    cuda_device = sys.argv[2]
-    rules_file = sys.argv[3]
+    args = parser.parse_args()
 
-    # Set up subreddit-specific logging in subdirectory
-    from utils.logging import get_stage_logger
-    from config import create_directories
-    import logging
+    subreddit_name = args.subreddit
+    cuda_device = args.cuda_device
+    rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
 
     # Ensure base directories exist
     create_directories()
@@ -112,13 +261,17 @@ def main():
     else:
         logger.info(f"💻 Processing r/{subreddit_name} (CPU mode)")
 
-    # Load rules
-    subreddit_rules = read_json_file(rules_file)
-    rules = subreddit_rules.get(subreddit_name, [])
+    # Load rules from Stage 2 JSON structure
+    stage2_data = read_json_file(rules_file)
+    rules = []
+
+    # Find the subreddit in the nested structure (case-insensitive match on display_name)
+    for subreddit_entry in stage2_data.get('subreddits', []):
+        if subreddit_entry['subreddit']['display_name'].lower() == subreddit_name.lower():
+            rules = subreddit_entry['rules']
+            break
 
     input_file = os.path.join(PATHS['top_subreddits'], f"{subreddit_name}_mod_comments.jsonl.zst")
-    output_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
-    sample_output_file = os.path.join(PATHS['matched_comments_sample'], f"{subreddit_name}_match.jsonl.zst")
     stats_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_stats.json")
 
     # Check if input file exists
@@ -154,21 +307,18 @@ def main():
     # Process rules and comments
     if len(rules) <= 1:
         stats = {
+            "phase": 1,
             "total_comments": len(comments),
-            "matched_comments": 0,
-            "ambiguous_matches": 0,
-            "match_percentage": 0.0,
-            "ambiguous_percentage": 0.0,
-            "rule_matches": {},
-            "skipped_reason": "Only one rule or no rules - no similarity matching needed"
+            "similarity_matrix_saved": False,
+            "phase_1_complete": True,
+            "skipped_reason": "Only one rule or no rules - no similarity calculation needed"
         }
-        matched_comments = []
     else:
         # Pretokenize and match
         task_description = "Which rule is this moderator's comment referring to?"
         logger.info(f"🧩 Starting pretokenization for {len(comments)} comments and {len(rules)} rules...")
         logger.info(f"🤖 Using embedding model: {EMBEDDING_MODEL}")
-        tokenized_comments, tokenized_rules, max_length = pretokenize_inputs(
+        tokenized_comments, tokenized_rules, max_length = SimpleCommentRuleMatcher.pretokenize_inputs(
             comments, rules, EMBEDDING_MODEL, task_description
         )
         logger.info(f"✅ Pretokenization completed. Max token length: {max_length}")
@@ -178,84 +328,60 @@ def main():
 
         logger.info(f"🏗️  Initializing SimpleCommentRuleMatcher...")
         try:
-            matcher = SimpleCommentRuleMatcher(
-                similarity_threshold=SIMILARITY_THRESHOLD,
+            subreddit_matcher = SimpleCommentRuleMatcher(
                 max_model_len=optimal_max_len
             )
-
-            # Explicit validation - fail fast if model didn't load
-            if not matcher.model:
-                logger.error("❌ CRITICAL: Model failed to load - cannot perform matching")
-                sys.exit(1)
-
             logger.info(f"✅ SimpleCommentRuleMatcher initialized successfully")
         except Exception as e:
             logger.error(f"❌ Model initialization failed: {e}")
             sys.exit(1)
 
-        logger.info(f"🔄 Starting comment-rule matching for {len(comments)} comments and {len(rules)} rules...")
+        logger.info(f"🔄 Starting Phase 1: similarity calculation for {len(comments)} comments and {len(rules)} rules...")
         try:
-            matched_comments, stats = matcher.match_comments_to_rules_pretokenized(
+            success = subreddit_matcher.calculate_similarities_pretokenized(
                 comments, rules, tokenized_comments, tokenized_rules
             )
-            logger.info(f"✅ Comment-rule matching completed successfully")
+            if success:
+                logger.info(f"✅ Phase 1: Similarity calculation completed successfully")
+                # Create placeholder stats for Phase 1 completion
+                stats = {
+                    "phase": 1,
+                    "total_comments": len(comments),
+                    "similarity_matrix_saved": True,
+                    "phase_1_complete": True,
+                    "matching_pending": "Phase 2 required for matching with data-driven thresholds"
+                }
+            else:
+                raise RuntimeError("Similarity calculation failed")
         except Exception as e:
-            logger.error(f"❌ Comment-rule matching failed: {e}")
+            logger.error(f"❌ Phase 1: Similarity calculation failed: {e}")
             raise
 
         stats['max_token_length'] = max_length
         stats['optimal_max_len'] = optimal_max_len
 
-        # Sample matched comments and extract submission IDs
-        if matched_comments:
-            import random
-            random.seed(0)
-            sample_size = min(len(matched_comments), MAX_MATCHED_COMMENTS)
-            sampled_comments = random.sample(matched_comments, sample_size)
-            submission_ids = [extract_submission_id(c.get('link_id', '')) for c in sampled_comments]
-            submission_ids = list(set(filter(None, submission_ids)))
-
-            stats['submission_ids'] = submission_ids
-            stats['sampled_comments_count'] = len(sampled_comments)
-            stats['unique_submission_ids'] = len(submission_ids)
-            logger.info(f"📋 Sampled {len(sampled_comments)} comments, found {len(submission_ids)} unique submission IDs")
-        else:
-            stats['submission_ids'] = []
-            stats['sampled_comments_count'] = 0
-            stats['unique_submission_ids'] = 0
+        # Phase 1 complete - no sampling or matching yet
+        stats['submission_ids'] = []
+        stats['sampled_comments_count'] = 0
+        stats['unique_submission_ids'] = 0
+        logger.info(f"📋 Phase 1 complete - similarity matrix saved, matching deferred to Phase 2")
 
     # Add metadata
     stats['subreddit'] = subreddit_name
     stats['total_rules'] = len(rules)
 
-    # Save results
-    if matched_comments:
-        try:
-            write_zst_json_objects(output_file, matched_comments)
-            logger.info(f"✅ Saved {len(matched_comments)} matched comments")
-        except Exception as e:
-            stats['save_error'] = str(e)
-            logger.error(f"❌ Error saving matched comments: {e}")
-
-        # Save sampled comments if sampling was performed
-        if sampled_comments:
-            try:
-                os.makedirs(os.path.dirname(sample_output_file), exist_ok=True)
-                write_zst_json_objects(sample_output_file, sampled_comments)
-                logger.info(f"✅ Saved {len(sampled_comments)} sampled comments")
-            except Exception as e:
-                stats['sample_save_error'] = str(e)
-                logger.error(f"❌ Error saving sampled comments: {e}")
+    # Phase 1: No matched comments to save yet - only similarity matrix is saved
+    logger.info(f"📁 Phase 1: Similarity matrix saved to matched_comments/{subreddit_name}_similarity_matrix.pt")
+    logger.info(f"⏭️  Phase 2 will be handled by main script after all subreddits complete Phase 1")
 
     try:
         write_json_file(stats, stats_file, pretty=True)
     except Exception as e:
         logger.error(f"⚠️  Error saving stats: {e}")
 
-    match_pct = stats.get('match_percentage', 0)
-    ambiguous_count = stats.get('ambiguous_matches', 0)
-    ambiguous_pct = stats.get('ambiguous_percentage', 0)
-    logger.info(f"📊 {len(comments)} comments, {len(matched_comments)} matched ({match_pct:.1f}%), {ambiguous_count} ambiguous ({ambiguous_pct:.1f}%)")
+    phase = stats.get('phase', 1)
+    similarity_saved = stats.get('similarity_matrix_saved', False)
+    logger.info(f"📊 Phase {phase}: {len(comments)} comments processed, similarity matrix saved: {similarity_saved}")
 
     elapsed = time.time() - start_time
     logger.info(f"✅ Completed r/{subreddit_name} in {elapsed:.1f}s")
@@ -263,9 +389,8 @@ def main():
     # Explicit cleanup to avoid vLLM cleanup SIGABRT issues
     logger.info("🧹 Cleaning up vLLM resources...")
     try:
-        if 'matcher' in locals() and hasattr(matcher, 'model') and matcher.model:
-            del matcher.model
-        import gc
+        if 'subreddit_matcher' in locals() and hasattr(subreddit_matcher, 'model') and subreddit_matcher.model:
+            del subreddit_matcher.model
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
