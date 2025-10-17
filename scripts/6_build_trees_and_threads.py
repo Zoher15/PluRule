@@ -27,7 +27,7 @@ from typing import Dict, List, Any, Optional, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, create_directories
-from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, ensure_directory, get_file_size_gb)
 from utils.reddit import (normalize_subreddit_name, extract_submission_id, extract_comment_id)
@@ -52,9 +52,11 @@ def load_target_subreddits_and_rules(logger) -> Tuple[Dict[str, str], Dict[str, 
             subreddit_languages[subreddit_name] = language
 
             # Initialize all rules for this subreddit with 0 counts
+            # Use short_name_clean to match Stage 4's matched_rule format
+            # Rules are at item level, not subreddit_data level
             rule_stats = {}
-            for rule in subreddit_data.get('rules', []):
-                rule_name = rule.get('short_name', '')
+            for rule in item.get('rules', []):
+                rule_name = rule.get('short_name_clean', '')
                 if rule_name:
                     rule_stats[rule_name] = 0
 
@@ -284,8 +286,8 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread_length: in
     # Get all comments at same depth
     same_depth_comments = depth_levels.get(moderated_depth, [])
 
-    # Remove moderated comment from alternatives
-    alternatives = [cid for cid in same_depth_comments if cid != moderated_comment_id]
+    # Remove moderated comment from alternatives and sort for determinism
+    alternatives = sorted([cid for cid in same_depth_comments if cid != moderated_comment_id])
 
     if not alternatives:
         return None, moderated_depth
@@ -358,6 +360,7 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
 
     return {
         'mod_comment_id': mod_comment_id,
+        'mod_comment': mod_comment,  # Store full moderator comment object
         'moderated_thread': moderated_thread,
         'unmoderated_thread': unmoderated_thread,
         'metadata': {
@@ -547,8 +550,8 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
             'rule_distribution': rule_stats,
             'jsd_from_uniform': jsd_score,
             'debug_counts': debug_counts,
-            'failed_depth_distribution': failed_depth_distribution,
-            'successful_depth_distribution': successful_depth_distribution,
+            'failed_depth_distribution': {str(k): v for k, v in failed_depth_distribution.items()},
+            'successful_depth_distribution': {str(k): v for k, v in successful_depth_distribution.items()},
             'processing_time': elapsed
         }
 
@@ -620,21 +623,20 @@ def main():
         total_trees_size = sum(r.get('trees_file_size_gb', 0) for r in completed_results)
         total_threads_size = sum(r.get('threads_file_size_gb', 0) for r in completed_results)
 
-        # Filter to subreddits with ≥500 successful pairs for ranking
+        # Filter to subreddits with ≥500 successful pairs (keep ALL, no top-N filtering)
         qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= 500]
 
-        # Add language information and rank
+        # Add language information to all qualified results
         for result in qualified_results:
             subreddit_name = result['subreddit']
             result['language'] = subreddit_languages.get(subreddit_name, 'unknown')
 
-        # Separate English from other languages
+        # Separate English from other languages for ranking
         english_results = [r for r in qualified_results if r.get('language') == 'en']
         other_language_results = [r for r in qualified_results if r.get('language') != 'en']
 
-        # Rank English by JSD using utility (ascending=True means lower JSD = better rank)
+        # Rank ALL English subreddits by JSD (ascending=True means lower JSD = better rank)
         english_results = rank_by_score(english_results, 'jsd_from_uniform', ascending=True)
-        top_100_english = english_results[:100]
 
         # Other languages get no rank
         for result in other_language_results:
@@ -649,8 +651,8 @@ def main():
                 'completed_subreddits': len(completed_results),
                 'failed_subreddits': len(failed_results),
                 'subreddits_with_500_plus_pairs': len(qualified_results),
-                'ranked_english': len(top_100_english),
-                'unranked_other_languages': len(other_language_results),
+                'english_subreddits': len(english_results),
+                'other_language_subreddits': len(other_language_results),
                 'total_trees_built': total_trees,
                 'total_comments_processed': total_comments,
                 'total_successful_pairs': total_successful_pairs,
@@ -661,7 +663,7 @@ def main():
                 'processing_time_seconds': elapsed,
                 'collection_date': time.strftime('%Y-%m-%d %H:%M:%S')
             },
-            'subreddit_stats': top_100_english + other_language_results,
+            'subreddit_stats': english_results + other_language_results,
             'failed_subreddits': [{'subreddit': r['subreddit'], 'error': r.get('error', 'Unknown')} for r in failed_results]
         }
 
@@ -675,8 +677,9 @@ def main():
         logger.info(f"🌳 Built {total_trees:,} comment trees")
         logger.info(f"🧵 Created {total_successful_pairs:,} discussion thread pairs")
         logger.info(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%" if total_mod_comments > 0 else "📈 No mod comments processed")
-        logger.info(f"🏆 Ranked English subreddits: {len(top_100_english)}")
-        logger.info(f"🌍 Other language subreddits: {len(other_language_results)}")
+        logger.info(f"✅ Qualified subreddits (≥500 pairs): {len(qualified_results)}")
+        logger.info(f"   🏆 English subreddits: {len(english_results)}")
+        logger.info(f"   🌍 Other language subreddits: {len(other_language_results)}")
         logger.info(f"Summary saved to: {summary_file}")
 
         if failed_results:

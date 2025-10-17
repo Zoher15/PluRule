@@ -179,9 +179,11 @@ def has_media(submission: Dict[str, Any]) -> bool:
     # Check various media indicators
     media_indicators = [
         submission.get('is_video', False),
+        submission.get('is_gallery', False),
         submission.get('is_reddit_media_domain', False),
         bool(submission.get('media')),
         bool(submission.get('media_embed')),
+        bool(submission.get('media_metadata')),
         bool(submission.get('secure_media')),
         bool(submission.get('secure_media_embed')),
         submission.get('post_hint') in ['image', 'rich:video', 'hosted:video', 'link'],

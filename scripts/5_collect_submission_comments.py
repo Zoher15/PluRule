@@ -11,7 +11,7 @@ Phase 2: Parallel subreddit consolidation - organize comments into nested struct
          and output pickle files per subreddit
 Phase 3: Cleanup temp directories
 
-Input:  reddit_comments/RC_*.zst files + subreddit_submission_ids.json
+Input:  reddit_comments/RC_*.zst files + stage4_subreddit_submission_ids.json
 Output: organized_comments/{subreddit}_submission_comments.pkl files
 """
 
@@ -34,7 +34,7 @@ from utils.reddit import extract_submission_id, normalize_subreddit_name, valida
 
 def load_submission_ids(logger):
     """Load submission IDs from Stage 4 output."""
-    submission_ids_file = os.path.join(PATHS['data'], 'subreddit_submission_ids.json')
+    submission_ids_file = os.path.join(PATHS['data'], 'stage4_subreddit_submission_ids.json')
     data = read_json_file(submission_ids_file)
 
     # Create lookup structures
@@ -80,8 +80,8 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
     # Extract RC identifier for meaningful logging (e.g., "RC_2023-02")
     rc_identifier = rc_filename.replace('.zst', '')
 
-    # Create worker logger with meaningful identifier
-    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=rc_identifier)
+    # Create worker logger with RC identifier in rc_files/ subdirectory
+    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=f"rc_files/{rc_identifier}")
     rc_date = rc_filename.split('_')[1].split('.')[0]  # Extract YYYY-MM
 
     def comment_processor(line: str, state: Dict) -> Dict[str, Any]:
@@ -106,11 +106,11 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
             subreddit_target_ids = subreddit_to_ids.get(subreddit, set())
 
             if submission_id in subreddit_target_ids:
-                # Get original subreddit case for consistency
-                original_subreddit = comment.get('subreddit', 'unknown')
+                # Use normalized subreddit name for temp directory path
+                # (Phase 2 will look for the normalized name)
 
                 # Determine output file path
-                output_file = os.path.join(temp_dir, original_subreddit, f"RC_{rc_date}.zst")
+                output_file = os.path.join(temp_dir, subreddit, f"RC_{rc_date}.zst")
 
                 return {
                     'matched': True,
@@ -168,8 +168,8 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
     """
     subreddit, target_submission_ids, temp_dir, output_dir = args
 
-    # Create worker logger with subreddit identifier
-    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=subreddit)
+    # Create worker logger with subreddit identifier in subreddits/ subdirectory
+    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=f"subreddits/{subreddit}")
 
     worker_logger.info(f"🔄 Organizing {subreddit} ({len(target_submission_ids)} target submissions)")
     start_time = time.time()

@@ -26,33 +26,11 @@ from typing import Dict, List, Any, Set, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, PROCESSES, DATE_RANGE, create_directories
-from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         get_files_in_date_range, process_zst_file_multi,
-                        json_loads, ensure_directory, get_file_size_gb)
-from utils.reddit import (normalize_subreddit_name, validate_submission_structure,
-                         extract_submission_id)
-
-
-def load_qualified_subreddits() -> List[str]:
-    """Load list of qualified subreddits from Stage 6 summary."""
-    summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
-
-    try:
-        summary = read_json_file(summary_file)
-
-        # Get subreddits with successful thread pairs
-        qualified_subreddits = []
-        for subreddit_stat in summary.get('subreddit_stats', []):
-            if subreddit_stat.get('successful_pairs', 0) > 0:
-                qualified_subreddits.append(subreddit_stat['subreddit'])
-
-        # Will use logger from caller if provided
-        return qualified_subreddits
-
-    except Exception as e:
-        # Will use logger from caller if provided
-        return []
+                        json_loads, get_file_size_gb, load_qualified_subreddits_from_stage6)
+from utils.reddit import (normalize_subreddit_name, validate_submission_structure)
 
 
 def extract_submission_ids_from_threads(subreddit: str, logger) -> Set[str]:
@@ -86,18 +64,19 @@ def extract_submission_ids_from_threads(subreddit: str, logger) -> Set[str]:
 
 def collect_subreddit_submission_ids(logger) -> Dict[str, Set[str]]:
     """Collect submission IDs for all qualified subreddits."""
-    qualified_subreddits = load_qualified_subreddits()
+    qualified_subreddit_stats = load_qualified_subreddits_from_stage6(logger)
 
-    if not qualified_subreddits:
+    if not qualified_subreddit_stats:
         logger.error("❌ No qualified subreddits found!")
         return {}
 
-    logger.info(f"📊 Extracting submission IDs from {len(qualified_subreddits)} subreddits...")
+    logger.info(f"📊 Extracting submission IDs from {len(qualified_subreddit_stats)} subreddits...")
 
     subreddit_submission_ids = {}
     total_unique_ids = set()
 
-    for subreddit in qualified_subreddits:
+    for subreddit_stat in qualified_subreddit_stats:
+        subreddit = subreddit_stat['subreddit']
         submission_ids = extract_submission_ids_from_threads(subreddit, logger)
         if submission_ids:
             subreddit_submission_ids[subreddit] = submission_ids
@@ -118,8 +97,8 @@ def process_rs_file(args: tuple) -> Dict[str, Any]:
     # Extract RS identifier for meaningful logging (e.g., "RS_2023-02")
     rs_identifier = rs_filename.replace('.zst', '')
 
-    # Create worker logger with meaningful identifier
-    worker_logger = get_stage_logger(7, "collect_submissions", worker_identifier=rs_identifier)
+    # Create worker logger with meaningful identifier (in rs_files subdirectory)
+    worker_logger = get_stage_logger(7, "collect_submissions", worker_identifier=f"rs_files/{rs_identifier}")
     rs_date = rs_filename.split('_')[1].split('.')[0]  # Extract YYYY-MM
 
     def submission_processor(line: str, state: Dict) -> Dict[str, Any]:
@@ -160,7 +139,8 @@ def process_rs_file(args: tuple) -> Dict[str, Any]:
 
     try:
         # Process with multi-output utility
-        stats = process_zst_file_multi(rs_file_path, submission_processor, {}, logger=worker_logger)
+        stats = process_zst_file_multi(rs_file_path, submission_processor, {},
+                                       progress_interval=1_000_000, logger=worker_logger)
 
         # Build output info from stats
         subreddits_with_submissions = len(stats["output_stats"])
@@ -189,10 +169,10 @@ def process_rs_file(args: tuple) -> Dict[str, Any]:
 
 def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
     """Consolidate temp files for a single subreddit into final output."""
-    subreddit, temp_dir = args
+    subreddit, temp_dir, needed_submission_ids = args
 
-    # Create worker logger with subreddit identifier
-    worker_logger = get_stage_logger(7, "collect_submissions", worker_identifier=subreddit)
+    # Create worker logger with subreddit identifier (in subreddits subdirectory)
+    worker_logger = get_stage_logger(7, "collect_submissions", worker_identifier=f"subreddits/{subreddit}")
 
     subreddit_temp_dir = os.path.join(temp_dir, subreddit)
 
@@ -265,7 +245,12 @@ def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
         write_zst_json_objects(output_file, all_submissions)
         file_size = get_file_size_gb(output_file)
 
-        worker_logger.info(f"✅ {subreddit}: {len(all_submissions):,} submissions from {files_processed} temp files ({file_size:.3f} GB)")
+        # Calculate coverage
+        submissions_needed = len(needed_submission_ids)
+        submissions_found = len(all_submissions)
+        coverage_rate = submissions_found / submissions_needed if submissions_needed > 0 else 0
+
+        worker_logger.info(f"✅ {subreddit}: {submissions_found:,}/{submissions_needed:,} submissions ({coverage_rate*100:.1f}% coverage) from {files_processed} temp files ({file_size:.3f} GB)")
 
         # Clean up temp directory
         import shutil
@@ -273,7 +258,9 @@ def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
 
         return {
             'subreddit': subreddit,
-            'submissions_collected': len(all_submissions),
+            'submissions_needed': submissions_needed,
+            'submissions_collected': submissions_found,
+            'coverage_rate': coverage_rate,
             'output_file': output_file,
             'file_size_gb': file_size,
             'temp_files_processed': files_processed,
@@ -371,7 +358,7 @@ def main():
         logger.info(f"Found {len(subreddits_with_data)} subreddits with submission data")
 
         # Consolidate in parallel
-        consolidate_args = [(subreddit, temp_dir) for subreddit in subreddits_with_data]
+        consolidate_args = [(subreddit, temp_dir, subreddit_submission_ids[subreddit]) for subreddit in subreddits_with_data]
         consolidate_results = process_files_parallel(consolidate_args, consolidate_subreddit_submissions, PROCESSES, logger)
 
             # Phase 4: Cleanup and statistics
@@ -387,8 +374,10 @@ def main():
         successful_consolidations = [r for r in consolidate_results if r.get('success', False)]
         failed_consolidations = [r for r in consolidate_results if not r.get('success', False)]
 
+        total_submissions_needed = sum(r.get('submissions_needed', 0) for r in successful_consolidations)
         total_submissions_final = sum(r.get('submissions_collected', 0) for r in successful_consolidations)
         total_file_size = sum(r.get('file_size_gb', 0) for r in successful_consolidations)
+        overall_coverage = total_submissions_final / total_submissions_needed if total_submissions_needed > 0 else 0
 
         elapsed = time.time() - start_time
 
@@ -398,6 +387,9 @@ def main():
                 'total_qualified_subreddits': len(subreddit_submission_ids),
                 'subreddits_with_submissions': len(successful_consolidations),
                 'total_unique_submission_ids': len(set().union(*subreddit_submission_ids.values())),
+                'total_submissions_needed': total_submissions_needed,
+                'total_submissions_found': total_submissions_final,
+                'overall_coverage_rate': overall_coverage,
                 'total_rs_files_processed': len(successful_rs),
                 'total_submissions_processed': total_submissions_processed,
                 'total_submissions_collected': total_submissions_final,
@@ -411,7 +403,9 @@ def main():
             'subreddit_stats': [
                 {
                     'subreddit': r['subreddit'],
+                    'submissions_needed': r.get('submissions_needed', 0),
                     'submissions_collected': r['submissions_collected'],
+                    'coverage_rate': r.get('coverage_rate', 0),
                     'file_size_gb': r.get('file_size_gb', 0),
                     'temp_files_processed': r.get('temp_files_processed', 0)
                 }
@@ -433,9 +427,9 @@ def main():
         logger.info(f"🎉 Stage 7 Complete!")
         logger.info(f"Time: {elapsed:.1f}s")
         logger.info(f"📊 Processed {len(successful_consolidations)}/{len(subreddit_submission_ids)} subreddits")
-        logger.info(f"📝 Collected {total_submissions_final:,} submissions")
+        logger.info(f"📝 Collected {total_submissions_final:,}/{total_submissions_needed:,} submissions ({overall_coverage*100:.1f}% coverage)")
         logger.info(f"💾 Total size: {total_file_size:.2f} GB")
-        logger.info(f"📈 Collection rate: {(total_submissions_collected/total_submissions_processed)*100:.1f}%" if total_submissions_processed > 0 else "📈 No submissions processed")
+        logger.info(f"📈 RS file collection rate: {(total_submissions_collected/total_submissions_processed)*100:.1f}%" if total_submissions_processed > 0 else "📈 No submissions processed")
         logger.info(f"Summary saved to: {summary_file}")
 
         if failed_consolidations:

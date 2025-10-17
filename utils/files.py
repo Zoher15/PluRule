@@ -273,9 +273,10 @@ def read_json_file(file_path: str) -> Any:
 def get_files_in_date_range(folder: str, prefix: str, date_range: Tuple[str, str], logger=None) -> List[str]:
     """
     Get files in a folder that match prefix and fall within date range.
+    Searches recursively through subdirectories.
 
     Args:
-        folder: Directory to search
+        folder: Directory to search (searches recursively)
         prefix: File prefix (e.g., "RC_", "RS_")
         date_range: Tuple of (start_date, end_date) in YYYY-MM format
         logger: Optional logger for messages (if None, uses print)
@@ -283,6 +284,8 @@ def get_files_in_date_range(folder: str, prefix: str, date_range: Tuple[str, str
     Returns:
         List of file paths sorted by date (newest first)
     """
+    import glob
+
     if not os.path.exists(folder):
         msg = f"Warning: Directory {folder} does not exist"
         if logger:
@@ -294,14 +297,24 @@ def get_files_in_date_range(folder: str, prefix: str, date_range: Tuple[str, str
     start_date, end_date = date_range
     files = []
 
-    for filename in os.listdir(folder):
-        if filename.startswith(prefix) and filename.endswith('.zst') and not filename.endswith('corrupted.zst'):
+    # Search recursively for files matching pattern
+    pattern = os.path.join(folder, '**', f'{prefix}*.zst')
+
+    for file_path in glob.glob(pattern, recursive=True):
+        filename = os.path.basename(file_path)
+
+        # Skip corrupted files
+        if filename.endswith('corrupted.zst'):
+            continue
+
+        # Check if filename matches expected pattern
+        if filename.startswith(prefix) and filename.endswith('.zst'):
             try:
                 # Extract date from filename (e.g., RC_2023-01.zst -> 2023-01)
                 date_part = filename.split('_')[1].split('.')[0]
 
                 if start_date <= date_part <= end_date:
-                    files.append(os.path.join(folder, filename))
+                    files.append(file_path)
 
             except (IndexError, ValueError):
                 msg = f"Warning: Could not parse date from filename: {filename}"
@@ -409,3 +422,61 @@ def ensure_directory(file_path: str):
     directory = os.path.dirname(file_path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+
+
+def load_qualified_subreddits_from_stage6(logger=None) -> List[Dict[str, Any]]:
+    """
+    Load full stats for qualified subreddits from Stage 6 summary.
+
+    This function is used by Stage 7, 8, and 9 to get full statistics for subreddits
+    that have ≥500 successful thread pairs from Stage 6.
+
+    Args:
+        logger: Optional logger for messages (if None, uses print)
+
+    Returns:
+        List of subreddit stat dictionaries (full data from Stage 6), including:
+        - subreddit: name
+        - successful_pairs: number of successful thread pairs
+        - language: subreddit language
+        - rule_distribution: dict of rule name to count
+        - jsd_from_uniform: JSD score
+        - rank: JSD-based rank
+        - (and all other fields from Stage 6 summary)
+    """
+    from config import PATHS
+
+    summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
+
+    if not os.path.exists(summary_file):
+        msg = f"❌ Stage 6 summary not found: {summary_file}"
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        return []
+
+    try:
+        summary = read_json_file(summary_file)
+
+        # Get full stats for subreddits with successful thread pairs
+        qualified_subreddits = []
+        for subreddit_stat in summary.get('subreddit_stats', []):
+            if subreddit_stat.get('successful_pairs', 0) > 0:
+                qualified_subreddits.append(subreddit_stat)
+
+        msg = f"Loaded {len(qualified_subreddits)} qualified subreddits from Stage 6 summary"
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
+
+        return qualified_subreddits
+
+    except Exception as e:
+        msg = f"❌ Error loading Stage 6 summary: {e}"
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        return []

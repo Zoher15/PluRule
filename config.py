@@ -14,16 +14,15 @@ import multiprocessing
 
 # Base directories
 BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline"
-REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/comments_submissions"
+REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/Pushshift"
 
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
-TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 2000
-SIMILARITY_THRESHOLD = 0.8
-GOLD_PERCENTILE = 99  # Top 1% of similarity scores considered gold matches
+TOP_N_SUBREDDITS_WITH_MOD_COMMENTS = 10000
+GOLD_PERCENTILE = 99  # Top 2% of similarity scores considered gold matches
 AMBIGUOUS_PERCENTILE = 95  # Top 5% of similarity scores considered ambiguous matches
-MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 500
-MAX_MATCHED_COMMENTS = 1000
+MIN_MATCHED_COMMENTS = FINAL_THREAD_PAIRS_PER_SUBREDDIT = 50
+MAX_MATCHED_COMMENTS = 100
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
 FINAL_SUBREDDITS = 100
 # Auto-detect number of CPU cores (use all available cores)
@@ -88,7 +87,7 @@ DATA_FLOW = {
             '{subreddit}_match.jsonl.zst',
             '{subreddit}_stats.json',
             'stage4_matching_summary.json',
-            'subreddit_submission_ids.json'
+            'stage4_subreddit_submission_ids.json'
         ]
     },
 
@@ -97,7 +96,7 @@ DATA_FLOW = {
         'name': 'Collect Submission Comments',
         'script': '5_collect_submission_comments.py',
         'input_paths': ['reddit_comments'],
-        'input_files': ['subreddit_submission_ids.json'],
+        'input_files': ['stage4_subreddit_submission_ids.json'],
         'output_dir': 'organized_comments',
         'produces': [
             '{subreddit}_submission_comments.pkl',

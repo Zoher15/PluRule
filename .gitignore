@@ -12,6 +12,7 @@ logs/
 data/
 output/
 credentials/
+trash/
 
 # Virtual environments
 venv/

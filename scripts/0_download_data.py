@@ -102,11 +102,17 @@ def download_file(args: Tuple[str, str, str]) -> dict:
     # Create worker logger with filename identifier
     worker_logger = get_stage_logger(0, "download_data", worker_identifier=filename)
 
-    # Determine output directory
+    # Extract year from filename (e.g., RC_2023-01.zst -> 2023)
+    try:
+        year = filename.split('_')[1].split('-')[0]
+    except (IndexError, ValueError):
+        year = 'unknown'
+
+    # Determine output directory with year subdirectory
     if file_type == 'comments':
-        output_dir = PATHS['reddit_comments']
+        output_dir = os.path.join(PATHS['reddit_comments'], year)
     else:  # submissions
-        output_dir = PATHS['reddit_submissions']
+        output_dir = os.path.join(PATHS['reddit_submissions'], year)
 
     output_path = os.path.join(output_dir, filename)
 
@@ -215,9 +221,8 @@ def main():
         # Create directories
         create_directories()
 
-        # Ensure reddit data directories exist
-        os.makedirs(PATHS['reddit_comments'], exist_ok=True)
-        os.makedirs(PATHS['reddit_submissions'], exist_ok=True)
+        # Base directories will be created by ensure_directory() during download
+        # Year subdirectories (e.g., comments/2023/) are created automatically
 
         # Generate download URLs
         logger.info(f"Generating download URLs for date range: {DATE_RANGE[0]} to {DATE_RANGE[1]}")
@@ -261,9 +266,9 @@ def main():
                     logger.warning(f"  {result['filename']}: {result.get('error', 'Unknown error')}")
 
         # Show download locations
-        logger.info(f"Download locations:")
-        logger.info(f"  Comments: {PATHS['reddit_comments']}")
-        logger.info(f"  Submissions: {PATHS['reddit_submissions']}")
+        logger.info(f"Download locations (organized by year):")
+        logger.info(f"  Comments: {PATHS['reddit_comments']}/YYYY/RC_*.zst")
+        logger.info(f"  Submissions: {PATHS['reddit_submissions']}/YYYY/RS_*.zst")
 
         # Save download log
         from utils.files import write_json_file

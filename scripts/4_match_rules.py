@@ -131,8 +131,8 @@ def create_distribution_plot(output_dir: str, all_similarities: List[np.ndarray]
 
     if logger:
         logger.info(f"📈 Distribution plot saved to: {plot_file}")
-        logger.info(f"Gold threshold (99th percentile): {gold_threshold:.4f}")
-        logger.info(f"Ambiguous threshold (90th percentile): {ambiguous_threshold:.4f}")
+        logger.info(f"Gold threshold ({GOLD_PERCENTILE}th percentile): {gold_threshold:.4f}")
+        logger.info(f"Ambiguous threshold ({AMBIGUOUS_PERCENTILE}th percentile): {ambiguous_threshold:.4f}")
     return float(gold_threshold), float(ambiguous_threshold)  # Return thresholds for use in matching
 
 def load_similarity_matrix(matrix_file):
@@ -195,7 +195,7 @@ def process_subreddit_matching(load_result, logger=None):
             max_similarity = torch.max(comment_similarities)
 
             # Check for ambiguous matches
-            above_ambiguous = comment_similarities >= ambiguous_threshold
+            above_ambiguous = comment_similarities > ambiguous_threshold
             num_above_ambiguous = torch.sum(above_ambiguous)
 
             if num_above_ambiguous > 1:
@@ -457,8 +457,8 @@ def main():
         gold_threshold, ambiguous_threshold = create_distribution_plot(output_dir, all_similarity_scores, GOLD_PERCENTILE, AMBIGUOUS_PERCENTILE, logger)
 
 
-        logger.info(f"📊 Gold threshold (99th percentile): {gold_threshold:.4f}")
-        logger.info(f"📊 Ambiguous threshold (90th percentile): {ambiguous_threshold:.4f}")
+        logger.info(f"📊 Gold threshold ({GOLD_PERCENTILE}th percentile): {gold_threshold:.4f}")
+        logger.info(f"📊 Ambiguous threshold ({AMBIGUOUS_PERCENTILE}th percentile): {ambiguous_threshold:.4f}")
 
         # Load Stage 2 rules once for all subreddits
         logger.info("📚 Loading rules from Stage 2 data...")
@@ -587,7 +587,7 @@ def main():
             'subreddit_submission_ids': submission_ids_data
         }
 
-        submission_ids_file = os.path.join(PATHS['data'], 'subreddit_submission_ids.json')
+        submission_ids_file = os.path.join(PATHS['data'], 'stage4_subreddit_submission_ids.json')
         write_json_file(submission_ids_output, submission_ids_file, pretty=True)
 
         elapsed = time.time() - start_time
