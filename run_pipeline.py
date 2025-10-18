@@ -102,7 +102,7 @@ def run_stage(stage_num: int, pipeline_logger=None) -> bool:
         return False
 
 
-def run_pipeline(start_stage: int = 0, end_stage: int = 9, stop_on_failure: bool = True) -> int:
+def run_pipeline(start_stage: int = 0, end_stage: int = 10, stop_on_failure: bool = True) -> int:
     """Run multiple pipeline stages."""
     # Create pipeline logger
     pipeline_logger = setup_stage_logger("pipeline_runner")
@@ -169,14 +169,14 @@ def show_usage():
     print("=" * 40)
     print()
     print("Usage:")
-    print("  python run_pipeline.py                # Run full pipeline (stages 0-9)")
+    print("  python run_pipeline.py                # Run full pipeline (stages 0-10)")
     print("  python run_pipeline.py 0              # Run stage 0 only")
     print("  python run_pipeline.py 3 5            # Run stages 3-5")
     print("  python run_pipeline.py status         # Show pipeline status")
     print("  python run_pipeline.py help           # Show this help")
     print()
     print("Available stages:")
-    for i in range(0, 10):
+    for i in range(0, 11):
         stage_key = f"stage{i}_" + list(DATA_FLOW.keys())[i].split('_', 1)[1]
         stage_info = DATA_FLOW.get(stage_key)
         if stage_info:
@@ -203,14 +203,14 @@ def main():
             # Single stage or full pipeline
             if args[0].isdigit():
                 stage_num = int(args[0])
-                if 0 <= stage_num <= 9:
+                if 0 <= stage_num <= 10:
                     # Create pipeline logger for single stage run
                     pipeline_logger = setup_stage_logger("pipeline_runner")
                     pipeline_logger.info(f"📂 Pipeline logs: {PATHS['logs']}/pipeline_runner/")
                     print(f"📂 Pipeline logs: {PATHS['logs']}/pipeline_runner/")
                     return 0 if run_stage(stage_num, pipeline_logger) else 1
                 else:
-                    print(f"❌ Invalid stage number: {stage_num} (must be 0-9)")
+                    print(f"❌ Invalid stage number: {stage_num} (must be 0-10)")
                     return 1
             else:
                 print(f"❌ Invalid argument: {args[0]}")
@@ -222,8 +222,8 @@ def main():
             start_stage = int(args[0])
             end_stage = int(args[1])
 
-            if not (0 <= start_stage <= 9 and 0 <= end_stage <= 9):
-                print(f"❌ Invalid stage range: {start_stage}-{end_stage} (must be 0-9)")
+            if not (0 <= start_stage <= 10 and 0 <= end_stage <= 10):
+                print(f"❌ Invalid stage range: {start_stage}-{end_stage} (must be 0-10)")
                 return 1
 
             if start_stage > end_stage:

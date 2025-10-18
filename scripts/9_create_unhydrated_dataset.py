@@ -32,7 +32,7 @@ from collections import defaultdict
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, PROCESSES, create_directories
+from config import PATHS, MIN_MATCHED_COMMENTS, PROCESSES, FINAL_THREAD_PAIRS_PER_SUBREDDIT, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import read_json_file, write_json_file, read_zst_lines, json_loads
 from utils.stats import calculate_jsd_from_uniform, rank_by_score
@@ -78,7 +78,7 @@ def load_successful_submissions(logger) -> tuple:
 
 def load_subreddit_rules(logger) -> Dict[str, List[Dict]]:
     """Load rules for all subreddits from Stage 2."""
-    rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+    rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
 
     if not os.path.exists(rules_file):
         logger.error(f"Stage 2 rules file not found: {rules_file}")
@@ -242,16 +242,16 @@ def process_subreddit(subreddit: str, successful_submission_ids: Set[str],
 
     logger.info(f"  Filtered {len(original_pairs)} -> {len(filtered_pairs)} thread pairs")
 
-    # Skip subreddits with fewer than 500 pairs
-    if len(filtered_pairs) < 500:
-        logger.warning(f"  Skipping r/{subreddit}: only {len(filtered_pairs)} pairs (<500 required)")
+    # Skip subreddits with fewer than FINAL_THREAD_PAIRS_PER_SUBREDDIT pairs
+    if len(filtered_pairs) < FINAL_THREAD_PAIRS_PER_SUBREDDIT:
+        logger.warning(f"  Skipping r/{subreddit}: only {len(filtered_pairs)} pairs (<{FINAL_THREAD_PAIRS_PER_SUBREDDIT} required)")
         return None
 
-    # Sample exactly 500 pairs if we have more than 500 (using seed 0 for reproducibility)
-    if len(filtered_pairs) > 500:
+    # Sample exactly FINAL_THREAD_PAIRS_PER_SUBREDDIT pairs if we have more (using seed 0 for reproducibility)
+    if len(filtered_pairs) > FINAL_THREAD_PAIRS_PER_SUBREDDIT:
         random.seed(0)
-        filtered_pairs = random.sample(filtered_pairs, 500)
-        logger.info(f"  Sampled {len(original_pairs)} -> 500 thread pairs (seed=0)")
+        filtered_pairs = random.sample(filtered_pairs, FINAL_THREAD_PAIRS_PER_SUBREDDIT)
+        logger.info(f"  Sampled {len(original_pairs)} -> {FINAL_THREAD_PAIRS_PER_SUBREDDIT} thread pairs (seed=0)")
 
     # Load comment trees
     trees_file = os.path.join(PATHS['comment_trees'], f"{subreddit}_comment_trees.pkl")
@@ -460,10 +460,10 @@ def main():
             log_stage_end(logger, 9, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        logger.info(f"✅ Processed {len(subreddit_data)} subreddits successfully (all have exactly 500 pairs)")
+        logger.info(f"✅ Processed {len(subreddit_data)} subreddits successfully (all have exactly {FINAL_THREAD_PAIRS_PER_SUBREDDIT} pairs)")
 
         # Rank ALL subreddits by JSD (lower = better), regardless of language
-        # Note: All subreddits already have exactly 500 pairs (sampled in process_subreddit)
+        # Note: All subreddits already have exactly FINAL_THREAD_PAIRS_PER_SUBREDDIT pairs (sampled in process_subreddit)
         logger.info(f"📊 Ranking {len(subreddit_data)} subreddits by JSD...")
 
         final_subreddit_data = rank_by_score(subreddit_data, 'jsd_from_uniform', ascending=True)
@@ -588,7 +588,7 @@ def main():
                 'total_subreddits_in_dataset': len(final_subreddit_data),
                 'english_subreddits': english_count,
                 'non_english_subreddits': non_english_count,
-                'thread_pairs_per_subreddit': 500,
+                'thread_pairs_per_subreddit': FINAL_THREAD_PAIRS_PER_SUBREDDIT,
                 'total_thread_pairs': total_thread_pairs,
                 'total_submissions': total_submissions,
                 'total_submissions_with_media': hydrated_dataset['metadata']['total_submissions_with_media'],
@@ -633,7 +633,7 @@ def main():
         logger.info(f"🎉 Stage 9 Complete!")
         logger.info(f"Time: {elapsed:.1f}s")
         logger.info(f"📊 Final dataset statistics:")
-        logger.info(f"  Subreddits in dataset: {len(final_subreddit_data)} (all with exactly 500 pairs)")
+        logger.info(f"  Subreddits in dataset: {len(final_subreddit_data)} (all with exactly {FINAL_THREAD_PAIRS_PER_SUBREDDIT} pairs)")
         logger.info(f"  Thread pairs: {total_thread_pairs:,}")
         logger.info(f"  Submissions: {total_submissions:,}")
         logger.info(f"  Submissions with media: {hydrated_dataset['metadata']['total_submissions_with_media']:,}")

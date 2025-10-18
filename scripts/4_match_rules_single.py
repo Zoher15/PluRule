@@ -27,7 +27,7 @@ os.environ['TQDM_DISABLE'] = '1'
 # Enable debug logging for vLLM engine processes
 os.environ['VLLM_ENGINE_LOG_LEVEL'] = 'DEBUG'
 
-from config import (PATHS, SIMILARITY_THRESHOLD, EMBEDDING_MODEL, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS)
+from config import (PATHS, EMBEDDING_MODEL, MIN_MATCHED_COMMENTS)
 from utils.files import (read_json_file, write_json_file, read_zst_lines, json_loads)
 from utils.reddit import normalize_subreddit_name, validate_comment_structure
 
@@ -228,7 +228,7 @@ def main():
 
     subreddit_name = args.subreddit
     cuda_device = args.cuda_device
-    rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+    rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
 
     # Ensure base directories exist
     create_directories()

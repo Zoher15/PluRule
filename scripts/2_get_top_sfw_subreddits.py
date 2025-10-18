@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Stage 2: Get Top N SFW Subreddits
+Stage 2: Get SFW Subreddits with Minimum Mod Comments
 
-Takes the subreddit rankings from Stage 1 and selects the top N SFW subreddits
-based on mod comment activity. Uses Reddit API to check NSFW status and collect
-subreddit metadata and community rules.
+Takes the subreddit rankings from Stage 1 and selects all SFW subreddits
+that have at least MIN_MATCHED_COMMENTS mod comments. Uses Reddit API to check
+NSFW status and collect subreddit metadata and community rules.
 
 Input:  subreddit_mod_comment_rankings.json
-Output: top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json
+Output: sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json
 """
 
 import sys
@@ -18,7 +18,7 @@ from typing import Dict, List, Any, Optional
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, create_directories
+from config import PATHS, MIN_MATCHED_COMMENTS, MIN_RULES_FOR_MATCHING, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import read_json_file, write_json_file
 from utils.reddit import clean_rule_text
@@ -160,6 +160,11 @@ def process_subreddit_with_retry(reddit: object, subreddit_name: str, original_r
             # Get community rules
             rules_data = extract_community_rules(reddit, subreddit_name, logger)
 
+            # Skip subreddits with insufficient rules for semantic matching
+            if len(rules_data) < MIN_RULES_FOR_MATCHING:
+                logger.info(f"⏭️  Skipping r/{subreddit_name}: only {len(rules_data)} rule(s) (need {MIN_RULES_FOR_MATCHING}+)")
+                return None
+
             # Add SFW rank (will be set by caller)
             return {
                 'subreddit': subreddit_data,
@@ -184,36 +189,42 @@ def process_subreddit_with_retry(reddit: object, subreddit_name: str, original_r
 
 
 def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger) -> List[Dict[str, Any]]:
-    """Collect top N SFW subreddits with full metadata and rules."""
-    logger.info(f"🚀 Collecting top {TOP_N_SUBREDDITS_WITH_MOD_COMMENTS} SFW subreddits...")
+    """Collect all SFW subreddits with at least MIN_MATCHED_COMMENTS mod comments."""
+    logger.info(f"🚀 Collecting SFW subreddits with at least {MIN_MATCHED_COMMENTS} mod comments...")
 
     sfw_subreddits = []
     checked_count = 0
-    nsfw_skipped = 0
+    skipped_count = 0
 
-    # Set up progress tracking
+    # Set up progress tracking - use total rankings as we'll process all
     if REDDIT_API_AVAILABLE:
-        progress_bar = tqdm(total=TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, desc="Collecting SFW subreddits")
+        progress_bar = tqdm(total=len(rankings_data['rankings']), desc="Collecting SFW subreddits")
     else:
         progress_bar = None
 
     try:
         for ranking_entry in rankings_data['rankings']:
-            if len(sfw_subreddits) >= TOP_N_SUBREDDITS_WITH_MOD_COMMENTS:
-                break
-
             subreddit_name = ranking_entry['subreddit']
             original_rank = ranking_entry['rank']
             mod_comment_count = ranking_entry['mod_comment_count']
 
             checked_count += 1
 
+            # Skip subreddits that don't meet minimum mod comment threshold
+            if mod_comment_count < MIN_MATCHED_COMMENTS:
+                logger.info(f"⏭️  Stopping: r/{subreddit_name} has {mod_comment_count} mod comments (below minimum {MIN_MATCHED_COMMENTS})")
+                if progress_bar:
+                    progress_bar.close()
+                break
+
             # Process subreddit with retry logic
             sfw_entry = process_subreddit_with_retry(reddit, subreddit_name, original_rank, mod_comment_count, logger)
 
             if not sfw_entry:
-                nsfw_skipped += 1
-                logger.info(f"🔒 Skipping r/{subreddit_name} (NSFW or error) - rank {original_rank}")
+                skipped_count += 1
+                # Note: Specific skip reason already logged in process_subreddit_with_retry
+                if progress_bar:
+                    progress_bar.update(1)
                 continue
 
             # Add SFW rank
@@ -221,7 +232,7 @@ def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger
 
             sfw_subreddits.append(sfw_entry)
 
-            logger.info(f"✅ r/{subreddit_name} - SFW rank {len(sfw_subreddits)} (mod rank {original_rank}) - {len(sfw_entry['rules'])} rules")
+            logger.info(f"✅ r/{subreddit_name} - SFW rank {len(sfw_subreddits)} (mod rank {original_rank}) - {mod_comment_count:,} mod comments, {len(sfw_entry['rules'])} rules")
 
             if progress_bar:
                 progress_bar.update(1)
@@ -231,9 +242,9 @@ def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger
             progress_bar.close()
 
     logger.info(f"📊 Collection complete:")
-    logger.info(f"  Collected: {len(sfw_subreddits)} SFW subreddits")
+    logger.info(f"  Collected: {len(sfw_subreddits)} SFW subreddits with {MIN_RULES_FOR_MATCHING}+ rules and {MIN_MATCHED_COMMENTS}+ mod comments")
     logger.info(f"  Checked: {checked_count} subreddits total")
-    logger.info(f"  Skipped: {nsfw_skipped} NSFW subreddits")
+    logger.info(f"  Skipped: {skipped_count} subreddits (NSFW, insufficient rules, or errors)")
 
     return sfw_subreddits
 
@@ -241,8 +252,8 @@ def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger
 def main():
     """Main execution function."""
     # Initialize logging
-    logger = get_stage_logger(2, "get_top_sfw_subreddits")
-    log_stage_start(logger, 2, "Get Top N SFW Subreddits")
+    logger = get_stage_logger(2, "get_sfw_subreddits")
+    log_stage_start(logger, 2, "Get SFW Subreddits with Minimum Mod Comments")
 
     start_time = time.time()
 
@@ -277,15 +288,12 @@ def main():
         # Collect SFW subreddits
         sfw_subreddits = collect_sfw_subreddits(rankings_data, reddit, logger)
 
-        if len(sfw_subreddits) < TOP_N_SUBREDDITS_WITH_MOD_COMMENTS:
-            logger.warning(f"⚠️  Warning: Only collected {len(sfw_subreddits)} SFW subreddits, "
-                  f"less than target {TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}")
-
         # Create output data
         output_data = {
             'summary': {
                 'total_collected': len(sfw_subreddits),
-                'target_count': TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
+                'min_mod_comments_threshold': MIN_MATCHED_COMMENTS,
+                'min_rules_threshold': MIN_RULES_FOR_MATCHING,
                 'source_file': rankings_file,
                 'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
                 'reddit_api_used': reddit is not None,
@@ -295,7 +303,7 @@ def main():
         }
 
         # Save results
-        output_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+        output_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
         write_json_file(output_data, output_file, pretty=True)
 
         # Print summary
@@ -315,6 +323,12 @@ def main():
             if isinstance(subscribers, int):
                 subscribers = f"{subscribers:,}"
             logger.info(f"  {i+1:2d}. r/{sub['name']} - {sub['mod_comment_count']:,} mod comments, {subscribers} subscribers, {rules_count} rules")
+
+        # Log minimum threshold information
+        logger.info(f"📋 Collection criteria:")
+        logger.info(f"  Minimum mod comments: {MIN_MATCHED_COMMENTS}")
+        logger.info(f"  Minimum rules: {MIN_RULES_FOR_MATCHING}")
+        logger.info(f"  SFW only: Yes")
 
         log_stage_end(logger, 2, success=True, elapsed_time=elapsed)
         return 0

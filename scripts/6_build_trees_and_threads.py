@@ -26,7 +26,7 @@ from typing import Dict, List, Any, Optional, Tuple
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, create_directories
+from config import PATHS, PROCESSES, MIN_MATCHED_COMMENTS, FINAL_THREAD_PAIRS_PER_SUBREDDIT, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, ensure_directory, get_file_size_gb)
@@ -36,7 +36,7 @@ from utils.stats import calculate_jsd_from_uniform, rank_by_score
 
 def load_target_subreddits_and_rules(logger) -> Tuple[Dict[str, str], Dict[str, Dict[str, int]]]:
     """Load subreddits with their languages and complete rule sets."""
-    subreddits_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+    subreddits_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
 
     try:
         data = read_json_file(subreddits_file)
@@ -623,8 +623,8 @@ def main():
         total_trees_size = sum(r.get('trees_file_size_gb', 0) for r in completed_results)
         total_threads_size = sum(r.get('threads_file_size_gb', 0) for r in completed_results)
 
-        # Filter to subreddits with ≥500 successful pairs (keep ALL, no top-N filtering)
-        qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= 500]
+        # Filter to subreddits with ≥FINAL_THREAD_PAIRS_PER_SUBREDDIT successful pairs (keep ALL, no top-N filtering)
+        qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= FINAL_THREAD_PAIRS_PER_SUBREDDIT]
 
         # Add language information to all qualified results
         for result in qualified_results:
@@ -677,7 +677,7 @@ def main():
         logger.info(f"🌳 Built {total_trees:,} comment trees")
         logger.info(f"🧵 Created {total_successful_pairs:,} discussion thread pairs")
         logger.info(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%" if total_mod_comments > 0 else "📈 No mod comments processed")
-        logger.info(f"✅ Qualified subreddits (≥500 pairs): {len(qualified_results)}")
+        logger.info(f"✅ Qualified subreddits (≥{FINAL_THREAD_PAIRS_PER_SUBREDDIT} pairs): {len(qualified_results)}")
         logger.info(f"   🏆 English subreddits: {len(english_results)}")
         logger.info(f"   🌍 Other language subreddits: {len(other_language_results)}")
         logger.info(f"Summary saved to: {summary_file}")

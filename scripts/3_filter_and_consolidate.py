@@ -24,7 +24,7 @@ from typing import Dict, Set, Any
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS, create_directories
+from config import PATHS, PROCESSES, MIN_MATCHED_COMMENTS, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, write_zst_json_objects,
@@ -34,7 +34,7 @@ from utils.reddit import clean_rule_text, normalize_subreddit_name, validate_com
 
 def load_target_subreddits(logger) -> Set[str]:
     """Load the set of target subreddits from Stage 2 output."""
-    subreddits_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+    subreddits_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
 
     if not os.path.exists(subreddits_file):
         logger.error(f"❌ Target subreddits file not found: {subreddits_file}")
@@ -144,8 +144,8 @@ def consolidate_subreddit(args: tuple) -> Dict[str, Any]:
     """
     subreddit, _ = args
 
-    # Create worker logger with subreddit identifier
-    worker_logger = get_stage_logger(3, "filter_and_consolidate", worker_identifier=subreddit)
+    # Create worker logger with subreddit identifier in subreddits/ subdirectory
+    worker_logger = get_stage_logger(3, "filter_and_consolidate", worker_identifier=f"subreddits/{subreddit}")
 
     temp_dir = os.path.join(PATHS['top_subreddits'], 'temp', subreddit)
 

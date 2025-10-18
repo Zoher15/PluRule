@@ -23,7 +23,7 @@ from typing import Dict, List, Any
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (PATHS, TOP_N_SUBREDDITS_WITH_MOD_COMMENTS,
+from config import (PATHS, MIN_RULES_FOR_MATCHING,
                    EMBEDDING_MODEL, MIN_MATCHED_COMMENTS,
                    MAX_MATCHED_COMMENTS, GOLD_PERCENTILE, AMBIGUOUS_PERCENTILE,
                    create_directories)
@@ -285,11 +285,18 @@ def main():
 
         # Load Stage 2 data for comment counts and rule validation
         logger.info("📚 Loading subreddit data...")
-        rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
         stage2_data = read_json_file(rules_file)
+
+        # Load Stage 3 summary for actual filtered comment counts
+        logger.info("📚 Loading Stage 3 summary for comment counts...")
+        stage3_summary_file = os.path.join(PATHS['data'], 'stage3_filter_and_consolidate_summary.json')
+        stage3_data = read_json_file(stage3_summary_file)
+        stage3_comment_counts = stage3_data.get('subreddit_details', {})
 
         # Get subreddits with >1 rule and existing comment files, sorted by mod comment count (highest first)
         available_subreddits = []
+        skipped_low_comments = []
         top_subreddits_dir = PATHS['top_subreddits']
 
         if not os.path.exists(top_subreddits_dir):
@@ -301,16 +308,24 @@ def main():
             subreddit_name = entry['subreddit']['display_name'].lower()
             rule_count = len(entry.get('rules', []))
 
-            # Skip subreddits with only one rule (no ambiguity to resolve)
-            if rule_count <= 1:
-                logger.info(f"⏭️  Skipping r/{subreddit_name}: only {rule_count} rule(s)")
+            # Skip subreddits with insufficient rules (should have been filtered in Stage 2, but double-check)
+            if rule_count < MIN_RULES_FOR_MATCHING:
+                logger.info(f"⏭️  Skipping r/{subreddit_name}: only {rule_count} rule(s) (need {MIN_RULES_FOR_MATCHING}+)")
                 continue
 
             # Check if comment file exists
             comment_file = os.path.join(top_subreddits_dir, f"{subreddit_name}_mod_comments.jsonl.zst")
             if os.path.exists(comment_file):
-                comment_count = entry['subreddit'].get('mod_comment_count', 0)
-                available_subreddits.append((subreddit_name, comment_count))
+                # Get actual comment count from Stage 3 (post-filtering)
+                actual_comment_count = stage3_comment_counts.get(subreddit_name, {}).get('comments', 0)
+
+                # Skip subreddits with fewer comments than MIN_MATCHED_COMMENTS
+                # (they won't meet the threshold anyway, so no point processing them)
+                if actual_comment_count < MIN_MATCHED_COMMENTS:
+                    skipped_low_comments.append((subreddit_name, actual_comment_count))
+                    continue
+
+                available_subreddits.append((subreddit_name, actual_comment_count))
 
         if not available_subreddits:
             logger.error("❌ No subreddit files found to process!")
@@ -320,6 +335,18 @@ def main():
         # Sort by mod comment count (highest first)
         available_subreddits.sort(key=lambda x: x[1], reverse=True)
         subreddit_files = [subreddit for subreddit, _ in available_subreddits]
+
+        # Report filtering statistics
+        if skipped_low_comments:
+            logger.info(f"⏭️  Skipped {len(skipped_low_comments)} subreddits with <{MIN_MATCHED_COMMENTS} comments (won't meet threshold)")
+            if len(skipped_low_comments) <= 20:  # Show all if 20 or fewer
+                for subreddit, count in sorted(skipped_low_comments, key=lambda x: x[1], reverse=True):
+                    logger.info(f"     r/{subreddit}: {count} comments")
+            else:  # Show top 10 and bottom 10
+                logger.info(f"     Top 10 skipped:")
+                for subreddit, count in sorted(skipped_low_comments, key=lambda x: x[1], reverse=True)[:10]:
+                    logger.info(f"       r/{subreddit}: {count} comments")
+                logger.info(f"     ... and {len(skipped_low_comments) - 10} more")
 
         logger.info(f"📊 Processing {len(subreddit_files)} subreddits (sorted by mod comment count):")
         for i, (subreddit, count) in enumerate(available_subreddits[:10]):  # Show top 10
@@ -462,7 +489,7 @@ def main():
 
         # Load Stage 2 rules once for all subreddits
         logger.info("📚 Loading rules from Stage 2 data...")
-        rules_file = os.path.join(PATHS['data'], f'stage2_top_{TOP_N_SUBREDDITS_WITH_MOD_COMMENTS}_sfw_subreddits.json')
+        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
         stage2_data = read_json_file(rules_file)
 
         # Create a mapping of subreddit name to rules
