@@ -9,7 +9,7 @@ Priority Hierarchy (early stopping):
 1. media_metadata - Gallery/inline images (original source, 1-N items)
 2. url field - Direct image posts (original source, 1 item)
 3. oembed - Video thumbnails from YouTube/Vimeo (original source, 1 item)
-4. preview - Reddit's cached images (fallback, 1 item)
+4. preview - Reddit's cached images (fallback, 1 item, first only)
 
 Input:
 - submissions/{subreddit}_submissions.zst (from Stage 7)
@@ -26,7 +26,7 @@ import time
 import urllib.parse
 import requests
 import subprocess
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -43,9 +43,115 @@ from utils.files import (read_zst_lines, json_loads, write_json_file,
 # User agent to avoid blocks
 USER_AGENT = "reddit_research_media_collector/1.0"
 
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Video platforms to skip (not downloadable image content)
+VIDEO_DOMAINS = frozenset([
+    'v.redd.it', 'youtube.com', 'youtu.be', 'vimeo.com',
+    'streamable.com', 'twitch.tv', 'clips.twitch.tv',
+    'tiktok.com', 'instagram.com', 'dailymotion.com'
+])
+
+# Extension-less media hosts (need domain check for URLs like imgur.com/abc123)
+EXTENSIONLESS_MEDIA_HOSTS = frozenset([
+    'imgur.com', 'i.imgur.com', 'giphy.com', 'gfycat.com'
+])
+
+# Valid image extensions
+IMAGE_EXTENSIONS = frozenset(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'])
+
+# Valid content types for downloaded files
+VALID_CONTENT_TYPES = frozenset([
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+    'image/bmp', 'video/mp4', 'application/octet-stream'
+])
+
+# Content-Type to extension mapping (source of truth for extensions)
+CONTENT_TYPE_TO_EXT = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'image/bmp': '.bmp',
+    'video/mp4': '.mp4',
+    'application/octet-stream': '.jpg'  # Fallback for unspecified binary
+}
+
 
 # ============================================================================
-# Significant Helper Functions
+# URL Helper Functions
+# ============================================================================
+
+def extract_extension_from_url(url: str) -> Optional[str]:
+    """
+    Extract file extension from URL, handling query parameters.
+    Returns lowercase extension without dot, or None if not found.
+
+    Note: Returns None instead of guessing - let download_file determine
+    the actual extension from Content-Type header.
+    """
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path.lower()
+
+    # Get extension from path (not query string)
+    if '.' in path:
+        ext = path.split('.')[-1]
+        # Validate it's actually an image extension
+        if ext in IMAGE_EXTENSIONS:
+            return ext
+
+    return None  # Let download_file determine from Content-Type
+
+
+def is_video_domain(url: str) -> bool:
+    """Check if URL is from a known video platform."""
+    try:
+        domain = urllib.parse.urlparse(url).netloc.lower()
+        return any(vd in domain for vd in VIDEO_DOMAINS)
+    except (ValueError, AttributeError):
+        return False
+
+
+def is_likely_media_url(url: str) -> bool:
+    """
+    Check if URL likely points to downloadable media.
+    Uses extension-first approach with domain fallback.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+        domain = parsed.netloc.lower()
+        path = parsed.path.lower()
+
+        # Skip video domains
+        if is_video_domain(url):
+            return False
+
+        # Skip reddit.com gallery links (handled by media_metadata)
+        if 'reddit.com/gallery/' in url or ('reddit.com' in domain and 'i.redd.it' not in domain):
+            return False
+
+        # Check extension first (most reliable)
+        if '.' in path:
+            ext = path.split('.')[-1]
+            if ext in IMAGE_EXTENSIONS:
+                return True
+
+        # Fallback: check if it's a known extension-less host
+        return any(host in domain for host in EXTENSIONLESS_MEDIA_HOSTS)
+
+    except (ValueError, AttributeError):
+        return False
+
+
+def sanitize_media_id(media_id: str, max_length: int = 50) -> str:
+    """Sanitize media ID for use in filenames."""
+    return media_id.replace('|', '_').replace('/', '_').replace('\\', '_')[:max_length]
+
+
+# ============================================================================
+# Statistics Helper Functions
 # ============================================================================
 
 def with_percentages(counts: Dict[str, int], total: int) -> Dict[str, Dict]:
@@ -61,19 +167,18 @@ def with_percentages(counts: Dict[str, int], total: int) -> Dict[str, Dict]:
 
 def count_by_field(items: List[Dict], field: str, filter_status: str = None) -> Dict[str, int]:
     """Count occurrences of field values, optionally filtered by status."""
-    filtered = items if not filter_status else [i for i in items if i.get('status') == filter_status]
+    filtered = [i for i in items if not filter_status or i.get('status') == filter_status]
     counts = defaultdict(int)
     for item in filtered:
-        value = item.get(field)
-        if value:
+        if value := item.get(field):
             counts[value] += 1
     return dict(counts)
 
 
 def count_where(items: List[Dict], field: str, value: Any, filter_status: str = None) -> int:
     """Count items where field equals value, optionally filtered by status."""
-    filtered = items if not filter_status else [i for i in items if i.get('status') == filter_status]
-    return sum(1 for item in filtered if item.get(field) == value)
+    return sum(1 for i in items if (not filter_status or i.get('status') == filter_status)
+               and i.get(field) == value)
 
 
 def aggregate_nested(results: List[Dict], key: str) -> Dict[str, int]:
@@ -88,16 +193,32 @@ def aggregate_nested(results: List[Dict], key: str) -> Dict[str, int]:
 def categorize_error(error_msg: str) -> str:
     """Categorize error message into standard types."""
     lower = error_msg.lower()
+
+    # HTTP status codes
     if '404' in error_msg or 'not found' in lower:
         return '404 Not Found'
     elif '403' in error_msg or 'forbidden' in lower:
         return '403 Forbidden'
+    elif '429' in error_msg or 'too many requests' in lower:
+        return '429 Rate Limited'
+    elif '500' in error_msg or '502' in error_msg or '503' in error_msg:
+        return '5xx Server Error'
+
+    # Network errors
     elif 'timeout' in lower:
         return 'Timeout'
-    elif 'connection' in lower:
+    elif 'connection' in lower or 'connectionerror' in lower:
         return 'Connection Error'
-    elif 'invalid' in lower:
-        return 'Invalid file type'
+    elif 'ssl' in lower or 'certificate' in lower:
+        return 'SSL/Certificate Error'
+
+    # Content validation errors
+    elif 'invalid content type' in lower:
+        return 'Invalid Content-Type'
+    elif 'invalid file type' in lower:
+        return 'Invalid File Type (validation)'
+
+    # Generic fallback
     else:
         return error_msg[:100]
 
@@ -126,19 +247,29 @@ def download_file(url: str, output_path: str, session: requests.Session) -> Dict
     Download and validate file.
 
     Returns:
-        {'success': bool, 'file_size': int, 'error': str}
+        {'success': bool, 'file_size': int, 'actual_extension': str, 'error': str}
     """
     try:
         # Download
         response = session.get(url, stream=True, timeout=30)
         response.raise_for_status()
 
-        # Check Content-Type
+        # Determine actual extension from Content-Type (source of truth)
         content_type = response.headers.get('Content-Type', '').lower()
-        if content_type and not any(t in content_type for t in ['image/', 'video/mp4', 'application/octet-stream']):
-            return {'success': False, 'error': f'Invalid content type: {content_type}'}
+        actual_extension = None
 
-        # Write file
+        if content_type:
+            # Split to handle "image/jpeg; charset=utf-8" style headers
+            base_type = content_type.split(';')[0].strip()
+
+            # Validate Content-Type
+            if base_type not in VALID_CONTENT_TYPES and not base_type.startswith('image/'):
+                return {'success': False, 'error': f'Invalid Content-Type: {base_type}'}
+
+            # Get actual extension from Content-Type
+            actual_extension = CONTENT_TYPE_TO_EXT.get(base_type)
+
+        # Write file (will be renamed later with correct extension)
         ensure_directory(output_path)
         with open(output_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -149,15 +280,46 @@ def download_file(url: str, output_path: str, session: requests.Session) -> Dict
 
         # Validate with file command
         try:
-            file_type = subprocess.check_output(['file', '--brief', '--mime-type', output_path],
-                                               universal_newlines=True).strip()
+            file_type = subprocess.check_output(
+                ['file', '--brief', '--mime-type', output_path],
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True
+            ).strip()
+
+            # Accept images and video/mp4 (for animated content)
             if not (file_type.startswith('image/') or file_type == 'video/mp4'):
                 os.remove(output_path)
-                return {'success': False, 'error': f'Invalid file type: {file_type}'}
-        except subprocess.CalledProcessError:
-            pass  # Keep file if validation fails but Content-Type was good
+                return {'success': False, 'error': f'Invalid File Type (validation): {file_type}'}
 
-        return {'success': True, 'file_size': file_size}
+            # If Content-Type didn't give us extension, use file command result
+            if not actual_extension:
+                actual_extension = CONTENT_TYPE_TO_EXT.get(file_type, '.jpg')
+
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # If file command fails, use Content-Type or fallback
+            if not actual_extension:
+                actual_extension = '.jpg'
+
+        return {
+            'success': True,
+            'file_size': file_size,
+            'actual_extension': actual_extension
+        }
+
+    except requests.exceptions.Timeout:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return {'success': False, 'error': 'Timeout'}
+
+    except requests.exceptions.ConnectionError as e:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return {'success': False, 'error': f'Connection Error: {str(e)[:50]}'}
+
+    except requests.exceptions.HTTPError as e:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return {'success': False, 'error': str(e)}
 
     except Exception as e:
         if os.path.exists(output_path):
@@ -175,12 +337,8 @@ def is_video_submission(submission: Dict) -> bool:
         return True
 
     url = submission.get('url', '')
-    if url:
-        domain = urllib.parse.urlparse(url).netloc.lower()
-        video_domains = ['v.redd.it', 'youtube.com', 'youtu.be', 'vimeo.com',
-                         'streamable.com', 'twitch.tv']
-        if any(vd in domain for vd in video_domains):
-            return True
+    if url and is_video_domain(url):
+        return True
 
     if submission.get('media_metadata'):
         for media_info in submission['media_metadata'].values():
@@ -190,162 +348,100 @@ def is_video_submission(submission: Dict) -> bool:
     return False
 
 
+def make_media_item(url: str, media_id: str, source: str, index: int = None) -> Dict:
+    """Create standardized media item dict with optional extension hint."""
+    url = url.replace('&amp;', '&')
+    ext = extract_extension_from_url(url)
+    item = {
+        'url': url,
+        'media_id': media_id,
+        'source': source,
+        'extension_hint': f'.{ext}' if ext else None  # Hint from URL, not truth
+    }
+    if index is not None:
+        item['index'] = index
+    return item
+
+
 def extract_media_metadata_urls(submission: Dict) -> List[Dict]:
     """Extract URLs from media_metadata field (galleries)."""
+    media_metadata = submission.get('media_metadata')
+    if not media_metadata:
+        return []
+
     urls = []
-    if not submission.get('media_metadata'):
-        return urls
+    for idx, (media_id, info) in enumerate(media_metadata.items()):
+        media_type = info.get('e')
 
-    for idx, (media_id, media_info) in enumerate(submission['media_metadata'].items()):
-        media_type = media_info.get('e')
-
-        if media_type == 'Image' and 's' in media_info and 'u' in media_info['s']:
-            url = media_info['s']['u'].replace('&amp;', '&')
-            extension = url.split('.')[-1].lower()
-            if extension not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-                extension = 'jpg'
-            urls.append({
-                'url': url,
-                'media_id': media_id,
-                'source': 'media_metadata',
-                'extension': f'.{extension}',
-                'index': idx
-            })
-
-        elif media_type == 'AnimatedImage' and 's' in media_info and 'mp4' in media_info['s']:
-            url = media_info['s']['mp4'].replace('&amp;', '&')
-            urls.append({
-                'url': url,
-                'media_id': media_id,
-                'source': 'media_metadata',
-                'extension': '.mp4',
-                'index': idx
-            })
+        if media_type == 'Image' and 's' in info and 'u' in info['s']:
+            urls.append(make_media_item(info['s']['u'], media_id, 'media_metadata', idx))
+        elif media_type == 'AnimatedImage' and 's' in info and 'mp4' in info['s']:
+            item = make_media_item(info['s']['mp4'], media_id, 'media_metadata', idx)
+            item['extension_hint'] = '.mp4'  # AnimatedImage is always mp4
+            urls.append(item)
 
     return urls
 
 
 def extract_url_field(submission: Dict) -> List[Dict]:
-    """Extract URL from direct url field."""
+    """Extract URL from direct url field using smart detection."""
     url = submission.get('url', '')
-    if not url:
-        return []
-
-    # Check if video domain (skip)
-    domain = urllib.parse.urlparse(url).netloc.lower()
-    video_domains = ['v.redd.it', 'youtube.com', 'youtu.be', 'vimeo.com',
-                     'streamable.com', 'twitch.tv']
-    if any(vd in domain for vd in video_domains):
-        return []
-
-    # Check if direct media URL
-    known_media_domains = ['i.redd.it', 'i.imgur.com', 'imgur.com', 'giphy.com',
-                           'gfycat.com', 'preview.redd.it', 'external-preview.redd.it']
-    path = urllib.parse.urlparse(url).path.lower()
-    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
-
-    # Skip reddit.com links (galleries)
-    is_reddit_link = 'reddit.com' in domain and 'i.redd.it' not in domain
-
-    is_media = (any(d in domain for d in known_media_domains) or
-               any(path.endswith(ext) for ext in image_extensions))
-
-    if is_media and not is_reddit_link:
-        url = url.replace('&amp;', '&')
-        extension = path.split('.')[-1].lower()
-        if extension not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-            extension = 'jpg'
-        return [{
-            'url': url,
-            'media_id': 'direct',
-            'source': 'url',
-            'extension': f'.{extension}'
-        }]
-
-    return []
+    return [make_media_item(url, 'direct', 'url')] if url and is_likely_media_url(url) else []
 
 
 def extract_oembed_url(submission: Dict) -> List[Dict]:
     """Extract oembed thumbnail URL."""
     media = submission.get('media') or submission.get('secure_media')
     if media and 'oembed' in media and media['oembed'].get('thumbnail_url'):
-        url = media['oembed']['thumbnail_url'].replace('&amp;', '&')
-        extension = url.split('.')[-1].lower()
-        if extension not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-            extension = 'jpg'
-        return [{
-            'url': url,
-            'media_id': 'oembed',
-            'source': 'oembed',
-            'extension': f'.{extension}'
-        }]
+        return [make_media_item(media['oembed']['thumbnail_url'], 'oembed', 'oembed')]
     return []
 
 
 def extract_preview_url(submission: Dict) -> List[Dict]:
-    """Extract preview URL (fallback for link posts only)."""
-    if not submission.get('preview'):
-        return []
-
-    # Only use preview for link posts (not text/self posts)
-    # Text posts with images use media_metadata (Priority 1)
-    if submission.get('is_self'):
+    """Extract preview URL (fallback for link posts only, first image only)."""
+    preview = submission.get('preview')
+    if not preview or submission.get('is_self'):
         return []
 
     try:
-        preview = submission['preview']
-        if 'images' in preview and preview['images']:
-            img = preview['images'][0]
-            if 'source' in img and img['source'].get('url'):
-                url = img['source']['url'].replace('&amp;', '&')
-                extension = url.split('.')[-1].lower()
-                if extension not in ['jpg', 'jpeg', 'png', 'gif', 'webp']:
-                    extension = 'jpg'
-                return [{
-                    'url': url,
-                    'media_id': 'preview',
-                    'source': 'preview',
-                    'extension': f'.{extension}'
-                }]
-    except Exception:
-        pass
-
-    return []
+        img = preview['images'][0]
+        url = img['source'].get('url')
+        return [make_media_item(url, 'preview', 'preview')] if url else []
+    except (KeyError, TypeError, IndexError):
+        return []
 
 
-def extract_download_urls(submission: Dict) -> Tuple[List[Dict], str]:
-    """
-    Extract downloadable URLs using priority hierarchy.
-
-    Returns:
-        (urls, source) - List of URL dicts and source name
-    """
-    # Priority 1: media_metadata (galleries)
-    urls = extract_media_metadata_urls(submission)
-    if urls:
-        return urls, 'media_metadata'
-
-    # Priority 2: direct URL
-    urls = extract_url_field(submission)
-    if urls:
-        return urls, 'url'
-
-    # Priority 3: oembed thumbnail
-    urls = extract_oembed_url(submission)
-    if urls:
-        return urls, 'oembed'
-
-    # Priority 4: preview (fallback)
-    urls = extract_preview_url(submission)
-    if urls:
-        return urls, 'preview'
-
+def extract_download_urls(submission: Dict) -> Tuple[List[Dict], Optional[str]]:
+    """Extract downloadable URLs using priority hierarchy (early stopping)."""
+    for extractor, source in [
+        (extract_media_metadata_urls, 'media_metadata'),
+        (extract_url_field, 'url'),
+        (extract_oembed_url, 'oembed'),
+        (extract_preview_url, 'preview')
+    ]:
+        urls = extractor(submission)
+        if urls:
+            return urls, source
     return [], None
 
 
 # ============================================================================
 # Submission Processing
 # ============================================================================
+
+def make_skip_result(submission_id: str, status: str, is_video: bool = False) -> Dict[str, Any]:
+    """Create standardized skip result dict."""
+    return {
+        'submission_id': submission_id,
+        'status': status,
+        'files_downloaded': 0,
+        'total_size': 0,
+        'source': None,
+        'has_multiple': False,
+        'is_video': is_video,
+        'errors': []
+    }
+
 
 def download_submission_media(submission: Dict, media_dir: str, session: requests.Session) -> Dict[str, Any]:
     """
@@ -358,50 +454,21 @@ def download_submission_media(submission: Dict, media_dir: str, session: request
 
     # Check NSFW
     if submission.get('over_18') or submission.get('over18'):
-        return {
-            'submission_id': submission_id,
-            'status': 'skipped_nsfw',
-            'files_downloaded': 0,
-            'total_size': 0,
-            'source': None,
-            'has_multiple': False,
-            'is_video': False,
-            'errors': []
-        }
+        return make_skip_result(submission_id, 'skipped_nsfw')
 
     # Check crosspost
     if submission.get('crosspost_parent_list') or submission.get('crosspost_parent'):
-        return {
-            'submission_id': submission_id,
-            'status': 'skipped_crosspost',
-            'files_downloaded': 0,
-            'total_size': 0,
-            'source': None,
-            'has_multiple': False,
-            'is_video': False,
-            'errors': []
-        }
+        return make_skip_result(submission_id, 'skipped_crosspost')
 
     # Skip self posts that only contain a URL (no real text content)
     if submission.get('is_self'):
         selftext = submission.get('selftext', '').strip()
-        # Check if the entire selftext is just a URL
-        if selftext:
+        if selftext and len(selftext) < 500 and selftext.count('\n') == 0:
             try:
                 parsed = urllib.parse.urlparse(selftext)
-                # If it parses as a valid URL and the whole text is the URL
-                if parsed.scheme and parsed.netloc and selftext == urllib.parse.urlunparse(parsed):
-                    return {
-                        'submission_id': submission_id,
-                        'status': 'skipped_url_only_selfpost',
-                        'files_downloaded': 0,
-                        'total_size': 0,
-                        'source': None,
-                        'has_multiple': False,
-                        'is_video': False,
-                        'errors': []
-                    }
-            except:
+                if parsed.scheme and parsed.netloc:
+                    return make_skip_result(submission_id, 'skipped_url_only_selfpost')
+            except (ValueError, AttributeError):
                 pass
 
     # Extract URLs
@@ -410,16 +477,7 @@ def download_submission_media(submission: Dict, media_dir: str, session: request
     has_multiple = len(urls) > 1
 
     if not urls:
-        return {
-            'submission_id': submission_id,
-            'status': 'no_media',
-            'files_downloaded': 0,
-            'total_size': 0,
-            'source': None,
-            'has_multiple': False,
-            'is_video': is_video,
-            'errors': []
-        }
+        return make_skip_result(submission_id, 'no_media', is_video)
 
     # Download each URL
     successful = 0
@@ -430,29 +488,43 @@ def download_submission_media(submission: Dict, media_dir: str, session: request
     for url_info in urls:
         url = url_info['url']
         media_id = url_info['media_id']
-        extension = url_info['extension']
+        extension_hint = url_info.get('extension_hint')
         media_source = url_info['source']
 
-        # Generate filename with source suffix
+        # Generate base filename (without extension)
         if media_id in ['direct', 'oembed', 'preview']:
-            filename = f"{submission_id}_{media_source}{extension}"
+            filename_base = f"{submission_id}_{media_source}"
         else:
             # Gallery item: include index for ordering
             idx = url_info.get('index', 0)
-            safe_id = media_id.replace('|', '_').replace('/', '_')[:50]
-            filename = f"{submission_id}_{idx}_{safe_id}_{media_source}{extension}"
+            safe_id = sanitize_media_id(media_id)
+            filename_base = f"{submission_id}_{idx}_{safe_id}_{media_source}"
 
-        output_path = os.path.join(media_dir, filename)
+        # Check if already cached (try with hint extension or common extensions)
+        cached_path = None
+        if extension_hint:
+            potential_path = os.path.join(media_dir, f"{filename_base}{extension_hint}")
+            if os.path.exists(potential_path):
+                cached_path = potential_path
 
-        # Skip if cached
-        if os.path.exists(output_path):
+        if cached_path:
             successful += 1
-            total_size += os.path.getsize(output_path)
+            total_size += os.path.getsize(cached_path)
             continue
 
-        # Download
-        result = download_file(url, output_path, session)
+        # Download to temporary path first
+        temp_path = os.path.join(media_dir, f"{filename_base}.tmp")
+        result = download_file(url, temp_path, session)
+
         if result['success']:
+            # Rename to final path with actual extension
+            actual_ext = result['actual_extension']
+            final_path = os.path.join(media_dir, f"{filename_base}{actual_ext}")
+
+            # Rename temp file to final filename with correct extension
+            if os.path.exists(temp_path):
+                os.rename(temp_path, final_path)
+
             successful += 1
             total_size += result['file_size']
         else:
@@ -502,21 +574,19 @@ def process_subreddit(args: Tuple) -> Dict[str, Any]:
         return {'subreddit': subreddit, 'error': 'submissions_file_not_found'}
 
     try:
-        # Load all submissions
-        submissions = []
-        for line in read_zst_lines(submissions_file):
-            if line.strip():
-                submissions.append(json_loads(line))
-
-        logger.info(f"  📊 Loaded {len(submissions)} submissions")
-
-        # Download media for each submission
+        # Stream and process submissions (memory-efficient)
         session = create_session()
         results = []
+        submission_count = 0
 
-        for submission in submissions:
-            result = download_submission_media(submission, media_dir, session)
-            results.append(result)
+        for line in read_zst_lines(submissions_file):
+            if line.strip():
+                submission = json_loads(line)
+                result = download_submission_media(submission, media_dir, session)
+                results.append(result)
+                submission_count += 1
+
+        logger.info(f"  📊 Processed {submission_count} submissions")
 
         # Aggregate stats
         total_files = sum(r['files_downloaded'] for r in results)
@@ -534,7 +604,7 @@ def process_subreddit(args: Tuple) -> Dict[str, Any]:
                     error_reasons[categorize_error(error)] += 1
 
         elapsed = time.time() - start_time
-        logger.info(f"  ✅ Processed {len(submissions)} submissions, "
+        logger.info(f"  ✅ Processed {submission_count} submissions, "
                    f"downloaded {total_files} files in {elapsed:.1f}s")
 
         return {
@@ -556,21 +626,29 @@ def process_subreddit(args: Tuple) -> Dict[str, Any]:
 # Statistics Formatting
 # ============================================================================
 
+def build_media_characteristics(results: List[Dict], total_subs: int, complete_count: int) -> Dict:
+    """Build media characteristics stats dict."""
+    multiple = count_where(results, 'has_multiple', True, filter_status='complete')
+    videos = count_where(results, 'is_video', True)
+    return {
+        'has_multiple_media': {
+            'count': multiple,
+            'percentage': round(100 * multiple / complete_count, 2) if complete_count > 0 else 0.0
+        },
+        'is_video_submission': {
+            'count': videos,
+            'percentage': round(100 * videos / total_subs, 2) if total_subs > 0 else 0.0
+        }
+    }
+
+
 def format_subreddit_stats(subreddit_result: Dict) -> Dict:
     """Format statistics for a single subreddit."""
     results = subreddit_result.get('results', [])
     total_subs = len(results)
-
-    # Count by status
     status_counts = count_by_field(results, 'status')
-
-    # Count by source (complete only)
-    source_counts = count_by_field(results, 'source', filter_status='complete')
-
-    # Count characteristics
     complete_count = status_counts.get('complete', 0)
-    multiple = count_where(results, 'has_multiple', True, filter_status='complete')
-    videos = count_where(results, 'is_video', True)
+    source_counts = count_by_field(results, 'source', filter_status='complete')
 
     return {
         'subreddit': subreddit_result['subreddit'],
@@ -579,43 +657,21 @@ def format_subreddit_stats(subreddit_result: Dict) -> Dict:
         'size_gb': subreddit_result.get('total_size', 0) / (1024**3),
         'status_breakdown': with_percentages(status_counts, total_subs),
         'media_sources': with_percentages(source_counts, complete_count),
-        'media_characteristics': {
-            'has_multiple_media': {
-                'count': multiple,
-                'percentage': round(100 * multiple / complete_count, 2) if complete_count > 0 else 0.0
-            },
-            'is_video_submission': {
-                'count': videos,
-                'percentage': round(100 * videos / total_subs, 2) if total_subs > 0 else 0.0
-            }
-        },
+        'media_characteristics': build_media_characteristics(results, total_subs, complete_count),
         'processing_time': subreddit_result.get('processing_time', 0)
     }
 
 
 def format_global_stats(valid_results: List[Dict]) -> Dict:
     """Format global statistics from all subreddits."""
-    # Flatten all results
-    all_results = []
-    for sr in valid_results:
-        all_results.extend(sr.get('results', []))
-
+    all_results = [r for sr in valid_results for r in sr.get('results', [])]
     total_subs = len(all_results)
     total_files = sum(sr.get('total_files', 0) for sr in valid_results)
     total_size = sum(sr.get('total_size', 0) for sr in valid_results)
 
-    # Count by status
     status_counts = count_by_field(all_results, 'status')
-
-    # Count by source (complete only)
-    source_counts = count_by_field(all_results, 'source', filter_status='complete')
-
-    # Count characteristics
     complete_count = status_counts.get('complete', 0)
-    multiple = count_where(all_results, 'has_multiple', True, filter_status='complete')
-    videos = count_where(all_results, 'is_video', True)
-
-    # Aggregate errors
+    source_counts = count_by_field(all_results, 'source', filter_status='complete')
     global_errors = aggregate_nested(valid_results, 'error_reasons')
 
     return {
@@ -625,16 +681,7 @@ def format_global_stats(valid_results: List[Dict]) -> Dict:
         'total_size_gb': total_size / (1024**3),
         'status_breakdown': with_percentages(status_counts, total_subs),
         'media_sources': with_percentages(source_counts, complete_count),
-        'media_characteristics': {
-            'has_multiple_media': {
-                'count': multiple,
-                'percentage': round(100 * multiple / complete_count, 2) if complete_count > 0 else 0.0
-            },
-            'is_video_submission': {
-                'count': videos,
-                'percentage': round(100 * videos / total_subs, 2) if total_subs > 0 else 0.0
-            }
-        },
+        'media_characteristics': build_media_characteristics(all_results, total_subs, complete_count),
         'error_reasons': dict(sorted(global_errors.items(), key=lambda x: x[1], reverse=True)[:10])
     }
 

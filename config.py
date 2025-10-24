@@ -19,11 +19,18 @@ REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/Pushshift"
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
 MIN_RULES_FOR_MATCHING = 2  # Minimum rules needed for semantic matching (skip subreddits with ≤1 rule)
-GOLD_PERCENTILE = 99  # Top 1% of similarity scores considered gold matches (Stage 4 Phase 2)
+GOLD_PERCENTILE = 98  # Top 2% of similarity scores considered gold matches (Stage 4 Phase 2)
 AMBIGUOUS_PERCENTILE = 95  # Top 5% of similarity scores considered ambiguous matches (Stage 4 Phase 2)
-MIN_MATCHED_COMMENTS = 50  # Minimum matched comments for subreddit inclusion in Stage 4
-MAX_MATCHED_COMMENTS = 2000  # Max sample size for matched comments in Stage 4
-FINAL_THREAD_PAIRS_PER_SUBREDDIT = 500  # Exact number of thread pairs per subreddit in Stage 9
+MIN_MATCHED_COMMENTS = 25 # Minimum matched comments for subreddit inclusion in Stage 4
+MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 4
+# Stage 9: Dataset split configuration
+MIN_EVAL_THREAD_PAIRS = 25      # Minimum pairs for eval_1k (also used in Stage 6 filtering)
+MIN_TRAIN_THREAD_PAIRS = 250    # Minimum pairs for train/val/eval splits
+
+# Split sizes for subreddits with ≥500 pairs
+TRAIN_SPLIT = 400
+VAL_SPLIT = 50
+EVAL_SPLIT = 50
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # Model used in Stage 4 for semantic matching
 # Auto-detect number of CPU cores (use all available cores)
 PROCESSES = multiprocessing.cpu_count()

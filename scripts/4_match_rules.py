@@ -78,7 +78,7 @@ def get_available_cuda_devices() -> List[int]:
             device_count = torch.cuda.device_count()
             all_devices = list(range(device_count))
             # Temporarily skip CUDA 0 and 4 (they are busy)
-            excluded_devices = {4}
+            excluded_devices = {}
             return [device for device in all_devices if device not in excluded_devices]
         else:
             return []
@@ -151,6 +151,53 @@ def load_similarity_matrix(matrix_file):
     except Exception as e:
         return {'subreddit': os.path.basename(matrix_file).replace('_similarity_matrix.pt', ''), 'error': str(e)}
 
+def filter_subreddits_by_comment_count(subreddits, stage3_comment_counts, min_comments, logger=None, phase_name=""):
+    """Filter subreddits based on Stage 3 comment counts.
+
+    Args:
+        subreddits: List of subreddit items (tuples or dicts with 'subreddit' key)
+        stage3_comment_counts: Dict mapping subreddit_name -> {'comments': count}
+        min_comments: Minimum comment threshold
+        logger: Logger instance
+        phase_name: Name for logging (e.g., "Phase 1", "Phase 2")
+
+    Returns:
+        Tuple of (filtered_subreddits, skipped_subreddits)
+    """
+    filtered = []
+    skipped = []
+
+    for item in subreddits:
+        # Handle both tuple format (subreddit_name, count) and dict format {'subreddit': name}
+        if isinstance(item, tuple):
+            subreddit_name = item[0]
+        elif isinstance(item, dict):
+            subreddit_name = item.get('subreddit')
+        else:
+            subreddit_name = item
+
+        actual_comment_count = stage3_comment_counts.get(subreddit_name, {}).get('comments', 0)
+
+        if actual_comment_count < min_comments:
+            skipped.append((subreddit_name, actual_comment_count))
+        else:
+            filtered.append(item)
+
+    # Log results
+    if skipped and logger:
+        phase_label = f" in {phase_name}" if phase_name else ""
+        logger.info(f"⏭️  Skipping {len(skipped)} subreddits{phase_label} with <{min_comments} comments")
+        if len(skipped) <= 20:
+            for subreddit, count in sorted(skipped, key=lambda x: x[1], reverse=True):
+                logger.info(f"     r/{subreddit}: {count} comments")
+        else:
+            logger.info(f"     Top 10 skipped:")
+            for subreddit, count in sorted(skipped, key=lambda x: x[1], reverse=True)[:10]:
+                logger.info(f"       r/{subreddit}: {count} comments")
+            logger.info(f"     ... and {len(skipped) - 10} more")
+
+    return filtered, skipped
+
 def process_subreddit_matching(load_result, logger=None):
     """Apply thresholds and create matches for one subreddit."""
     try:
@@ -210,8 +257,8 @@ def process_subreddit_matching(load_result, logger=None):
                 matched_comment = comment.copy()
                 matched_comment['matched_rule'] = {
                     'rule_index': best_rule['rule_index'],
-                    'short_name': best_rule['short_name_clean'],
-                    'description': best_rule['description_clean'],
+                    'short_name_clean': best_rule['short_name_clean'],
+                    'description_clean': best_rule['description_clean'],
                     'similarity_score': float(max_similarity)  # Convert to Python float
                 }
 
@@ -285,7 +332,7 @@ def main():
 
         # Load Stage 2 data for comment counts and rule validation
         logger.info("📚 Loading subreddit data...")
-        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
+        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_1_comments.json')
         stage2_data = read_json_file(rules_file)
 
         # Load Stage 3 summary for actual filtered comment counts
@@ -296,7 +343,6 @@ def main():
 
         # Get subreddits with >1 rule and existing comment files, sorted by mod comment count (highest first)
         available_subreddits = []
-        skipped_low_comments = []
         top_subreddits_dir = PATHS['top_subreddits']
 
         if not os.path.exists(top_subreddits_dir):
@@ -318,13 +364,6 @@ def main():
             if os.path.exists(comment_file):
                 # Get actual comment count from Stage 3 (post-filtering)
                 actual_comment_count = stage3_comment_counts.get(subreddit_name, {}).get('comments', 0)
-
-                # Skip subreddits with fewer comments than MIN_MATCHED_COMMENTS
-                # (they won't meet the threshold anyway, so no point processing them)
-                if actual_comment_count < MIN_MATCHED_COMMENTS:
-                    skipped_low_comments.append((subreddit_name, actual_comment_count))
-                    continue
-
                 available_subreddits.append((subreddit_name, actual_comment_count))
 
         if not available_subreddits:
@@ -332,21 +371,19 @@ def main():
             log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
             return 1
 
+        # Filter by MIN_MATCHED_COMMENTS threshold using DRY helper function
+        available_subreddits, skipped_low_comments = filter_subreddits_by_comment_count(
+            available_subreddits, stage3_comment_counts, MIN_MATCHED_COMMENTS, logger, "Phase 1"
+        )
+
+        if not available_subreddits:
+            logger.error("❌ No subreddit files found to process after filtering!")
+            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+            return 1
+
         # Sort by mod comment count (highest first)
         available_subreddits.sort(key=lambda x: x[1], reverse=True)
         subreddit_files = [subreddit for subreddit, _ in available_subreddits]
-
-        # Report filtering statistics
-        if skipped_low_comments:
-            logger.info(f"⏭️  Skipped {len(skipped_low_comments)} subreddits with <{MIN_MATCHED_COMMENTS} comments (won't meet threshold)")
-            if len(skipped_low_comments) <= 20:  # Show all if 20 or fewer
-                for subreddit, count in sorted(skipped_low_comments, key=lambda x: x[1], reverse=True):
-                    logger.info(f"     r/{subreddit}: {count} comments")
-            else:  # Show top 10 and bottom 10
-                logger.info(f"     Top 10 skipped:")
-                for subreddit, count in sorted(skipped_low_comments, key=lambda x: x[1], reverse=True)[:10]:
-                    logger.info(f"       r/{subreddit}: {count} comments")
-                logger.info(f"     ... and {len(skipped_low_comments) - 10} more")
 
         logger.info(f"📊 Processing {len(subreddit_files)} subreddits (sorted by mod comment count):")
         for i, (subreddit, count) in enumerate(available_subreddits[:10]):  # Show top 10
@@ -477,6 +514,13 @@ def main():
         if failed_loads:
             logger.warning(f"⚠️  Failed to load {len(failed_loads)} matrices in Phase 2")
 
+        # Filter based on Stage 3 comment counts (re-assess with current MIN_MATCHED_COMMENTS threshold)
+        logger.info(f"📊 Re-assessing subreddits based on current MIN_MATCHED_COMMENTS threshold ({MIN_MATCHED_COMMENTS})...")
+        successful_loads, skipped_phase2 = filter_subreddits_by_comment_count(
+            successful_loads, stage3_comment_counts, MIN_MATCHED_COMMENTS, logger, "Phase 2"
+        )
+        logger.info(f"📊 Phase 2 will process {len(successful_loads)} subreddits (after filtering)")
+
         # Compute global thresholds
         logger.info("🧮 Computing global thresholds from all similarity scores...")
         all_similarity_scores = np.concatenate([r['all_scores'] for r in successful_loads])
@@ -489,7 +533,7 @@ def main():
 
         # Load Stage 2 rules once for all subreddits
         logger.info("📚 Loading rules from Stage 2 data...")
-        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
+        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_1_comments.json')
         stage2_data = read_json_file(rules_file)
 
         # Create a mapping of subreddit name to rules

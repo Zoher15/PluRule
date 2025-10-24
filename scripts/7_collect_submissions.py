@@ -19,15 +19,16 @@ Output:
 import sys
 import os
 import time
+import json
 import pickle
-from typing import Dict, List, Any, Set, Tuple
+from typing import Dict, Set, Any
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS, PROCESSES, DATE_RANGE, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
-from utils.files import (read_json_file, write_json_file, process_files_parallel,
+from utils.files import (read_zst_lines, write_json_file, write_zst_json_objects, process_files_parallel,
                         get_files_in_date_range, process_zst_file_multi,
                         json_loads, get_file_size_gb, load_qualified_subreddits_from_stage6)
 from utils.reddit import (normalize_subreddit_name, validate_submission_structure)
@@ -130,7 +131,7 @@ def process_rs_file(args: tuple) -> Dict[str, Any]:
                         'data': submission
                     }
 
-        except Exception:
+        except (json.JSONDecodeError, KeyError, ValueError):
             pass  # Skip malformed lines
 
         return {'matched': False}
@@ -203,54 +204,47 @@ def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
     # Sort by date for chronological order
     temp_files.sort()
 
-    # Read all submissions from temp files
-    all_submissions = []
-    files_processed = 0
-
-    try:
-        from utils.files import read_zst_lines
-
-        for temp_file in temp_files:
-            lines = read_zst_lines(temp_file)
-
-            for line in lines:
-                if line.strip():
-                    submission = json_loads(line)
-                    all_submissions.append(submission)
-
-            files_processed += 1
-
-    except Exception as e:
-        return {
-            'subreddit': subreddit,
-            'submissions_collected': 0,
-            'success': False,
-            'error': f'Error reading temp files: {e}'
-        }
-
-    if not all_submissions:
-        return {
-            'subreddit': subreddit,
-            'submissions_collected': 0,
-            'success': False,
-            'error': 'No submissions found in temp files'
-        }
-
-    # Write final consolidated file
+    # Stream submissions from temp files directly to output (memory-efficient)
     output_file = os.path.join(PATHS['submissions'], f"{subreddit}_submissions.zst")
 
     try:
-        from utils.files import write_zst_json_objects
+        submissions_found = 0
 
-        write_zst_json_objects(output_file, all_submissions)
+        # Generator that counts as it yields (closure over submissions_found)
+        def submission_generator():
+            """Stream submissions from temp files one at a time."""
+            nonlocal submissions_found
+            for temp_file in temp_files:
+                try:
+                    for line in read_zst_lines(temp_file):
+                        if line.strip():
+                            submissions_found += 1
+                            yield json_loads(line)
+                except Exception as e:
+                    worker_logger.warning(f"⚠️  Error reading {os.path.basename(temp_file)}: {e}")
+                    continue
+
+        # Write submissions (streaming - write_zst_json_objects iterates once through generator)
+        write_zst_json_objects(output_file, submission_generator())
+
+        if submissions_found == 0:
+            # Clean up empty file
+            if os.path.exists(output_file):
+                os.remove(output_file)
+            return {
+                'subreddit': subreddit,
+                'submissions_collected': 0,
+                'success': False,
+                'error': 'No submissions found in temp files'
+            }
+
         file_size = get_file_size_gb(output_file)
 
         # Calculate coverage
         submissions_needed = len(needed_submission_ids)
-        submissions_found = len(all_submissions)
         coverage_rate = submissions_found / submissions_needed if submissions_needed > 0 else 0
 
-        worker_logger.info(f"✅ {subreddit}: {submissions_found:,}/{submissions_needed:,} submissions ({coverage_rate*100:.1f}% coverage) from {files_processed} temp files ({file_size:.3f} GB)")
+        worker_logger.info(f"✅ {subreddit}: {submissions_found:,}/{submissions_needed:,} submissions ({coverage_rate*100:.1f}% coverage) from {len(temp_files)} temp files ({file_size:.3f} GB)")
 
         # Clean up temp directory
         import shutil
@@ -263,7 +257,7 @@ def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
             'coverage_rate': coverage_rate,
             'output_file': output_file,
             'file_size_gb': file_size,
-            'temp_files_processed': files_processed,
+            'temp_files_processed': len(temp_files),
             'success': True
         }
 
@@ -344,7 +338,6 @@ def main():
         subreddits_with_data = set()
         for result in successful_rs:
             # Check which subreddits actually got data
-            temp_dirs = []
             for subreddit in subreddit_submission_ids.keys():
                 subreddit_temp_dir = os.path.join(temp_dir, subreddit)
                 if os.path.exists(subreddit_temp_dir) and os.listdir(subreddit_temp_dir):
@@ -361,7 +354,7 @@ def main():
         consolidate_args = [(subreddit, temp_dir, subreddit_submission_ids[subreddit]) for subreddit in subreddits_with_data]
         consolidate_results = process_files_parallel(consolidate_args, consolidate_subreddit_submissions, PROCESSES, logger)
 
-            # Phase 4: Cleanup and statistics
+        # Phase 4: Cleanup and statistics
         logger.info("🧹 Phase 4: Cleanup and statistics...")
 
         # Clean up remaining temp directory

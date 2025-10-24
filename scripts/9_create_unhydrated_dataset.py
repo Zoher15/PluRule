@@ -27,7 +27,6 @@ import zstandard
 import json
 import random
 from typing import Dict, List, Any, Set
-from collections import defaultdict
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -63,11 +62,20 @@ def load_successful_submissions(logger) -> tuple:
             subreddit_submission_objects[subreddit] = {}
             continue
 
+        # Convert to set for O(1) lookup and track found count for early exit
+        needed_ids = set(submission_ids)
         submission_objects = {}
+        found_count = 0
+
         for line in read_zst_lines(submissions_file):
+            if found_count >= len(needed_ids):
+                break  # Found all needed submissions
+
             submission = json_loads(line)
-            if submission.get('id') in submission_ids:
-                submission_objects[submission['id']] = submission
+            sub_id = submission.get('id')
+            if sub_id in needed_ids:
+                submission_objects[sub_id] = submission
+                found_count += 1
 
         logger.info(f"  r/{subreddit}: Loaded {len(submission_objects)}/{len(submission_ids)} submissions")
         subreddit_submission_objects[subreddit] = submission_objects
@@ -173,11 +181,12 @@ def strip_to_ids(hydrated_dataset: Dict) -> Dict:
 
         # Strip trees to IDs only
         for submission_id, tree in subreddit_data['submission_trees'].items():
+            depth_levels = tree.get('depth_levels', {})
             unhydrated_subreddit['submission_trees'][submission_id] = {
                 'root_comments': tree.get('root_comments', []),
                 'total_comments': tree.get('total_comments', 0),
-                'max_depth': max(tree.get('depth_levels', {}).keys()) if tree.get('depth_levels') else 0,
-                'depth_levels': {str(k): v for k, v in tree.get('depth_levels', {}).items()}
+                'max_depth': max(int(k) for k in depth_levels.keys()) if depth_levels else 0,
+                'depth_levels': {str(k): v for k, v in depth_levels.items()}
             }
 
         # Strip thread pairs to IDs only
@@ -249,8 +258,8 @@ def process_subreddit(subreddit: str, successful_submission_ids: Set[str],
 
     # Sample exactly FINAL_THREAD_PAIRS_PER_SUBREDDIT pairs if we have more (using seed 0 for reproducibility)
     if len(filtered_pairs) > FINAL_THREAD_PAIRS_PER_SUBREDDIT:
-        random.seed(0)
-        filtered_pairs = random.sample(filtered_pairs, FINAL_THREAD_PAIRS_PER_SUBREDDIT)
+        sampling_rng = random.Random(0)
+        filtered_pairs = sampling_rng.sample(filtered_pairs, FINAL_THREAD_PAIRS_PER_SUBREDDIT)
         logger.info(f"  Sampled {len(original_pairs)} -> {FINAL_THREAD_PAIRS_PER_SUBREDDIT} thread pairs (seed=0)")
 
     # Load comment trees
@@ -319,14 +328,11 @@ def process_subreddit(subreddit: str, successful_submission_ids: Set[str],
         # Create list of rule short names
         rule_short_names = [rule.get('short_name_clean') for rule in subreddit_rules if rule.get('short_name_clean')]
 
-        # Shuffle using mod_comment_id as seed (convert ID to integer hash)
-        if mod_comment_id:
-            seed = int(mod_comment_id, 36) if isinstance(mod_comment_id, str) else hash(mod_comment_id)
-            random.seed(seed)
-            shuffled_rules = rule_short_names.copy()
-            random.shuffle(shuffled_rules)
-        else:
-            shuffled_rules = rule_short_names
+        # Shuffle using mod_comment_id as seed (convert base-36 ID to integer)
+        seed = int(mod_comment_id, 36)
+        shuffle_rng = random.Random(seed)
+        shuffled_rules = rule_short_names.copy()
+        shuffle_rng.shuffle(shuffled_rules)
 
         # Create labeled rule options: (a) rule1, (b) rule2, etc.
         rule_options = []
@@ -479,7 +485,6 @@ def main():
         stage4_stats = read_json_file(os.path.join(PATHS['data'], 'stage4_matching_summary.json'))
         stage6_stats = read_json_file(os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json'))
         stage7_stats = read_json_file(os.path.join(PATHS['data'], 'stage7_submission_collection_stats.json'))
-        stage8_stats = read_json_file(os.path.join(PATHS['data'], 'stage8_media_collection_stats.json'))
 
         # Create final HYDRATED dataset (full objects)
         hydrated_dataset = {

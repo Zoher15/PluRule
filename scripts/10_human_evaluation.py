@@ -86,16 +86,20 @@ def load_final_dataset(logger) -> Dict[str, Any]:
     return dataset
 
 
-def sample_comments_from_subreddit(subreddit_data: Dict, num_samples: int) -> List[Dict]:
-    """Sample moderator comments from a subreddit's thread pairs."""
+def sample_comments_from_subreddit(subreddit_data: Dict, num_samples: int, subreddit_name: str) -> List[Dict]:
+    """Sample moderator comments from a subreddit's thread pairs.
+
+    Uses subreddit name as seed for deterministic, independent sampling.
+    """
     thread_pairs = subreddit_data.get('thread_pairs', [])
 
     if len(thread_pairs) == 0:
         return []
 
-    # Sample thread pairs
+    # Sample thread pairs using subreddit-specific RNG for independence
     sample_size = min(num_samples, len(thread_pairs))
-    sampled_pairs = random.sample(thread_pairs, sample_size)
+    subreddit_rng = random.Random(hash(subreddit_name))
+    sampled_pairs = subreddit_rng.sample(thread_pairs, sample_size)
 
     # Extract moderator comments
     sampled_comments = []
@@ -113,8 +117,6 @@ def sample_comments_from_subreddit(subreddit_data: Dict, num_samples: int) -> Li
 
 def prepare_subreddit_pages(dataset: Dict) -> List[Dict]:
     """Prepare data for each subreddit page."""
-    random.seed(RANDOM_SEED)
-
     subreddit_pages = []
 
     for subreddit_data in dataset['subreddits']:
@@ -125,8 +127,8 @@ def prepare_subreddit_pages(dataset: Dict) -> List[Dict]:
         # The description should be in the subreddit metadata if preserved
         subreddit_description = "A community on Reddit"  # Default fallback
 
-        # Sample comments
-        sampled_comments = sample_comments_from_subreddit(subreddit_data, COMMENTS_PER_SUBREDDIT)
+        # Sample comments (using subreddit-specific seed for independence)
+        sampled_comments = sample_comments_from_subreddit(subreddit_data, COMMENTS_PER_SUBREDDIT, subreddit_name)
 
         if not sampled_comments:
             continue

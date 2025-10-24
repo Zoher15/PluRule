@@ -11,8 +11,11 @@ __pycache__/
 logs/
 data/
 output/
-credentials/
 trash/
+
+# Credentials - exclude everything except template
+credentials/*
+!credentials/reddit_api_keys.json.template
 
 # Virtual environments
 venv/

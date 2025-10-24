@@ -328,7 +328,7 @@ def main():
         logger.info(f"✅ Phase 3 complete in {phase3_elapsed:.1f}s")
 
         # Write summary statistics
-        stats_file = os.path.join(PATHS['organized_comments'], 'stage5_submission_comment_organization_stats.json')
+        stats_file = os.path.join(PATHS['data'], 'stage5_submission_comment_organization_stats.json')
         stats_data = {
             'summary': {
                 'total_subreddits': len(org_results),

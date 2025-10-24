@@ -6,6 +6,11 @@ Takes the subreddit rankings from Stage 1 and selects all SFW subreddits
 that have at least MIN_MATCHED_COMMENTS mod comments. Uses Reddit API to check
 NSFW status and collect subreddit metadata and community rules.
 
+Supports multiple Reddit API keys for round-robin usage to handle rate limits.
+Credentials are loaded from: credentials/reddit_api_keys.json
+
+See credentials/reddit_api_keys.json.template for the expected format.
+
 Input:  subreddit_mod_comment_rankings.json
 Output: sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json
 """
@@ -14,6 +19,8 @@ import sys
 import os
 import time
 from typing import Dict, List, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,28 +41,76 @@ except ImportError:
 
 
 
-def initialize_reddit_client(logger) -> Optional[object]:
-    """Initialize Reddit API client."""
+def initialize_reddit_clients(logger) -> List[object]:
+    """Initialize multiple Reddit API clients from JSON credentials file."""
     if not REDDIT_API_AVAILABLE:
         logger.warning("⚠️  Warning: praw or tqdm not available. Install with: pip install praw tqdm")
-        return None
+        return []
+
+    # Load credentials from JSON file
+    credentials_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'credentials',
+        'reddit_api_keys.json'
+    )
+
+    if not os.path.exists(credentials_file):
+        logger.error(f"❌ Credentials file not found: {credentials_file}")
+        logger.error("💡 Create a JSON file with your Reddit API keys")
+        logger.error("   See credentials/reddit_api_keys.json.template for format")
+        return []
 
     try:
-        # Try to use environment variables or praw.ini
-        reddit = praw.Reddit(
-            client_id=os.getenv('REDDIT_CLIENT_ID'),
-            client_secret=os.getenv('REDDIT_CLIENT_SECRET'),
-            user_agent=os.getenv('REDDIT_USER_AGENT', 'reddit-mod-pipeline:v1.0')
-        )
+        import json
+        with open(credentials_file, 'r') as f:
+            cred_data = json.load(f)
 
-        # Test the connection
-        reddit.user.me()
-        return reddit
+        # Support both list format and dict format
+        credentials = []
+        if isinstance(cred_data, list):
+            credentials = cred_data
+        elif isinstance(cred_data, dict):
+            if 'keys' in cred_data:
+                credentials = cred_data['keys']
+            else:
+                # Single key in dict format
+                credentials = [cred_data]
+
+        logger.info(f"📂 Loaded {len(credentials)} API key(s) from {credentials_file}")
 
     except Exception as e:
-        logger.error(f"⚠️  Reddit API initialization failed: {e}")
-        logger.error("💡 Set environment variables: REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET")
+        logger.error(f"❌ Failed to load credentials from {credentials_file}: {e}")
+        return []
+
+    # Initialize clients from credentials
+    clients = []
+    for idx, cred in enumerate(credentials, 1):
+        try:
+            reddit = praw.Reddit(
+                client_id=cred['client_id'],
+                client_secret=cred['client_secret'],
+                user_agent=cred.get('user_agent', f'reddit-mod-pipeline:v1.0:key{idx}')
+            )
+            # Test the connection
+            reddit.user.me()
+            clients.append(reddit)
+            logger.info(f"✅ Initialized Reddit API client #{idx}")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to initialize API key #{idx}: {e}")
+
+    if not clients:
+        logger.error("❌ No valid Reddit API keys could be initialized")
+        return []
+
+    logger.info(f"🔑 Total active Reddit API clients: {len(clients)}")
+    return clients
+
+
+def get_reddit_client_for_worker(clients: List[object], worker_id: int) -> Optional[object]:
+    """Get a Reddit client assigned to a specific worker."""
+    if not clients:
         return None
+    return clients[worker_id % len(clients)]
 
 
 def check_nsfw_status(reddit: object, subreddit_name: str, logger) -> bool:
@@ -188,58 +243,103 @@ def process_subreddit_with_retry(reddit: object, subreddit_name: str, original_r
     return None
 
 
-def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit: object, logger) -> List[Dict[str, Any]]:
-    """Collect all SFW subreddits with at least MIN_MATCHED_COMMENTS mod comments."""
+def process_subreddit_worker(reddit_client: object, ranking_entry: Dict[str, Any], logger, worker_id: int) -> Optional[Dict[str, Any]]:
+    """Worker function to process a single subreddit."""
+    subreddit_name = ranking_entry['subreddit']
+    original_rank = ranking_entry['rank']
+    mod_comment_count = ranking_entry['mod_comment_count']
+
+    # Process subreddit with retry logic
+    sfw_entry = process_subreddit_with_retry(reddit_client, subreddit_name, original_rank, mod_comment_count, logger)
+
+    if sfw_entry:
+        logger.info(f"✅ [Worker {worker_id}] r/{subreddit_name} (mod rank {original_rank}) - {mod_comment_count:,} mod comments, {len(sfw_entry['rules'])} rules")
+
+    return sfw_entry
+
+
+def collect_sfw_subreddits(rankings_data: Dict[str, Any], reddit_clients: List[object], logger) -> List[Dict[str, Any]]:
+    """Collect all SFW subreddits with at least MIN_MATCHED_COMMENTS mod comments in parallel."""
     logger.info(f"🚀 Collecting SFW subreddits with at least {MIN_MATCHED_COMMENTS} mod comments...")
 
-    sfw_subreddits = []
+    # Filter rankings to only those meeting the minimum threshold
+    eligible_rankings = []
+    for ranking_entry in rankings_data['rankings']:
+        if ranking_entry['mod_comment_count'] >= MIN_MATCHED_COMMENTS:
+            eligible_rankings.append(ranking_entry)
+        else:
+            # Stop at first subreddit below threshold (rankings are sorted)
+            logger.info(f"⏭️  Stopping: r/{ranking_entry['subreddit']} has {ranking_entry['mod_comment_count']} mod comments (below minimum {MIN_MATCHED_COMMENTS})")
+            break
+
+    total_to_check = len(eligible_rankings)
+    logger.info(f"📊 Found {total_to_check} subreddits to check (>= {MIN_MATCHED_COMMENTS} mod comments)")
+
+    # Use one worker per API key for parallel processing
+    num_workers = len(reddit_clients)
+    logger.info(f"🔧 Using {num_workers} parallel workers (one per API key)")
+
+    sfw_results = []
     checked_count = 0
     skipped_count = 0
 
-    # Set up progress tracking - use total rankings as we'll process all
+    # Set up progress tracking
     if REDDIT_API_AVAILABLE:
-        progress_bar = tqdm(total=len(rankings_data['rankings']), desc="Collecting SFW subreddits")
+        progress_bar = tqdm(total=total_to_check, desc="Collecting SFW subreddits")
     else:
         progress_bar = None
 
+    # Thread-safe lock for progress tracking
+    lock = threading.Lock()
+
     try:
-        for ranking_entry in rankings_data['rankings']:
-            subreddit_name = ranking_entry['subreddit']
-            original_rank = ranking_entry['rank']
-            mod_comment_count = ranking_entry['mod_comment_count']
+        # Process subreddits in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            future_to_ranking = {}
+            for idx, ranking_entry in enumerate(eligible_rankings):
+                worker_id = idx % num_workers
+                reddit_client = get_reddit_client_for_worker(reddit_clients, worker_id)
+                future = executor.submit(process_subreddit_worker, reddit_client, ranking_entry, logger, worker_id)
+                future_to_ranking[future] = ranking_entry
 
-            checked_count += 1
+            # Collect results as they complete
+            for future in as_completed(future_to_ranking):
+                ranking_entry = future_to_ranking[future]
 
-            # Skip subreddits that don't meet minimum mod comment threshold
-            if mod_comment_count < MIN_MATCHED_COMMENTS:
-                logger.info(f"⏭️  Stopping: r/{subreddit_name} has {mod_comment_count} mod comments (below minimum {MIN_MATCHED_COMMENTS})")
-                if progress_bar:
-                    progress_bar.close()
-                break
+                with lock:
+                    checked_count += 1
 
-            # Process subreddit with retry logic
-            sfw_entry = process_subreddit_with_retry(reddit, subreddit_name, original_rank, mod_comment_count, logger)
+                try:
+                    sfw_entry = future.result()
 
-            if not sfw_entry:
-                skipped_count += 1
-                # Note: Specific skip reason already logged in process_subreddit_with_retry
+                    if sfw_entry:
+                        with lock:
+                            sfw_results.append((ranking_entry['rank'], sfw_entry))
+                    else:
+                        with lock:
+                            skipped_count += 1
+
+                except Exception as e:
+                    with lock:
+                        skipped_count += 1
+                        logger.warning(f"⚠️  Error processing r/{ranking_entry['subreddit']}: {e}")
+
                 if progress_bar:
                     progress_bar.update(1)
-                continue
-
-            # Add SFW rank
-            sfw_entry['subreddit']['sfw_rank'] = len(sfw_subreddits) + 1
-
-            sfw_subreddits.append(sfw_entry)
-
-            logger.info(f"✅ r/{subreddit_name} - SFW rank {len(sfw_subreddits)} (mod rank {original_rank}) - {mod_comment_count:,} mod comments, {len(sfw_entry['rules'])} rules")
-
-            if progress_bar:
-                progress_bar.update(1)
 
     finally:
         if progress_bar:
             progress_bar.close()
+
+    # Sort results by original mod rank to maintain ordering
+    sfw_results.sort(key=lambda x: x[0])
+
+    # Extract just the entries and assign SFW ranks
+    sfw_subreddits = []
+    for _, sfw_entry in sfw_results:
+        sfw_entry['subreddit']['sfw_rank'] = len(sfw_subreddits) + 1
+        sfw_subreddits.append(sfw_entry)
 
     logger.info(f"📊 Collection complete:")
     logger.info(f"  Collected: {len(sfw_subreddits)} SFW subreddits with {MIN_RULES_FOR_MATCHING}+ rules and {MIN_MATCHED_COMMENTS}+ mod comments")
@@ -276,17 +376,17 @@ def main():
         total_subreddits = len(rankings_data['rankings'])
         logger.info(f"📊 Loaded {total_subreddits:,} subreddits from rankings")
 
-        # Initialize Reddit API
-        logger.info("🔌 Initializing Reddit API...")
-        reddit = initialize_reddit_client(logger)
+        # Initialize Reddit API clients
+        logger.info("🔌 Initializing Reddit API clients...")
+        reddit_clients = initialize_reddit_clients(logger)
 
-        if reddit:
-            logger.info("✅ Reddit API connected")
+        if reddit_clients:
+            logger.info(f"✅ Reddit API connected with {len(reddit_clients)} client(s)")
         else:
             logger.warning("⚠️  Reddit API unavailable - will skip all subreddits for safety")
 
         # Collect SFW subreddits
-        sfw_subreddits = collect_sfw_subreddits(rankings_data, reddit, logger)
+        sfw_subreddits = collect_sfw_subreddits(rankings_data, reddit_clients, logger)
 
         # Create output data
         output_data = {
@@ -296,8 +396,9 @@ def main():
                 'min_rules_threshold': MIN_RULES_FOR_MATCHING,
                 'source_file': rankings_file,
                 'collection_date': time.strftime("%Y-%m-%d %H:%M:%S"),
-                'reddit_api_used': reddit is not None,
-                'filtering_method': 'Reddit API over18 flag' if reddit else 'No filtering (API required)'
+                'reddit_api_clients_used': len(reddit_clients),
+                'reddit_api_used': len(reddit_clients) > 0,
+                'filtering_method': 'Reddit API over18 flag' if reddit_clients else 'No filtering (API required)'
             },
             'subreddits': sfw_subreddits
         }
