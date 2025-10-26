@@ -332,7 +332,7 @@ def main():
 
         # Load Stage 2 data for comment counts and rule validation
         logger.info("📚 Loading subreddit data...")
-        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_1_comments.json')
+        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
         stage2_data = read_json_file(rules_file)
 
         # Load Stage 3 summary for actual filtered comment counts
@@ -533,7 +533,7 @@ def main():
 
         # Load Stage 2 rules once for all subreddits
         logger.info("📚 Loading rules from Stage 2 data...")
-        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_1_comments.json')
+        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
         stage2_data = read_json_file(rules_file)
 
         # Create a mapping of subreddit name to rules

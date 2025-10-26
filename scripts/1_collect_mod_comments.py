@@ -53,8 +53,8 @@ def process_single_file(file_path: str) -> dict:
     # Extract RC filename for meaningful logging (e.g., "RC_2023-02")
     rc_filename = os.path.basename(file_path).replace('.zst', '')
 
-    # Create worker logger with meaningful identifier
-    worker_logger = get_stage_logger(1, "collect_mod_comments", worker_identifier=rc_filename)
+    # Create worker logger with meaningful identifier (logs will go in rc/ subdirectory)
+    worker_logger = get_stage_logger(1, "collect_mod_comments", worker_identifier=f"rc/{rc_filename}")
 
     input_file = file_path
     output_file = os.path.join(

@@ -24,13 +24,13 @@ AMBIGUOUS_PERCENTILE = 95  # Top 5% of similarity scores considered ambiguous ma
 MIN_MATCHED_COMMENTS = 25 # Minimum matched comments for subreddit inclusion in Stage 4
 MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 4
 # Stage 9: Dataset split configuration
-MIN_EVAL_THREAD_PAIRS = 25      # Minimum pairs for eval_1k (also used in Stage 6 filtering)
-MIN_TRAIN_THREAD_PAIRS = 250    # Minimum pairs for train/val/eval splits
+MIN_TEST_THREAD_PAIRS = 25      # Minimum pairs for test_1k (also used in Stage 6 filtering)
+MIN_TRAIN_THREAD_PAIRS = 250    # Minimum pairs for train/val/test splits
 
 # Split sizes for subreddits with ≥500 pairs
-TRAIN_SPLIT = 400
-VAL_SPLIT = 50
-EVAL_SPLIT = 50
+TRAIN_SPLIT = 200
+VAL_SPLIT = 25
+TEST_SPLIT = 25
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # Model used in Stage 4 for semantic matching
 # Auto-detect number of CPU cores (use all available cores)
 PROCESSES = multiprocessing.cpu_count()

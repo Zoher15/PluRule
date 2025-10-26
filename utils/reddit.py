@@ -156,9 +156,16 @@ def clean_rule_text(text: str) -> str:
     text = re.sub(r'`([^`]+)`', r'\1', text)
 
     # Remove common prefixes from rule names/descriptions
-    # Patterns like "Rule 1:", "Rule 1 -", "General:", "Rule 5.3A", etc.
-    text = re.sub(r'^(Rule\s*\d+[\.\w]*\s*[:\-.]?\s*|General\s*[:.]?\s*)', '',
-                 text, flags=re.IGNORECASE)
+    # Patterns like "Rule 1: No spam", "Rule 1 - Be nice", "General: Be respectful"
+    # Only remove prefix if followed by punctuation (: - .) AND content after it
+    # This preserves standalone "Rule 1" or "General" as valid rule names
+    original_text = text
+    text = re.sub(r'^Rule\s*\d+[\.\w]*\s*[:\-\.]\s+', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^General\s*[:\-\.]\s+', '', text, flags=re.IGNORECASE)
+
+    # If cleaning resulted in empty string, restore original
+    if not text.strip():
+        text = original_text
 
     # Clean up whitespace
     text = re.sub(r'\s+', ' ', text).strip()

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Stage 9: Create Final Datasets with Train/Val/Eval Splits
+Stage 9: Create Final Datasets with Train/Val/Test Splits
 
-Creates train/val/eval splits from subreddits with sufficient thread pairs:
-- Large subreddits (≥500 pairs): Split into train (400) + val (50) + eval (50)
-- Small subreddits (≥50 but <500 pairs): Only eval_1k (50)
-- eval_1k: Combined eval set from ALL subreddits (includes eval from large + small subreddits)
+Creates train/val/test splits from subreddits with sufficient thread pairs:
+- Large subreddits (≥500 pairs): Split into train (400) + val (50) + test (50)
+- Small subreddits (≥50 but <500 pairs): Only test_1k (50)
+- test_1k: Combined test set from ALL subreddits (includes test from large + small subreddits)
 
-Note: eval_1k contains ~1000 subreddits total, while train/val/eval contain ~100-200 subreddits each.
+Note: test_1k contains ~1000 subreddits total, while train/val/test contain ~100-200 subreddits each.
 
 Each split has both hydrated (full objects) and dehydrated (IDs only) versions.
 
@@ -22,8 +22,8 @@ Input:
 Output:
 - train_hydrated.json.zst / train_dehydrated.json.zst
 - val_hydrated.json.zst / val_dehydrated.json.zst
-- eval_hydrated.json.zst / eval_dehydrated.json.zst
-- eval_1k_hydrated.json.zst / eval_1k_dehydrated.json.zst
+- test_hydrated.json.zst / test_dehydrated.json.zst
+- test_1k_hydrated.json.zst / test_1k_dehydrated.json.zst
 """
 
 import sys
@@ -38,8 +38,8 @@ from typing import Dict, List, Any, Set, Tuple
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (PATHS, MIN_MATCHED_COMMENTS, PROCESSES, MIN_EVAL_THREAD_PAIRS,
-                    MIN_TRAIN_THREAD_PAIRS, TRAIN_SPLIT, VAL_SPLIT, EVAL_SPLIT, create_directories)
+from config import (PATHS, MIN_MATCHED_COMMENTS, PROCESSES, MIN_TEST_THREAD_PAIRS,
+                    MIN_TRAIN_THREAD_PAIRS, TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT, create_directories)
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import read_json_file, write_json_file, read_zst_lines, json_loads
 from utils.stats import calculate_jsd_from_uniform, rank_by_score
@@ -158,8 +158,8 @@ def sample_and_split_pairs(thread_pairs: List[Dict], subreddit: str,
     """
     Sample and split thread pairs deterministically.
 
-    For large subreddits (num_pairs=500): Returns (train, val, eval)
-    For small subreddits (num_pairs=50): Returns ([], [], eval)
+    For large subreddits (num_pairs=500): Returns (train, val, test)
+    For small subreddits (num_pairs=50): Returns ([], [], test)
 
     Uses subreddit name as seed for deterministic sampling.
     """
@@ -173,13 +173,13 @@ def sample_and_split_pairs(thread_pairs: List[Dict], subreddit: str,
     subreddit_rng.shuffle(sampled_pairs)
 
     if num_pairs == MIN_TRAIN_THREAD_PAIRS:
-        # Large subreddit: split into train/val/eval
+        # Large subreddit: split into train/val/test
         train_pairs = sampled_pairs[0:TRAIN_SPLIT]
         val_pairs = sampled_pairs[TRAIN_SPLIT:TRAIN_SPLIT + VAL_SPLIT]
-        eval_pairs = sampled_pairs[TRAIN_SPLIT + VAL_SPLIT:TRAIN_SPLIT + VAL_SPLIT + EVAL_SPLIT]
-        return train_pairs, val_pairs, eval_pairs
+        test_pairs = sampled_pairs[TRAIN_SPLIT + VAL_SPLIT:TRAIN_SPLIT + VAL_SPLIT + TEST_SPLIT]
+        return train_pairs, val_pairs, test_pairs
     else:
-        # Small subreddit: only eval
+        # Small subreddit: only test
         return [], [], sampled_pairs
 
 
@@ -322,9 +322,9 @@ def process_subreddit(subreddit: str, successful_submission_ids: Set[str],
                      subreddit_rules: List[Dict], submission_objects: Dict[str, Dict],
                      language: str, logger) -> Tuple[Dict, Dict, Dict, Dict]:
     """
-    Process a single subreddit and return train/val/eval/eval_1k data.
+    Process a single subreddit and return train/val/test/test_1k data.
 
-    Returns: (train_data, val_data, eval_data, eval_1k_data)
+    Returns: (train_data, val_data, test_data, test_1k_data)
     Each is None if subreddit doesn't qualify for that split.
     """
 
@@ -360,53 +360,53 @@ def process_subreddit(subreddit: str, successful_submission_ids: Set[str],
 
     # Determine if this is a large or small subreddit
     if len(filtered_pairs) >= MIN_TRAIN_THREAD_PAIRS:
-        # Large subreddit: create train/val/eval splits
-        train_pairs, val_pairs, eval_pairs = sample_and_split_pairs(
+        # Large subreddit: create train/val/test splits
+        train_pairs, val_pairs, test_pairs = sample_and_split_pairs(
             filtered_pairs, subreddit, MIN_TRAIN_THREAD_PAIRS
         )
 
-        logger.info(f"  Large subreddit: {len(train_pairs)} train, {len(val_pairs)} val, {len(eval_pairs)} eval")
+        logger.info(f"  Large subreddit: {len(train_pairs)} train, {len(val_pairs)} val, {len(test_pairs)} test")
 
         # Process each split
         train_data = process_pairs_to_dataset(train_pairs, subreddit, subreddit_rules,
                                              submission_objects, trees_data, logger)
         val_data = process_pairs_to_dataset(val_pairs, subreddit, subreddit_rules,
                                            submission_objects, trees_data, logger)
-        eval_data = process_pairs_to_dataset(eval_pairs, subreddit, subreddit_rules,
+        test_data = process_pairs_to_dataset(test_pairs, subreddit, subreddit_rules,
                                             submission_objects, trees_data, logger)
 
         # Add metadata
-        for data in [train_data, val_data, eval_data]:
+        for data in [train_data, val_data, test_data]:
             if data:
                 data['data_version'] = '1.0'
                 data['last_updated'] = time.strftime('%Y-%m-%d')
                 data['language'] = language
 
-        # eval_1k uses the same data as eval for large subreddits
-        eval_1k_data = eval_data.copy() if eval_data else None
+        # test_1k uses the same data as test for large subreddits
+        test_1k_data = test_data.copy() if test_data else None
 
-        return train_data, val_data, eval_data, eval_1k_data
+        return train_data, val_data, test_data, test_1k_data
 
-    elif len(filtered_pairs) >= MIN_EVAL_THREAD_PAIRS:
-        # Small subreddit: only eval_1k
-        _, _, eval_1k_pairs = sample_and_split_pairs(
-            filtered_pairs, subreddit, MIN_EVAL_THREAD_PAIRS
+    elif len(filtered_pairs) >= MIN_TEST_THREAD_PAIRS:
+        # Small subreddit: only test_1k
+        _, _, test_1k_pairs = sample_and_split_pairs(
+            filtered_pairs, subreddit, MIN_TEST_THREAD_PAIRS
         )
 
-        logger.info(f"  Small subreddit: {len(eval_1k_pairs)} eval_1k only")
+        logger.info(f"  Small subreddit: {len(test_1k_pairs)} test_1k only")
 
-        eval_1k_data = process_pairs_to_dataset(eval_1k_pairs, subreddit, subreddit_rules,
+        test_1k_data = process_pairs_to_dataset(test_1k_pairs, subreddit, subreddit_rules,
                                                submission_objects, trees_data, logger)
 
-        if eval_1k_data:
-            eval_1k_data['data_version'] = '1.0'
-            eval_1k_data['last_updated'] = time.strftime('%Y-%m-%d')
-            eval_1k_data['language'] = language
+        if test_1k_data:
+            test_1k_data['data_version'] = '1.0'
+            test_1k_data['last_updated'] = time.strftime('%Y-%m-%d')
+            test_1k_data['language'] = language
 
-        return None, None, None, eval_1k_data
+        return None, None, None, test_1k_data
 
     else:
-        logger.warning(f"  Skipping r/{subreddit}: only {len(filtered_pairs)} pairs (<{MIN_EVAL_THREAD_PAIRS} required)")
+        logger.warning(f"  Skipping r/{subreddit}: only {len(filtered_pairs)} pairs (<{MIN_TEST_THREAD_PAIRS} required)")
         return None, None, None, None
 
 
@@ -512,7 +512,7 @@ def main():
     """Main execution function."""
     # Initialize logging
     logger = get_stage_logger(9, "create_final_datasets")
-    log_stage_start(logger, 9, "Create Final Datasets (Train/Val/Eval/Eval_1k)")
+    log_stage_start(logger, 9, "Create Final Datasets (Train/Val/Test/Test_1k)")
 
     start_time = time.time()
 
@@ -543,15 +543,15 @@ def main():
 
         train_subreddits = []
         val_subreddits = []
-        eval_subreddits = []
-        eval_1k_subreddits = []
+        test_subreddits = []
+        test_1k_subreddits = []
 
         for subreddit, successful_ids in subreddit_successful_ids.items():
             rules = subreddit_rules_map.get(subreddit, [])
             language = subreddit_languages.get(subreddit, 'unknown')
             submission_objs = subreddit_submission_objects.get(subreddit, {})
 
-            train_data, val_data, eval_data, eval_1k_data = process_subreddit(
+            train_data, val_data, test_data, test_1k_data = process_subreddit(
                 subreddit, successful_ids, rules, submission_objs, language, logger
             )
 
@@ -559,18 +559,18 @@ def main():
                 train_subreddits.append(train_data)
             if val_data:
                 val_subreddits.append(val_data)
-            if eval_data:
-                eval_subreddits.append(eval_data)
-            if eval_1k_data:
-                eval_1k_subreddits.append(eval_1k_data)
+            if test_data:
+                test_subreddits.append(test_data)
+            if test_1k_data:
+                test_1k_subreddits.append(test_1k_data)
 
         logger.info(f"✅ Processed subreddits:")
         logger.info(f"  Train: {len(train_subreddits)} subreddits")
         logger.info(f"  Val: {len(val_subreddits)} subreddits")
-        logger.info(f"  Eval: {len(eval_subreddits)} subreddits")
-        logger.info(f"  Eval_1k: {len(eval_1k_subreddits)} subreddits")
+        logger.info(f"  Test: {len(test_subreddits)} subreddits")
+        logger.info(f"  Test_1k: {len(test_1k_subreddits)} subreddits")
 
-        if not eval_1k_subreddits:
+        if not test_1k_subreddits:
             logger.error("❌ No subreddit data collected!")
             log_stage_end(logger, 9, success=False, elapsed_time=time.time() - start_time)
             return 1
@@ -582,10 +582,10 @@ def main():
             train_subreddits = rank_by_score(train_subreddits, 'jsd_from_uniform', ascending=True)
         if val_subreddits:
             val_subreddits = rank_by_score(val_subreddits, 'jsd_from_uniform', ascending=True)
-        if eval_subreddits:
-            eval_subreddits = rank_by_score(eval_subreddits, 'jsd_from_uniform', ascending=True)
-        if eval_1k_subreddits:
-            eval_1k_subreddits = rank_by_score(eval_1k_subreddits, 'jsd_from_uniform', ascending=True)
+        if test_subreddits:
+            test_subreddits = rank_by_score(test_subreddits, 'jsd_from_uniform', ascending=True)
+        if test_1k_subreddits:
+            test_1k_subreddits = rank_by_score(test_1k_subreddits, 'jsd_from_uniform', ascending=True)
 
         # Load pipeline statistics
         stage1_stats = read_json_file(os.path.join(PATHS['data'], 'stage1_subreddit_mod_comment_rankings.json'))
@@ -599,6 +599,16 @@ def main():
             total_submissions = sum(len(s['submissions']) for s in subreddits)
             total_media = sum(s['num_media'] for sub in subreddits for s in sub['submissions'].values())
 
+            # Count total comments across all thread pairs (mod + unmod threads)
+            total_comments = 0
+            for sub in subreddits:
+                for pair in sub['thread_pairs']:
+                    # Count comments in moderated thread
+                    total_comments += len(pair.get('moderated_thread', []))
+                    # Count comments in unmoderated thread
+                    total_comments += len(pair.get('unmoderated_thread', []))
+                    # Count mod comment (already counted in moderated_thread, so don't double count)
+
             return {
                 'version': '1.0',
                 'split': split_name,
@@ -608,6 +618,7 @@ def main():
                 'total_submissions': total_submissions,
                 'total_submissions_with_media': sum(1 for sub in subreddits for s in sub['submissions'].values() if s['num_media'] > 0),
                 'total_media_files': total_media,
+                'total_comments': total_comments,
                 'embedding_model': stage4_stats.get('embedding_model', 'unknown'),
                 'gold_threshold': stage4_stats.get('gold_threshold', 0),
                 'ambiguous_threshold': stage4_stats.get('ambiguous_threshold', 0),
@@ -635,16 +646,16 @@ def main():
                 'subreddits': val_subreddits
             }
 
-        if eval_subreddits:
-            datasets['eval'] = {
-                'metadata': create_metadata('eval', eval_subreddits),
-                'subreddits': eval_subreddits
+        if test_subreddits:
+            datasets['test'] = {
+                'metadata': create_metadata('test', test_subreddits),
+                'subreddits': test_subreddits
             }
 
-        if eval_1k_subreddits:
-            datasets['eval_1k'] = {
-                'metadata': create_metadata('eval_1k', eval_1k_subreddits),
-                'subreddits': eval_1k_subreddits
+        if test_1k_subreddits:
+            datasets['test_1k'] = {
+                'metadata': create_metadata('test_1k', test_1k_subreddits),
+                'subreddits': test_1k_subreddits
             }
 
         # Write hydrated and dehydrated versions for each split
@@ -670,6 +681,19 @@ def main():
                 'dehydrated': {'path': dehydrated_file, 'size_mb': dehydrated_size}
             }
 
+        # Calculate overall statistics (train + val + test_1k, avoiding double-counting test)
+        overall_comments = 0
+        overall_threads = 0
+
+        for subreddit_list in [train_subreddits, val_subreddits, test_1k_subreddits]:
+            for sub in subreddit_list:
+                for pair in sub['thread_pairs']:
+                    # Count comments
+                    overall_comments += len(pair.get('moderated_thread', []))
+                    overall_comments += len(pair.get('unmoderated_thread', []))
+                    # Count threads (mod + unmod = 2 threads per pair)
+                    overall_threads += 2
+
         # Save statistics summary
         summary_stats = {
             'metadata': {
@@ -681,11 +705,13 @@ def main():
             'dataset_statistics': {
                 'train_subreddits': len(train_subreddits),
                 'val_subreddits': len(val_subreddits),
-                'eval_subreddits': len(eval_subreddits),
-                'eval_1k_subreddits': len(eval_1k_subreddits),
+                'test_subreddits': len(test_subreddits),
+                'test_1k_subreddits': len(test_1k_subreddits),
                 'train_pairs_per_subreddit': TRAIN_SPLIT,
                 'val_pairs_per_subreddit': VAL_SPLIT,
-                'eval_pairs_per_subreddit': EVAL_SPLIT,
+                'test_pairs_per_subreddit': TEST_SPLIT,
+                'total_comments_overall': overall_comments,
+                'total_threads_overall': overall_threads,
             },
             'output_files': output_files
         }

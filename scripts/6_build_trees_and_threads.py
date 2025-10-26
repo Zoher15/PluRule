@@ -314,7 +314,7 @@ def count_common_ancestors_from_threads(thread1: List[Dict], thread2: List[Dict]
 
 def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict],
                          submission_id: str, comments: Dict[str, Dict],
-                         trees: Dict[str, Any], logger) -> Tuple[Optional[str], Optional[List[Dict]], Optional[int]]:
+                         trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[str], Optional[List[Dict]], Optional[int]]:
     """Find best alternative comment for unmoderated thread.
 
     Args:
@@ -324,6 +324,7 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
         comments: All comments for this submission
         trees: Tree structures
         logger: Logger instance
+        used_alternatives: Set of already-used alternative comment IDs for this submission
 
     Returns:
         Tuple of (alt_comment_id, alt_thread, moderated_depth)
@@ -331,6 +332,8 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
         - alt_thread: The built thread for the alternative (to avoid rebuilding)
         - moderated_depth: Depth of the moderated comment (for failure tracking)
     """
+    if used_alternatives is None:
+        used_alternatives = set()
     if submission_id not in trees['trees']:
         return None, None, None
 
@@ -350,8 +353,9 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
     # Get all comments at same depth
     same_depth_comments = depth_levels.get(moderated_depth, [])
 
-    # Remove moderated comment from alternatives and sort for determinism
-    alternatives = sorted([cid for cid in same_depth_comments if cid != moderated_comment_id])
+    # Remove moderated comment and already-used alternatives, sort for determinism
+    alternatives = sorted([cid for cid in same_depth_comments
+                          if cid != moderated_comment_id and cid not in used_alternatives])
 
     if not alternatives:
         return None, None, moderated_depth
@@ -397,8 +401,15 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
 
 
 def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
-                     trees: Dict[str, Any], logger) -> Tuple[Optional[Dict], Optional[int], Optional[str]]:
+                     trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[Dict], Optional[int], Optional[str]]:
     """Build moderated and unmoderated thread pair for a moderator comment.
+
+    Args:
+        mod_comment: The moderator comment
+        comments: All comments for this submission
+        trees: Tree structures
+        logger: Logger instance
+        used_alternatives: Set of already-used alternative comment IDs for this submission
 
     Returns:
         Tuple of (pair_dict, moderated_depth, failure_reason)
@@ -406,6 +417,8 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
         - moderated_depth: Depth of moderated comment (for failure tracking)
         - failure_reason: String indicating why pair failed ('moderated_thread_has_mod_response' or None)
     """
+    if used_alternatives is None:
+        used_alternatives = set()
     mod_comment_id = mod_comment.get('id')
     moderated_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
     submission_id = extract_submission_id(mod_comment.get('link_id', ''))
@@ -444,7 +457,7 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
     # Find best alternative at exact same depth (no fallback)
     alt_comment_id, unmoderated_thread, moderated_depth = find_best_alternative(
         moderated_comment_id, moderated_thread,
-        submission_id, comments, trees, logger
+        submission_id, comments, trees, logger, used_alternatives
     )
 
     if not alt_comment_id:
@@ -569,6 +582,9 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         failed_depth_distribution = defaultdict(int)
         successful_depth_distribution = defaultdict(int)
 
+        # Track used unmoderated alternatives per submission to prevent reuse
+        used_alternatives_per_submission = defaultdict(set)
+
         for mod_comment in mod_comments:
             # Extract submission ID using utility
             submission_id = extract_submission_id(mod_comment.get('link_id', ''))
@@ -590,11 +606,21 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
                 debug_counts['missing_moderated_comment'] += 1
                 continue
 
-            # Build thread pair
-            pair, failed_depth, failure_reason = build_thread_pair(mod_comment, comments, trees_data, worker_logger)
+            # Get used alternatives for this submission
+            used_for_submission = used_alternatives_per_submission[submission_id]
+
+            # Build thread pair with tracking of used alternatives
+            pair, failed_depth, failure_reason = build_thread_pair(
+                mod_comment, comments, trees_data, worker_logger, used_for_submission
+            )
             if pair:
                 thread_pairs.append(pair)
                 success_count += 1
+
+                # Mark the unmoderated alternative as used for this submission
+                unmod_comment_id = pair.get('metadata', {}).get('unmoderated_comment_id')
+                if unmod_comment_id:
+                    used_alternatives_per_submission[submission_id].add(unmod_comment_id)
 
                 # Track successful depth distribution
                 moderated_thread = pair.get('moderated_thread', [])
