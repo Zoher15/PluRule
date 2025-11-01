@@ -208,24 +208,48 @@ def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
     output_file = os.path.join(PATHS['submissions'], f"{subreddit}_submissions.zst")
 
     try:
-        submissions_found = 0
+        # Collect submissions in memory to deduplicate and filter removed/deleted
+        # Simple logic: Skip all removed/deleted content, deduplicate by ID
+        submissions_dict = {}
+        skipped_removed_deleted = 0
 
-        # Generator that counts as it yields (closure over submissions_found)
-        def submission_generator():
-            """Stream submissions from temp files one at a time."""
-            nonlocal submissions_found
-            for temp_file in temp_files:
-                try:
-                    for line in read_zst_lines(temp_file):
-                        if line.strip():
-                            submissions_found += 1
-                            yield json_loads(line)
-                except Exception as e:
-                    worker_logger.warning(f"⚠️  Error reading {os.path.basename(temp_file)}: {e}")
-                    continue
+        for temp_file in temp_files:
+            try:
+                for line in read_zst_lines(temp_file):
+                    if line.strip():
+                        submission = json_loads(line)
+                        submission_id = submission.get('id', '')
 
-        # Write submissions (streaming - write_zst_json_objects iterates once through generator)
-        write_zst_json_objects(output_file, submission_generator())
+                        if not submission_id:
+                            continue
+
+                        # Check if submission content is removed/deleted
+                        selftext = submission.get('selftext', '')
+                        selftext_html = submission.get('selftext_html', '')
+                        removed_by_category = submission.get('removed_by_category')
+                        is_removed_or_deleted = (
+                            selftext in ['[removed]', '[deleted]'] or '[removed]' in selftext_html or '[deleted]' in selftext_html or
+                            removed_by_category is not None
+                        )
+
+                        # Skip removed/deleted submissions entirely
+                        if is_removed_or_deleted:
+                            skipped_removed_deleted += 1
+                            continue
+
+                        # Add/update submission (later entries overwrite earlier ones)
+                        submissions_dict[submission_id] = submission
+
+            except Exception as e:
+                worker_logger.warning(f"⚠️  Error reading {os.path.basename(temp_file)}: {e}")
+                continue
+
+        submissions_found = len(submissions_dict)
+
+        worker_logger.info(f"  Filtered out {skipped_removed_deleted} removed/deleted submissions")
+
+        # Write filtered and deduplicated submissions
+        write_zst_json_objects(output_file, submissions_dict.values())
 
         if submissions_found == 0:
             # Clean up empty file
@@ -247,13 +271,14 @@ def consolidate_subreddit_submissions(args: tuple) -> Dict[str, Any]:
         worker_logger.info(f"✅ {subreddit}: {submissions_found:,}/{submissions_needed:,} submissions ({coverage_rate*100:.1f}% coverage) from {len(temp_files)} temp files ({file_size:.3f} GB)")
 
         # Clean up temp directory
-        import shutil
-        shutil.rmtree(subreddit_temp_dir)
+        # import shutil
+        # shutil.rmtree(subreddit_temp_dir)
 
         return {
             'subreddit': subreddit,
             'submissions_needed': submissions_needed,
             'submissions_collected': submissions_found,
+            'submissions_skipped_removed_deleted': skipped_removed_deleted,
             'coverage_rate': coverage_rate,
             'output_file': output_file,
             'file_size_gb': file_size,
@@ -354,14 +379,14 @@ def main():
         consolidate_args = [(subreddit, temp_dir, subreddit_submission_ids[subreddit]) for subreddit in subreddits_with_data]
         consolidate_results = process_files_parallel(consolidate_args, consolidate_subreddit_submissions, PROCESSES, logger)
 
-        # Phase 4: Cleanup and statistics
-        logger.info("🧹 Phase 4: Cleanup and statistics...")
+        # # Phase 4: Cleanup and statistics
+        # logger.info("🧹 Phase 4: Cleanup and statistics...")
 
-        # Clean up remaining temp directory
-        import shutil
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            logger.info(f"   🗑️  Removed temp directory: {temp_dir}")
+        # # Clean up remaining temp directory
+        # import shutil
+        # if os.path.exists(temp_dir):
+        #     shutil.rmtree(temp_dir)
+        #     logger.info(f"   🗑️  Removed temp directory: {temp_dir}")
 
         # Collect final statistics
         successful_consolidations = [r for r in consolidate_results if r.get('success', False)]
@@ -369,6 +394,7 @@ def main():
 
         total_submissions_needed = sum(r.get('submissions_needed', 0) for r in successful_consolidations)
         total_submissions_final = sum(r.get('submissions_collected', 0) for r in successful_consolidations)
+        total_submissions_skipped = sum(r.get('submissions_skipped_removed_deleted', 0) for r in successful_consolidations)
         total_file_size = sum(r.get('file_size_gb', 0) for r in successful_consolidations)
         overall_coverage = total_submissions_final / total_submissions_needed if total_submissions_needed > 0 else 0
 
@@ -382,6 +408,7 @@ def main():
                 'total_unique_submission_ids': len(set().union(*subreddit_submission_ids.values())),
                 'total_submissions_needed': total_submissions_needed,
                 'total_submissions_found': total_submissions_final,
+                'total_submissions_skipped_removed_deleted': total_submissions_skipped,
                 'overall_coverage_rate': overall_coverage,
                 'total_rs_files_processed': len(successful_rs),
                 'total_submissions_processed': total_submissions_processed,
@@ -398,6 +425,7 @@ def main():
                     'subreddit': r['subreddit'],
                     'submissions_needed': r.get('submissions_needed', 0),
                     'submissions_collected': r['submissions_collected'],
+                    'submissions_skipped_removed_deleted': r.get('submissions_skipped_removed_deleted', 0),
                     'coverage_rate': r.get('coverage_rate', 0),
                     'file_size_gb': r.get('file_size_gb', 0),
                     'temp_files_processed': r.get('temp_files_processed', 0)
@@ -421,6 +449,7 @@ def main():
         logger.info(f"Time: {elapsed:.1f}s")
         logger.info(f"📊 Processed {len(successful_consolidations)}/{len(subreddit_submission_ids)} subreddits")
         logger.info(f"📝 Collected {total_submissions_final:,}/{total_submissions_needed:,} submissions ({overall_coverage*100:.1f}% coverage)")
+        logger.info(f"🚫 Filtered out {total_submissions_skipped:,} removed/deleted submissions")
         logger.info(f"💾 Total size: {total_file_size:.2f} GB")
         logger.info(f"📈 RS file collection rate: {(total_submissions_collected/total_submissions_processed)*100:.1f}%" if total_submissions_processed > 0 else "📈 No submissions processed")
         logger.info(f"Summary saved to: {summary_file}")

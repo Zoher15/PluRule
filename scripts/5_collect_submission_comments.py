@@ -9,10 +9,11 @@ Phase 1: Parallel RC file processing - each RC file writes filtered comments
          to temp/{subreddit}/RC_{date}.zst files
 Phase 2: Parallel subreddit consolidation - organize comments into nested structure
          and output pickle files per subreddit
-Phase 3: Cleanup temp directories
+Phase 3: Preserve temp directories (no cleanup - kept for future use)
 
 Input:  reddit_comments/RC_*.zst files + stage4_subreddit_submission_ids.json
 Output: organized_comments/{subreddit}_submission_comments.pkl files
+        organized_comments/temp/{subreddit}/RC_{date}.zst files (preserved)
 """
 
 import sys
@@ -30,7 +31,7 @@ from config import PATHS, PROCESSES, DATE_RANGE, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, process_zst_file_multi)
-from utils.reddit import extract_submission_id, normalize_subreddit_name, validate_comment_structure
+from utils.reddit import extract_submission_id, normalize_subreddit_name
 
 def load_submission_ids(logger):
     """Load submission IDs from Stage 4 output."""
@@ -88,10 +89,6 @@ def process_rc_file(args: tuple) -> Dict[str, Any]:
         """Process each comment line and route to appropriate subreddit temp file."""
         try:
             comment = json_loads(line)
-
-            # Validate comment structure
-            if not validate_comment_structure(comment):
-                return {'matched': False}
 
             # Check if comment is from target subreddit
             subreddit = normalize_subreddit_name(comment.get('subreddit', ''))
@@ -178,6 +175,9 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
     submission_comments = defaultdict(dict)
     total_comments = 0
     files_processed = 0
+    removed_deleted_count = 0
+    preserved_from_removal_count = 0
+    overwritten_with_better_count = 0
 
     # Get subreddit's temp directory
     subreddit_temp_dir = os.path.join(temp_dir, subreddit)
@@ -188,6 +188,9 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
             'comments_organized': 0,
             'submissions_with_comments': 0,
             'files_processed': 0,
+            'removed_deleted_count': 0,
+            'preserved_from_removal_count': 0,
+            'overwritten_with_better_count': 0,
             'processing_time': 0,
             'success': False
         }
@@ -207,10 +210,6 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
                 try:
                     comment = json_loads(line_data)
 
-                    # Validate comment structure
-                    if not validate_comment_structure(comment):
-                        continue
-
                     # Extract submission ID using utility
                     submission_id = extract_submission_id(comment.get('link_id', ''))
                     if not submission_id:
@@ -219,8 +218,39 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
                     # Check if this submission is in our target list
                     if submission_id in target_submission_ids:
                         comment_id = comment.get('id', f'unknown_{total_comments}')
-                        submission_comments[submission_id][comment_id] = comment
-                        total_comments += 1
+
+                        # Only add/overwrite if the new comment is not [removed]/[deleted]
+                        # This preserves original content when later versions are removed
+                        # Also check author field for [deleted]/[removed]
+                        body = comment.get('body', '')
+                        author = comment.get('author', '')
+                        is_removed_or_deleted = (body in ['[removed]', '[deleted]'] or
+                                                author in ['[deleted]', '[removed]'])
+
+                        # If comment doesn't exist yet, add it (even if removed/deleted)
+                        # If it exists and new version is not removed/deleted, overwrite it
+                        # If it exists and new version is removed/deleted, keep the old one
+                        if comment_id not in submission_comments[submission_id]:
+                            submission_comments[submission_id][comment_id] = comment
+                            total_comments += 1
+                            if is_removed_or_deleted:
+                                removed_deleted_count += 1
+                        elif not is_removed_or_deleted:
+                            # Overwrite only if the new version is not removed/deleted
+                            # Check if we're overwriting a removed/deleted version with a better one
+                            old_comment = submission_comments[submission_id][comment_id]
+                            old_body = old_comment.get('body', '')
+                            old_author = old_comment.get('author', '')
+                            old_was_removed_or_deleted = (old_body in ['[removed]', '[deleted]'] or
+                                                         old_author in ['[deleted]', '[removed]'])
+
+                            submission_comments[submission_id][comment_id] = comment
+
+                            if old_was_removed_or_deleted:
+                                overwritten_with_better_count += 1
+                        else:
+                            # We're skipping overwriting with [removed]/[deleted] - preserving original
+                            preserved_from_removal_count += 1
 
                 except Exception:
                     continue
@@ -246,12 +276,21 @@ def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
 
     worker_logger.info(f"✅ {subreddit}: {total_comments:,} comments across {total_submissions} submissions "
           f"(avg {avg_comments_per_submission:.1f} comments/submission) in {elapsed:.1f}s")
+    if removed_deleted_count > 0:
+        worker_logger.info(f"   📊 {removed_deleted_count:,} comments were [removed]/[deleted]")
+    if preserved_from_removal_count > 0:
+        worker_logger.info(f"   🛡️  {preserved_from_removal_count:,} comments preserved (would have been overwritten with [removed]/[deleted])")
+    if overwritten_with_better_count > 0:
+        worker_logger.info(f"   ✨ {overwritten_with_better_count:,} comments recovered (overwritten [removed]/[deleted] with full content)")
 
     return {
         'subreddit': subreddit,
         'comments_organized': total_comments,
         'submissions_with_comments': total_submissions,
         'files_processed': files_processed,
+        'removed_deleted_count': removed_deleted_count,
+        'preserved_from_removal_count': preserved_from_removal_count,
+        'overwritten_with_better_count': overwritten_with_better_count,
         'processing_time': elapsed,
         'success': True
     }
@@ -316,18 +355,23 @@ def main():
         logger.info(f"   📊 {len(successful_orgs)}/{len(subreddit_to_ids)} subreddits organized successfully")
         logger.info(f"   📊 {total_comments_organized:,} comments organized across {total_submissions:,} submissions")
 
-        # Phase 3: Cleanup temp directories
-        logger.info(f"🧹 Phase 3: Cleaning up temp directories")
+        # Phase 3: Keep temp directories (no cleanup)
+        logger.info(f"📁 Phase 3: Preserving temp directories for future use")
         phase3_start = time.time()
 
         if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            logger.info(f"   🗑️  Removed temp directory: {temp_dir}")
+            logger.info(f"   💾 Kept temp directory: {temp_dir}")
+        else:
+            logger.warning(f"   ⚠️  Temp directory does not exist: {temp_dir}")
 
         phase3_elapsed = time.time() - phase3_start
         logger.info(f"✅ Phase 3 complete in {phase3_elapsed:.1f}s")
 
         # Write summary statistics
+        total_removed_deleted = sum(r.get('removed_deleted_count', 0) for r in successful_orgs)
+        total_preserved = sum(r.get('preserved_from_removal_count', 0) for r in successful_orgs)
+        total_overwritten_better = sum(r.get('overwritten_with_better_count', 0) for r in successful_orgs)
+
         stats_file = os.path.join(PATHS['data'], 'stage5_submission_comment_organization_stats.json')
         stats_data = {
             'summary': {
@@ -335,6 +379,9 @@ def main():
                 'successful_subreddits': len(successful_orgs),
                 'total_comments_organized': total_comments_organized,
                 'total_submissions_with_comments': total_submissions,
+                'total_removed_deleted': total_removed_deleted,
+                'total_preserved_from_removal': total_preserved,
+                'total_overwritten_with_better': total_overwritten_better,
                 'avg_comments_per_submission': round(total_comments_organized / total_submissions, 2) if total_submissions > 0 else 0,
                 'phase1_time': round(phase1_elapsed, 1),
                 'phase2_time': round(phase2_elapsed, 1),
@@ -348,6 +395,9 @@ def main():
                     'comments_organized': r['comments_organized'],
                     'submissions_with_comments': r['submissions_with_comments'],
                     'files_processed': r['files_processed'],
+                    'removed_deleted_count': r.get('removed_deleted_count', 0),
+                    'preserved_from_removal_count': r.get('preserved_from_removal_count', 0),
+                    'overwritten_with_better_count': r.get('overwritten_with_better_count', 0),
                     'processing_time': round(r['processing_time'], 2),
                     'avg_comments_per_submission': round(r['comments_organized'] / r['submissions_with_comments'], 2) if r['submissions_with_comments'] > 0 else 0
                 }

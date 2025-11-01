@@ -3,8 +3,8 @@
 Stage 9: Create Final Datasets with Train/Val/Test Splits
 
 Creates train/val/test splits from subreddits with sufficient thread pairs:
-- Large subreddits (≥500 pairs): Split into train (400) + val (50) + test (50)
-- Small subreddits (≥50 but <500 pairs): Only test_1k (50)
+- Large subreddits (≥250 pairs): Split into train (200) + val (25) + test (25)
+- Small subreddits (≥25 but <250 pairs): Only test_1k (25)
 - test_1k: Combined test set from ALL subreddits (includes test from large + small subreddits)
 
 Note: test_1k contains ~1000 subreddits total, while train/val/test contain ~100-200 subreddits each.
@@ -74,6 +74,7 @@ def load_successful_submissions(logger) -> tuple:
         needed_ids = set(submission_ids)
         submission_objects = {}
         found_count = 0
+        removed_count = 0
 
         for line in read_zst_lines(submissions_file):
             if found_count >= len(needed_ids):
@@ -82,10 +83,20 @@ def load_successful_submissions(logger) -> tuple:
             submission = json_loads(line)
             sub_id = submission.get('id')
             if sub_id in needed_ids:
+                # Skip submissions with [removed] in selftext_html
+                selftext_html = submission.get('selftext_html', '')
+                if selftext_html and '[removed]' in selftext_html:
+                    removed_count += 1
+                    found_count += 1  # Count as found so we can exit early
+                    continue
+
                 submission_objects[sub_id] = submission
                 found_count += 1
 
-        logger.info(f"  r/{subreddit}: Loaded {len(submission_objects)}/{len(submission_ids)} submissions")
+        if removed_count > 0:
+            logger.info(f"  r/{subreddit}: Loaded {len(submission_objects)}/{len(submission_ids)} submissions ({removed_count} filtered with [removed])")
+        else:
+            logger.info(f"  r/{subreddit}: Loaded {len(submission_objects)}/{len(submission_ids)} submissions")
         subreddit_submission_objects[subreddit] = submission_objects
 
     logger.info(f"✅ Loaded {sum(len(objs) for objs in subreddit_submission_objects.values())} total submissions")
@@ -118,14 +129,34 @@ def load_subreddit_rules(logger) -> Tuple[Dict[str, List[Dict]], Dict[str, str]]
     return subreddit_rules, subreddit_languages
 
 
-def filter_thread_pairs(thread_pairs: List[Dict], successful_submission_ids: Set[str]) -> List[Dict]:
-    """Filter thread pairs to only include those with successful Stage 8 submissions."""
+def filter_thread_pairs(thread_pairs: List[Dict], successful_submission_ids: Set[str],
+                       submission_objects: Dict[str, Dict], min_similarity: float = 0.74) -> List[Dict]:
+    """
+    Filter thread pairs to only include those with:
+    - Successful Stage 8 submissions
+    - Submissions not filtered out (e.g., [removed] in selftext_html)
+    - Rule similarity score >= min_similarity
+    """
     filtered_pairs = []
 
     for pair in thread_pairs:
-        submission_id = pair.get('metadata', {}).get('submission_id')
-        if submission_id and submission_id in successful_submission_ids:
-            filtered_pairs.append(pair)
+        metadata = pair.get('metadata', {})
+        submission_id = metadata.get('submission_id')
+
+        # Check Stage 8 success
+        if not (submission_id and submission_id in successful_submission_ids):
+            continue
+
+        # Check submission exists (not filtered during loading for [removed])
+        if submission_id not in submission_objects:
+            continue
+
+        # Check similarity score
+        rule_similarity = metadata.get('rule_similarity_score', 0)
+        if rule_similarity < min_similarity:
+            continue
+
+        filtered_pairs.append(pair)
 
     return filtered_pairs
 
@@ -210,13 +241,13 @@ def process_pairs_to_dataset(pairs: List[Dict], subreddit: str, subreddit_rules:
         metadata = pair.get('metadata', {})
         submission_id = metadata.get('submission_id')
 
+        # Get matched rule and similarity score
+        matched_rule = metadata.get('rule')
+        rule_similarity = metadata.get('rule_similarity_score', 0)
+
         # Keep FULL thread structure with all comment objects
         moderated_thread = pair.get('moderated_thread', [])
         unmoderated_thread = pair.get('unmoderated_thread', [])
-
-        # Get matched rule
-        matched_rule = metadata.get('rule')
-        rule_similarity = metadata.get('rule_similarity_score', 0)
 
         # Find full rule data
         rule_data = None
@@ -339,15 +370,15 @@ def process_subreddit(subreddit: str, successful_submission_ids: Set[str],
     with open(threads_file, 'rb') as f:
         threads_data = pickle.load(f)
 
-    # Filter thread pairs
+    # Filter thread pairs (Stage 8 success + [removed] + similarity >= 0.7529)
     original_pairs = threads_data.get('thread_pairs', [])
-    filtered_pairs = filter_thread_pairs(original_pairs, successful_submission_ids)
+    filtered_pairs = filter_thread_pairs(original_pairs, successful_submission_ids, submission_objects)
 
     if not filtered_pairs:
-        logger.warning(f"  No thread pairs remain after Stage 8 filtering")
+        logger.warning(f"  No thread pairs remain after filtering")
         return None, None, None, None
 
-    logger.info(f"  Filtered {len(original_pairs)} -> {len(filtered_pairs)} thread pairs")
+    logger.info(f"  Filtered {len(original_pairs)} -> {len(filtered_pairs)} thread pairs (Stage 8 + [removed] + similarity >= 0.7529)")
 
     # Load comment trees
     trees_file = os.path.join(PATHS['comment_trees'], f"{subreddit}_comment_trees.pkl")
@@ -680,6 +711,16 @@ def main():
                 'hydrated': {'path': hydrated_file, 'size_mb': hydrated_size},
                 'dehydrated': {'path': dehydrated_file, 'size_mb': dehydrated_size}
             }
+
+            # Write uncompressed JSON for test split
+            if split_name == 'test':
+                uncompressed_file = os.path.join(PATHS['data'], 'test_hydrated.json')
+                logger.info(f"💾 Writing uncompressed test dataset to: {uncompressed_file}")
+                with open(uncompressed_file, 'w') as f:
+                    json.dump(dataset, f, indent=2)
+                uncompressed_size = os.path.getsize(uncompressed_file) / (1024 * 1024)
+                logger.info(f"  ✅ Uncompressed test dataset saved: {uncompressed_size:.1f} MB")
+                output_files[split_name]['uncompressed'] = {'path': uncompressed_file, 'size_mb': uncompressed_size}
 
         # Calculate overall statistics (train + val + test_1k, avoiding double-counting test)
         overall_comments = 0

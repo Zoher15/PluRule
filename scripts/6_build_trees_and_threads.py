@@ -26,7 +26,7 @@ from typing import Dict, List, Any, Optional, Tuple
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, MIN_MATCHED_COMMENTS, MIN_EVAL_THREAD_PAIRS, create_directories
+from config import PATHS, PROCESSES, MIN_MATCHED_COMMENTS, MIN_TEST_THREAD_PAIRS, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, ensure_directory, get_file_size_gb)
@@ -202,20 +202,19 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
     MODERATED MODE ('moderated'):
     - Used when building a thread that we EXPECT to have a mod response at the leaf
     - The leaf comment (comment_id) is the parent of a moderator comment
-    - We check all comments in the thread for mod responses EXCEPT:
-      * We skip checking if the LEAF comment has mod children (because it should - that's our mod action)
-    - This ensures we reject threads that have OTHER mod responses besides the expected one
+    - We skip checking if the LEAF comment has mod children (because it should - that's our mod action)
+    - We do NOT check if comments in the thread are moderator comments or have mod responses
 
     UNMODERATED MODE ('unmoderated'):
     - Used when building an alternative thread that should be clean
-    - We check EVERY comment in the thread, including the leaf
-    - We check if ANY comment (including the starting one) has mod responses
-    - We want to ensure this thread is completely free of moderation
+    - We check ONLY if the LEAF comment has moderator responses as direct children
+    - We do NOT check other positions in the thread for mod responses
+    - This ensures the leaf doesn't have direct moderation, but ancestors can
 
     Both modes check:
-    1. If each comment itself is a moderator comment
+    1. If ANY comment in the thread has been removed or deleted ([removed] or [deleted] in body)
     2. If each comment has media content (embedded images/videos)
-    3. If each comment has moderator responses as direct children (1 level)
+    3. ONLY FOR UNMODERATED: If the LEAF comment has moderator responses as direct children
 
     Args:
         comment_id: The leaf comment ID to build thread from
@@ -225,10 +224,10 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
 
     Returns:
         - thread: List of comment dicts from root to leaf with 'level' field
-        - has_issue: True if any moderator response or media found (based on mode rules)
-        - issue_type: 'mod_response', 'has_media', or None
+        - has_issue: True if any moderator response, removed/deleted content, or media found (based on mode rules)
+        - issue_type: 'mod_response', 'removed_or_deleted', 'has_media', or None
     """
-    # Build path from leaf to root, checking for mod responses as we go
+    # Build path from leaf to root, checking for issues as we go
     path = []
     current_id = comment_id
     children_map = tree.get('children_map', {})
@@ -240,29 +239,32 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
         comment = comments[current_id]
         path.append(current_id)
 
-        # Check if THIS comment is a moderator comment
-        if is_moderator_comment(comment):
-            # Early exit - no need to build full thread
-            return [], True, 'mod_response'
+        # Check if ANY comment in the thread has been removed or deleted
+        # We want all comments in the thread to have valid content
+        body = comment.get('body', '')
+        if body in ['[removed]', '[deleted]']:
+            # Early exit - skip threads where any comment is removed/deleted
+            return [], True, 'removed_or_deleted'
 
         # Check if THIS comment contains media (embedded images/videos)
         if comment.get('media') or comment.get('media_metadata'):
             # Early exit - skip threads with media comments
             return [], True, 'has_media'
 
-        # Check if THIS comment has moderator responses as direct children
+        # Check if the LEAF comment has moderator responses as direct children
         # MODERATED MODE: Skip this check for the leaf comment (position 0) because
         #                 that's where we expect the mod response to be
-        # UNMODERATED MODE: Check all positions including the leaf
-        should_check_children = (mode == 'unmoderated') or (position > 0)
-
-        if should_check_children:
-            child_ids = children_map.get(current_id, [])
-            for child_id in child_ids:
-                child_comment = comments.get(child_id, {})
-                if is_moderator_comment(child_comment):
-                    # Early exit - no need to build full thread
-                    return [], True, 'mod_response'
+        # UNMODERATED MODE: Check ONLY the leaf (position 0) for mod children
+        if position == 0:
+            if mode == 'unmoderated':
+                # For unmoderated threads, reject if leaf has any mod children
+                child_ids = children_map.get(current_id, [])
+                for child_id in child_ids:
+                    child_comment = comments.get(child_id, {})
+                    if is_moderator_comment(child_comment):
+                        # Early exit - no need to build full thread
+                        return [], True, 'mod_response'
+            # For moderated mode, we don't check the leaf's children (we expect a mod response)
 
         # Move to parent
         parent_id = comment.get('parent_id', '')
@@ -314,7 +316,7 @@ def count_common_ancestors_from_threads(thread1: List[Dict], thread2: List[Dict]
 
 def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict],
                          submission_id: str, comments: Dict[str, Dict],
-                         trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[str], Optional[List[Dict]], Optional[int]]:
+                         trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[str], Optional[List[Dict]], Optional[int], Optional[Dict]]:
     """Find best alternative comment for unmoderated thread.
 
     Args:
@@ -327,15 +329,26 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
         used_alternatives: Set of already-used alternative comment IDs for this submission
 
     Returns:
-        Tuple of (alt_comment_id, alt_thread, moderated_depth)
+        Tuple of (alt_comment_id, alt_thread, moderated_depth, rejection_stats)
         - alt_comment_id: ID of the best alternative comment
         - alt_thread: The built thread for the alternative (to avoid rebuilding)
         - moderated_depth: Depth of the moderated comment (for failure tracking)
+        - rejection_stats: Dictionary with counts of why alternatives were rejected
     """
     if used_alternatives is None:
         used_alternatives = set()
+
+    # Initialize rejection statistics
+    rejection_stats = {
+        'total_alternatives_at_depth': 0,
+        'rejected_mod_response': 0,
+        'rejected_removed_or_deleted': 0,
+        'rejected_has_media': 0,
+        'rejected_length_mismatch': 0
+    }
+
     if submission_id not in trees['trees']:
-        return None, None, None
+        return None, None, None, rejection_stats
 
     tree = trees['trees'][submission_id]
     depth_levels = tree.get('depth_levels', {})
@@ -348,7 +361,7 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
             break
 
     if moderated_depth is None:
-        return None, None, None
+        return None, None, None, rejection_stats
 
     # Get all comments at same depth
     same_depth_comments = depth_levels.get(moderated_depth, [])
@@ -357,8 +370,10 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
     alternatives = sorted([cid for cid in same_depth_comments
                           if cid != moderated_comment_id and cid not in used_alternatives])
 
+    rejection_stats['total_alternatives_at_depth'] = len(alternatives)
+
     if not alternatives:
-        return None, None, moderated_depth
+        return None, None, moderated_depth, rejection_stats
 
     # Find best alternative based on common ancestors and score
     best_alternative = None
@@ -373,13 +388,20 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
             alt_id, comments, tree, mode='unmoderated'
         )
 
-        # Skip if thread has mod responses or media
+        # Track rejection reasons
         if has_issue:
+            if issue_type == 'mod_response':
+                rejection_stats['rejected_mod_response'] += 1
+            elif issue_type == 'removed_or_deleted':
+                rejection_stats['rejected_removed_or_deleted'] += 1
+            elif issue_type == 'has_media':
+                rejection_stats['rejected_has_media'] += 1
             continue
 
         # Check if thread length matches exactly
         # Comments at same depth should have same thread length if data is complete
         if len(alt_thread) != len(moderated_thread):
+            rejection_stats['rejected_length_mismatch'] += 1
             logger.warning(f"Length mismatch for alternative {alt_id} at depth {moderated_depth}: expected {len(moderated_thread)}, got {len(alt_thread)}. This suggests missing parent comments in the data.")
             continue
 
@@ -397,11 +419,11 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
             max_common_ancestors = common_ancestors
             lowest_score = score
 
-    return best_alternative, best_alternative_thread, moderated_depth
+    return best_alternative, best_alternative_thread, moderated_depth, rejection_stats
 
 
 def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
-                     trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[Dict], Optional[int], Optional[str]]:
+                     trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[Dict], Optional[int], Optional[str], Optional[Dict]]:
     """Build moderated and unmoderated thread pair for a moderator comment.
 
     Args:
@@ -412,10 +434,11 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
         used_alternatives: Set of already-used alternative comment IDs for this submission
 
     Returns:
-        Tuple of (pair_dict, moderated_depth, failure_reason)
+        Tuple of (pair_dict, moderated_depth, failure_reason, rejection_stats)
         - pair_dict: The thread pair if successful, None otherwise
         - moderated_depth: Depth of moderated comment (for failure tracking)
         - failure_reason: String indicating why pair failed ('moderated_thread_has_mod_response' or None)
+        - rejection_stats: Dictionary with counts of why alternatives were rejected (None if no search performed)
     """
     if used_alternatives is None:
         used_alternatives = set()
@@ -424,14 +447,14 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
     submission_id = extract_submission_id(mod_comment.get('link_id', ''))
 
     if not moderated_comment_id or not submission_id:
-        return None, None, None
+        return None, None, None, None
 
     # Check if we have the data
     if submission_id not in trees.get('trees', {}):
-        return None, None, None
+        return None, None, None, None
 
     if moderated_comment_id not in comments:
-        return None, None, None
+        return None, None, None, None
 
     # Get the tree for this submission
     tree = trees['trees'][submission_id]
@@ -442,26 +465,26 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
         moderated_comment_id, comments, tree, mode='moderated'
     )
 
-    if not moderated_thread:
-        return None, None, None
-
-    # Reject if moderated thread has OTHER moderator responses or media besides the expected mod action
-    if has_issue:
+    # If thread building failed or has issues, return with proper failure reason
+    if not moderated_thread or has_issue:
         if issue_type == 'has_media':
             logger.warning(f"Moderated thread contains media for {moderated_comment_id} in submission {submission_id}.")
-            return None, None, 'moderated_thread_has_media'
+            return None, None, 'moderated_thread_has_media', None
         elif issue_type == 'mod_response':
             logger.warning(f"Moderated thread has other mod responses besides the expected one for {moderated_comment_id} in submission {submission_id}.")
-            return None, None, 'moderated_thread_has_mod_response'
+            return None, None, 'moderated_thread_has_mod_response', None
+        elif issue_type == 'removed_or_deleted':
+            logger.warning(f"Moderated thread contains removed/deleted comments for {moderated_comment_id} in submission {submission_id}.")
+            return None, None, 'moderated_thread_has_removed_or_deleted', None
 
     # Find best alternative at exact same depth (no fallback)
-    alt_comment_id, unmoderated_thread, moderated_depth = find_best_alternative(
+    alt_comment_id, unmoderated_thread, moderated_depth, rejection_stats = find_best_alternative(
         moderated_comment_id, moderated_thread,
         submission_id, comments, trees, logger, used_alternatives
     )
 
     if not alt_comment_id:
-        return None, moderated_depth, None
+        return None, moderated_depth, None, rejection_stats
 
     # unmoderated_thread already built in find_best_alternative (no need to rebuild)
     # common_ancestors already calculated in find_best_alternative using the threads
@@ -484,7 +507,7 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
             'unmoderated_score': comments.get(alt_comment_id, {}).get('score', 0),
             'target_length': len(moderated_thread)
         }
-    }, None, None
+    }, None, None, rejection_stats
 
 
 def process_subreddit(args: tuple) -> Dict[str, Any]:
@@ -577,7 +600,16 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
             'missing_moderated_comment': 0,
             'moderated_thread_has_mod_response': 0,
             'moderated_thread_has_media': 0,
+            'moderated_thread_has_removed_or_deleted': 0,
             'no_alternative_found': 0
+        }
+        # Track alternative rejection reasons (aggregated across all mod comments)
+        alternative_rejection_stats = {
+            'total_alternatives_checked': 0,
+            'rejected_mod_response': 0,
+            'rejected_removed_or_deleted': 0,
+            'rejected_has_media': 0,
+            'rejected_length_mismatch': 0
         }
         failed_depth_distribution = defaultdict(int)
         successful_depth_distribution = defaultdict(int)
@@ -610,9 +642,18 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
             used_for_submission = used_alternatives_per_submission[submission_id]
 
             # Build thread pair with tracking of used alternatives
-            pair, failed_depth, failure_reason = build_thread_pair(
+            pair, failed_depth, failure_reason, rejection_stats = build_thread_pair(
                 mod_comment, comments, trees_data, worker_logger, used_for_submission
             )
+
+            # Aggregate rejection statistics from alternative search
+            if rejection_stats:
+                alternative_rejection_stats['total_alternatives_checked'] += rejection_stats.get('total_alternatives_at_depth', 0)
+                alternative_rejection_stats['rejected_mod_response'] += rejection_stats.get('rejected_mod_response', 0)
+                alternative_rejection_stats['rejected_removed_or_deleted'] += rejection_stats.get('rejected_removed_or_deleted', 0)
+                alternative_rejection_stats['rejected_has_media'] += rejection_stats.get('rejected_has_media', 0)
+                alternative_rejection_stats['rejected_length_mismatch'] += rejection_stats.get('rejected_length_mismatch', 0)
+
             if pair:
                 thread_pairs.append(pair)
                 success_count += 1
@@ -680,6 +721,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
             'rule_distribution': rule_stats,
             'jsd_from_uniform': jsd_score,
             'debug_counts': debug_counts,
+            'alternative_rejection_stats': alternative_rejection_stats,
             'failed_depth_distribution': {str(k): v for k, v in failed_depth_distribution.items()},
             'successful_depth_distribution': {str(k): v for k, v in successful_depth_distribution.items()},
             'processing_time': elapsed
@@ -753,8 +795,8 @@ def main():
         total_trees_size = sum(r.get('trees_file_size_gb', 0) for r in completed_results)
         total_threads_size = sum(r.get('threads_file_size_gb', 0) for r in completed_results)
 
-        # Filter to subreddits with ≥MIN_EVAL_THREAD_PAIRS successful pairs (keep ALL, no top-N filtering)
-        qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= MIN_EVAL_THREAD_PAIRS]
+        # Filter to subreddits with ≥MIN_TEST_THREAD_PAIRS successful pairs (keep ALL, no top-N filtering)
+        qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS]
 
         # Add language information to all qualified results
         for result in qualified_results:
@@ -807,7 +849,7 @@ def main():
         logger.info(f"🌳 Built {total_trees:,} comment trees")
         logger.info(f"🧵 Created {total_successful_pairs:,} discussion thread pairs")
         logger.info(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%" if total_mod_comments > 0 else "📈 No mod comments processed")
-        logger.info(f"✅ Qualified subreddits (≥{MIN_EVAL_THREAD_PAIRS} pairs): {len(qualified_results)}")
+        logger.info(f"✅ Qualified subreddits (≥{MIN_TEST_THREAD_PAIRS} pairs): {len(qualified_results)}")
         logger.info(f"   🏆 English subreddits: {len(english_results)}")
         logger.info(f"   🌍 Other language subreddits: {len(other_language_results)}")
         logger.info(f"Summary saved to: {summary_file}")

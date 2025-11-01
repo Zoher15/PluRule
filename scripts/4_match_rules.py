@@ -274,10 +274,8 @@ def process_subreddit_matching(load_result, logger=None):
 
         submission_ids = extract_submission_ids(matched_comments)
 
-        # Sample if too many
-        if len(matched_comments) > MAX_MATCHED_COMMENTS:
-            random.seed(0)
-            matched_comments = random.sample(matched_comments, MAX_MATCHED_COMMENTS)
+        # Keep all matched comments (no sampling)
+        # Previously limited to MAX_MATCHED_COMMENTS, but now keeping all for better coverage
 
         # Save files
         if matched_comments:
@@ -650,9 +648,8 @@ def main():
         submission_ids_output = {
             'metadata': {
                 'total_subreddits': len(submission_ids_data),
-                'sample_size_per_subreddit': MAX_MATCHED_COMMENTS,
+                'sampling': 'none',  # No sampling - keeping all matched comments
                 'min_matched_comments_threshold': MIN_MATCHED_COMMENTS,
-                'random_seed': 0,
                 'total_submission_ids': total_submission_ids
             },
             'subreddit_submission_ids': submission_ids_data
