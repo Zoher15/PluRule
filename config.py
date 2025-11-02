@@ -15,6 +15,7 @@ import multiprocessing
 # Base directories
 BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline"
 REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/Pushshift"
+ARCTIC_SHIFT_DATA = "/gpfs/slate-cnets/datasets/reddit/Arcticshift/Subreddits/subreddits"
 
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
@@ -57,14 +58,15 @@ DATA_FLOW = {
     },
 
     'stage1_mod_comments': {
-        'name': 'Collect Moderator Comments',
+        'name': 'Collect Moderator Comments from Arctic Shift',
         'script': '1_collect_mod_comments.py',
-        'input_paths': ['reddit_comments'],
-        'output_dir': 'mod_comments',
+        'input_paths': [],  # Uses Arctic Shift data directly
+        'output_dir': 'top_subreddits',
         'produces': [
-            '*_mod_comments.zst',  # One per RC file
+            '{subreddit}_mod_comments.jsonl.zst',  # One per subreddit
             'stage1_subreddit_mod_comment_rankings.json'
-        ]
+        ],
+        'notes': 'Reads Arctic Shift subreddit files, filters mod comments. Replaces old Stage 1 + Stage 3.'
     },
 
     'stage2_top_sfw': {
@@ -76,19 +78,8 @@ DATA_FLOW = {
         'notes': 'Uses Reddit API to filter NSFW, collect subreddit metadata and rules'
     },
 
-    # Phase 2: Comment Filtering & Matching
-    'stage3_filter_and_consolidate': {
-        'name': 'Filter and Consolidate Top N Subreddits',
-        'script': '3_filter_and_consolidate.py',
-        'input_paths': ['mod_comments'],
-        'input_files': ['stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json'],
-        'output_dir': 'top_subreddits',
-        'produces': [
-            '{subreddit}_mod_comments.jsonl.zst',
-            'stage3_filter_and_consolidate_summary.json'
-        ],
-        'notes': '3-phase: filter RC files → consolidate by subreddit → cleanup temp'
-    },
+    # Phase 2: Comment Matching
+    # NOTE: Stage 3 (filter_and_consolidate) is now obsolete - Stage 1 directly outputs to top_subreddits/
 
     'stage4_match_rules': {
         'name': 'Match Comments to Rules (2-Phase: Similarity Matrices + Global Thresholds)',
@@ -96,8 +87,7 @@ DATA_FLOW = {
         'helper_scripts': ['4_match_rules_single.py'],
         'input_paths': ['top_subreddits'],
         'input_files': [
-            'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json',
-            'stage3_filter_and_consolidate_summary.json'
+            'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json'
         ],
         'output_dir': 'matched_comments',
         'produces': [
@@ -113,16 +103,16 @@ DATA_FLOW = {
 
     # Phase 3: Thread Construction
     'stage5_collect_submission_comments': {
-        'name': 'Collect and Organize Submission Comments',
+        'name': 'Collect and Organize Submission Comments from Arctic Shift',
         'script': '5_collect_submission_comments.py',
-        'input_paths': ['reddit_comments'],
+        'input_paths': [],  # Uses Arctic Shift data directly
         'input_files': ['stage4_subreddit_submission_ids.json'],
         'output_dir': 'organized_comments',
         'produces': [
             '{subreddit}_submission_comments.pkl',
-            'stage5_submission_comment_organization_stats.json'
+            'stage5_submission_comment_collection_stats.json'
         ],
-        'notes': '3-phase: RC processing → organization by subreddit → cleanup temp'
+        'notes': '2-pass per subreddit: filter with process_zst_file_multi → deduplicate with [removed]/[deleted] preservation'
     },
 
     'stage6_build_trees_and_threads': {

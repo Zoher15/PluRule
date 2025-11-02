@@ -329,15 +329,17 @@ def main():
         create_directories()
 
         # Load Stage 2 data for comment counts and rule validation
-        logger.info("📚 Loading subreddit data...")
-        rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
-        stage2_data = read_json_file(rules_file)
+        # Load Stage 2 output (replaces both old Stage 2 and Stage 3)
+        logger.info("📚 Loading Stage 2 subreddit data...")
+        stage2_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
+        stage2_data = read_json_file(stage2_file)
 
-        # Load Stage 3 summary for actual filtered comment counts
-        logger.info("📚 Loading Stage 3 summary for comment counts...")
-        stage3_summary_file = os.path.join(PATHS['data'], 'stage3_filter_and_consolidate_summary.json')
-        stage3_data = read_json_file(stage3_summary_file)
-        stage3_comment_counts = stage3_data.get('subreddit_details', {})
+        # Build comment count lookup from Stage 2's subreddits list
+        # Format: {subreddit_name: {'comments': count}}
+        stage3_comment_counts = {
+            entry['subreddit']['name']: {'comments': entry['subreddit']['mod_comment_count']}
+            for entry in stage2_data.get('subreddits', [])
+        }
 
         # Get subreddits with >1 rule and existing comment files, sorted by mod comment count (highest first)
         available_subreddits = []

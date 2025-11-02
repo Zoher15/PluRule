@@ -1,132 +1,145 @@
 #!/usr/bin/env python3
 """
-Stage 1: Collect Moderator Comments
+Stage 1: Collect Moderator Comments from Arctic Shift
 
-Extracts all distinguished moderator comments from Reddit comment archives,
-filtering out bots and AutoModerator comments.
+Extracts distinguished moderator comments from Arctic Shift subreddit files,
+filtering out bots and AutoModerator. Directly writes organized output by subreddit.
 
-Input:  RC_*.zst files (Reddit comment archives)
-Output: *_mod_comments.zst + subreddit_mod_comment_rankings.json
+This replaces the old Stage 1 (collect from RC files) + Stage 3 (consolidate by subreddit).
+
+Input:  Arctic Shift subreddit comment files
+Output: top_subreddits/{subreddit}_mod_comments.jsonl.zst + stage1_subreddit_mod_comment_rankings.json
 """
 
 import sys
 import os
 import time
 from collections import defaultdict
+from typing import Dict, Any
 
-# Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, DATE_RANGE, create_directories
-from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
-from utils.files import get_files_in_date_range, process_zst_file, process_files_parallel, write_json_file
-from utils.reddit import is_bot_or_automoderator, is_moderator_comment, normalize_subreddit_name, filter_reddit_line
+from config import PATHS, PROCESSES, ARCTIC_SHIFT_DATA, create_directories
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
+from utils.files import (read_json_file, write_json_file, process_files_parallel,
+                        read_zst_lines, json_loads, process_zst_file_multi)
+from utils.reddit import is_bot_or_automoderator, is_moderator_comment, normalize_subreddit_name
 
 
-def process_comment_line(line: str, subreddit_counts: dict = None) -> bool:
-    """Check if line contains a valid moderator comment and collect statistics."""
-    # Quick pre-filter before JSON parsing (much faster)
-    if not ('"distinguished":"moderator"' in line and '"parent_id":"t1_' in line):
-        return False
+def get_all_arctic_shift_subreddits(logger):
+    """Get list of all subreddit comment files from Arctic Shift."""
+    subreddit_files = []
 
-    def check_comment(comment):
-        if not is_moderator_comment(comment):
-            return False
+    for first_char in os.listdir(ARCTIC_SHIFT_DATA):
+        char_dir = os.path.join(ARCTIC_SHIFT_DATA, first_char)
+        if not os.path.isdir(char_dir):
+            continue
 
-        # Filter out bots and AutoModerator
-        author = comment.get('author', '')
-        if is_bot_or_automoderator(author):
-            return False
+        for filename in os.listdir(char_dir):
+            if filename.endswith('_comments.zst'):
+                subreddit_name = filename.replace('_comments.zst', '')
+                subreddit_files.append((
+                    normalize_subreddit_name(subreddit_name),
+                    os.path.join(char_dir, filename)
+                ))
 
-        # Collect subreddit statistics during processing (if dict provided)
-        if subreddit_counts is not None:
-            subreddit = normalize_subreddit_name(comment.get('subreddit', 'unknown'))
-            subreddit_counts[subreddit] += 1
-
-        return True
-
-    return filter_reddit_line(line, check_comment)
+    logger.info(f"Found {len(subreddit_files)} subreddits in Arctic Shift")
+    return subreddit_files
 
 
-def process_single_file(file_path: str) -> dict:
-    """Process a single RC file and extract moderator comments."""
-    # Extract RC filename for meaningful logging (e.g., "RC_2023-02")
-    rc_filename = os.path.basename(file_path).replace('.zst', '')
+def process_subreddit(args: tuple) -> Dict[str, Any]:
+    """
+    Process a single subreddit from Arctic Shift: filter for mod comments and write to output.
+    Uses process_zst_file_multi for efficient streaming.
+    """
+    subreddit, arctic_file = args
+    worker_logger = get_stage_logger(1, "collect_mod_comments", worker_identifier=f"subreddits/{subreddit}")
 
-    # Create worker logger with meaningful identifier (logs will go in rc/ subdirectory)
-    worker_logger = get_stage_logger(1, "collect_mod_comments", worker_identifier=f"rc/{rc_filename}")
+    worker_logger.info(f"🔄 Processing r/{subreddit}")
+    start_time = time.time()
 
-    input_file = file_path
-    output_file = os.path.join(
-        PATHS['mod_comments'],
-        os.path.basename(file_path).replace('.zst', '_mod_comments.zst')
-    )
+    output_file = os.path.join(PATHS['top_subreddits'], f"{subreddit}_mod_comments.jsonl.zst")
 
     # Skip if output already exists
     if os.path.exists(output_file):
-        worker_logger.info(f"Skipping {os.path.basename(input_file)} - output already exists")
-        return {"skipped": True, "file": input_file}
+        worker_logger.info(f"⏭️  Skipping r/{subreddit} - output already exists")
+        return {'subreddit': subreddit, 'skipped': True, 'mod_comment_count': 0}
 
     try:
-        # Create subreddit counts dictionary for this file
-        subreddit_counts = defaultdict(int)
+        def mod_comment_filter(line: str, state: Dict) -> Dict[str, Any]:
+            """Filter for moderator comments, excluding bots."""
+            # Quick pre-filter before JSON parsing
+            if not ('"distinguished":"moderator"' in line and '"parent_id":"t1_' in line):
+                return {'matched': False}
 
-        # Create a closure that includes the subreddit_counts
-        def process_line_with_stats(line: str) -> bool:
-            return process_comment_line(line, subreddit_counts)
+            try:
+                comment = json_loads(line)
 
-        # Process file with statistics collection
-        stats = process_zst_file(input_file, output_file, process_line_with_stats, progress_interval=50_000_000, logger=worker_logger)
+                # Check if it's a moderator comment
+                if not is_moderator_comment(comment):
+                    return {'matched': False}
+
+                # Filter out bots and AutoModerator
+                author = comment.get('author', '')
+                if is_bot_or_automoderator(author):
+                    return {'matched': False}
+
+                # Valid mod comment - write to output
+                return {
+                    'matched': True,
+                    'output_files': [output_file],
+                    'data': comment
+                }
+
+            except Exception:
+                return {'matched': False}
+
+        # Use process_zst_file_multi for efficient streaming
+        stats = process_zst_file_multi(arctic_file, mod_comment_filter, {},
+                                      progress_interval=10_000_000, logger=worker_logger)
+
+        elapsed = time.time() - start_time
+        mod_count = stats['lines_matched']
+
+        worker_logger.info(f"✅ r/{subreddit}: {mod_count:,} mod comments from {stats['lines_processed']:,} lines in {elapsed:.1f}s")
 
         return {
-            "file": input_file,
-            "output": output_file,
-            "subreddit_counts": dict(subreddit_counts),
-            **stats
+            'subreddit': subreddit,
+            'mod_comment_count': mod_count,
+            'lines_processed': stats['lines_processed'],
+            'processing_time': elapsed,
+            'success': True
         }
 
     except Exception as e:
-        worker_logger.error(f"Error processing {input_file}: {e}")
-        return {"file": input_file, "error": str(e)}
+        worker_logger.error(f"❌ Error processing r/{subreddit}: {e}")
+        return {'subreddit': subreddit, 'error': str(e), 'mod_comment_count': 0, 'success': False}
 
 
-def collect_subreddit_stats(results: list, logger) -> dict:
-    """Collect subreddit statistics from all processed files."""
-    logger.info("Aggregating subreddit statistics...")
+def generate_rankings(results: list) -> dict:
+    """Generate subreddit rankings from processing results."""
+    # Filter successful results and sort by mod comment count
+    successful = [r for r in results if r.get('success') and not r.get('skipped')]
+    sorted_results = sorted(successful, key=lambda x: x['mod_comment_count'], reverse=True)
 
-    total_subreddit_counts = defaultdict(int)
-
-    for result in results:
-        if result.get("skipped") or result.get("error"):
-            continue
-
-        # Use in-memory statistics from processing (much faster than re-reading files)
-        file_subreddit_counts = result.get("subreddit_counts", {})
-        for subreddit, count in file_subreddit_counts.items():
-            total_subreddit_counts[subreddit] += count
-
-    logger.info(f"Aggregated statistics for {len(total_subreddit_counts)} subreddits")
-    return dict(total_subreddit_counts)
-
-
-def generate_rankings(subreddit_counts: dict) -> dict:
-    """Generate subreddit rankings from counts."""
-    # Sort by count (descending)
-    sorted_subreddits = sorted(subreddit_counts.items(), key=lambda x: x[1], reverse=True)
+    total_mod_comments = sum(r['mod_comment_count'] for r in successful)
 
     rankings_data = {
         "summary": {
-            "total_subreddits": len(subreddit_counts),
-            "total_mod_comments": sum(subreddit_counts.values()),
-            "collection_date": time.strftime("%Y-%m-%d %H:%M:%S")
+            "total_subreddits": len(sorted_results),
+            "total_mod_comments": total_mod_comments,
+            "collection_date": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "Arctic Shift subreddit files"
         },
         "rankings": [
             {
                 "rank": rank,
-                "subreddit": subreddit,
-                "mod_comment_count": count
+                "subreddit": r['subreddit'],
+                "mod_comment_count": r['mod_comment_count'],
+                "lines_processed": r.get('lines_processed', 0),
+                "processing_time": round(r.get('processing_time', 0), 2)
             }
-            for rank, (subreddit, count) in enumerate(sorted_subreddits, 1)
+            for rank, r in enumerate(sorted_results, 1)
         ]
     }
 
@@ -135,76 +148,71 @@ def generate_rankings(subreddit_counts: dict) -> dict:
 
 def main():
     """Main execution function."""
-    # Initialize logging
     logger = get_stage_logger(1, "collect_mod_comments")
-    log_stage_start(logger, 1, "Collecting Moderator Comments")
-
+    log_stage_start(logger, 1, "Collect Moderator Comments from Arctic Shift")
     start_time = time.time()
 
     try:
-        # Create directories
         create_directories()
 
-        # Get RC files to process
-        files = get_files_in_date_range(PATHS['reddit_comments'], 'RC_', DATE_RANGE, logger)
-
-        if not files:
-            logger.error("No RC files found to process!")
+        if not os.path.exists(ARCTIC_SHIFT_DATA):
+            logger.error(f"❌ Arctic Shift directory not found: {ARCTIC_SHIFT_DATA}")
             log_stage_end(logger, 1, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        logger.info(f"Found {len(files)} RC files to process")
-        logger.info(f"Processing with {PROCESSES} parallel processes")
+        # Get all subreddit files from Arctic Shift
+        logger.info("📁 Discovering subreddits from Arctic Shift...")
+        subreddit_files = get_all_arctic_shift_subreddits(logger)
 
-        # Process files in parallel
-        logger.info("🚀 Processing RC files...")
-        results = process_files_parallel(files, process_single_file, PROCESSES, logger)
+        if not subreddit_files:
+            logger.error("❌ No subreddit files found in Arctic Shift")
+            log_stage_end(logger, 1, success=False, elapsed_time=time.time() - start_time)
+            return 1
+
+        # Process subreddits in parallel
+        logger.info(f"🗂️  Processing {len(subreddit_files)} subreddits with {PROCESSES} processes")
+        processing_start = time.time()
+
+        results = process_files_parallel(subreddit_files, process_subreddit, PROCESSES, logger)
+
+        processing_elapsed = time.time() - processing_start
 
         # Count results
-        successful = len([r for r in results if not r.get("error") and not r.get("skipped")])
-        skipped = len([r for r in results if r.get("skipped")])
-        failed = len([r for r in results if r.get("error")])
+        successful = [r for r in results if r.get('success')]
+        skipped = [r for r in results if r.get('skipped')]
+        failed = [r for r in results if not r.get('success') and not r.get('skipped')]
 
-        logger.info(f"File Processing Summary:")
-        logger.info(f"  Successful: {successful}")
-        logger.info(f"  Skipped: {skipped}")
-        logger.info(f"  Failed: {failed}")
+        logger.info(f"✅ Processing complete in {processing_elapsed:.1f}s")
+        logger.info(f"   📊 {len(successful)} successful, {len(skipped)} skipped, {len(failed)} failed")
 
-        if failed > 0:
-            logger.warning("Failed files:")
-            for result in results:
-                if result.get("error"):
-                    logger.warning(f"  {os.path.basename(result['file'])}: {result['error']}")
-
-        # Collect subreddit statistics
-        subreddit_counts = collect_subreddit_stats(results, logger)
-
-        if not subreddit_counts:
-            logger.error("No subreddit statistics collected!")
-            log_stage_end(logger, 1, success=False, elapsed_time=time.time() - start_time)
-            return 1
+        if failed:
+            logger.warning(f"⚠️  Failed subreddits ({len(failed)}):")
+            for r in failed[:10]:
+                logger.warning(f"     r/{r['subreddit']}: {r.get('error', 'unknown')}")
+            if len(failed) > 10:
+                logger.warning(f"     ... and {len(failed) - 10} more")
 
         # Generate and save rankings
         logger.info("📈 Generating subreddit rankings...")
-        rankings_data = generate_rankings(subreddit_counts)
+        rankings_data = generate_rankings(results)
         rankings_file = os.path.join(PATHS['data'], 'stage1_subreddit_mod_comment_rankings.json')
         write_json_file(rankings_data, rankings_file, pretty=True)
 
-        # Print summary
+        # Summary
         elapsed = time.time() - start_time
         total_comments = rankings_data['summary']['total_mod_comments']
         total_subreddits = rankings_data['summary']['total_subreddits']
 
-        logger.info(f"Stage 1 Complete!")
-        logger.info(f"Time: {elapsed:.1f}s")
-        logger.info(f"Total mod comments: {total_comments:,}")
-        logger.info(f"Unique subreddits: {total_subreddits:,}")
-        logger.info(f"Rankings saved to: {rankings_file}")
+        logger.info(f"🎉 Stage 1 Complete!")
+        logger.info(f"   ⏱️  Total time: {elapsed:.1f}s")
+        logger.info(f"   💬 Total mod comments: {total_comments:,}")
+        logger.info(f"   🗂️  Unique subreddits: {total_subreddits:,}")
+        logger.info(f"   📈 Rankings: {rankings_file}")
 
         # Show top 10 subreddits
         logger.info(f"🏆 Top 10 subreddits by mod comment count:")
         for entry in rankings_data['rankings'][:10]:
-            logger.info(f"  {entry['rank']:2d}. r/{entry['subreddit']}: {entry['mod_comment_count']:,}")
+            logger.info(f"   {entry['rank']:2d}. r/{entry['subreddit']}: {entry['mod_comment_count']:,}")
 
         log_stage_end(logger, 1, success=True, elapsed_time=elapsed)
         return 0

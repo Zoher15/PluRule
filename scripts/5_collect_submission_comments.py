@@ -2,437 +2,286 @@
 """
 Stage 5: Collect and Organize Submission Comments
 
-Collects comments for target submission IDs and organizes them by subreddit.
-Uses temp subdirectories approach similar to Stage 3.
+Collects comments for target submission IDs using Arctic Shift subreddit-specific files.
+Two-pass approach: filter with process_zst_file_multi, then deduplicate with [removed]/[deleted] logic.
 
-Phase 1: Parallel RC file processing - each RC file writes filtered comments
-         to temp/{subreddit}/RC_{date}.zst files
-Phase 2: Parallel subreddit consolidation - organize comments into nested structure
-         and output pickle files per subreddit
-Phase 3: Preserve temp directories (no cleanup - kept for future use)
-
-Input:  reddit_comments/RC_*.zst files + stage4_subreddit_submission_ids.json
+Input:  Arctic Shift subreddit comment files + stage4_subreddit_submission_ids.json
 Output: organized_comments/{subreddit}_submission_comments.pkl files
-        organized_comments/temp/{subreddit}/RC_{date}.zst files (preserved)
 """
 
 import sys
 import os
 import time
 import pickle
+import tempfile
 import shutil
 from collections import defaultdict
 from typing import Dict, Any
 
-# Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, DATE_RANGE, create_directories
-from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_progress, log_stats, log_error_and_continue
+from config import PATHS, PROCESSES, ARCTIC_SHIFT_DATA, create_directories
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, process_zst_file_multi)
 from utils.reddit import extract_submission_id, normalize_subreddit_name
 
+
 def load_submission_ids(logger):
     """Load submission IDs from Stage 4 output."""
-    submission_ids_file = os.path.join(PATHS['data'], 'stage4_subreddit_submission_ids.json')
-    data = read_json_file(submission_ids_file)
+    data = read_json_file(os.path.join(PATHS['data'], 'stage4_subreddit_submission_ids.json'))
 
-    # Create lookup structures
-    all_submission_ids = set()
     subreddit_to_ids = {}
-    target_subreddits = set()
-
     for subreddit, submission_ids in data['subreddit_submission_ids'].items():
-        normalized_sub = normalize_subreddit_name(subreddit)
-        subreddit_to_ids[normalized_sub] = set(submission_ids)
-        all_submission_ids.update(submission_ids)
-        target_subreddits.add(normalized_sub)
+        subreddit_to_ids[normalize_subreddit_name(subreddit)] = set(submission_ids)
 
-    logger.info(f"📋 Loaded {len(all_submission_ids)} submission IDs from {len(subreddit_to_ids)} subreddits")
-    return all_submission_ids, subreddit_to_ids, target_subreddits
-
-def get_rc_files(logger=None):
-    """Get list of RC files in date range."""
-    from utils.files import get_files_in_date_range
-
-    return get_files_in_date_range(
-        PATHS['reddit_comments'],
-        'RC_',
-        DATE_RANGE,
-        logger
-    )
+    logger.info(f"📋 Loaded {sum(len(ids) for ids in subreddit_to_ids.values()):,} submission IDs from {len(subreddit_to_ids)} subreddits")
+    return subreddit_to_ids
 
 
-def process_rc_file(args: tuple) -> Dict[str, Any]:
+def get_arctic_shift_comment_file(subreddit: str) -> str:
+    """Get path to Arctic Shift comment file with case-insensitive matching."""
+    first_char = subreddit[0].lower() if subreddit else 'unknown'
+    if not first_char.isalpha() and first_char.isdigit():
+        first_char = str(first_char)
+
+    dir_path = os.path.join(ARCTIC_SHIFT_DATA, first_char)
+    if not os.path.exists(dir_path):
+        return None
+
+    target_filename_lower = f"{subreddit.lower()}_comments.zst"
+    try:
+        for filename in os.listdir(dir_path):
+            if filename.lower() == target_filename_lower:
+                return os.path.join(dir_path, filename)
+    except Exception:
+        pass
+    return None
+
+
+def process_subreddit_comments(args: tuple) -> Dict[str, Any]:
     """
-    Phase 1: Process single RC file and write filtered comments to temp subdirs.
-    Uses process_zst_file_multi for efficient streaming and multi-output.
-
-    Args:
-        args: (rc_file_path, subreddit_to_ids, target_subreddits, temp_dir)
-
-    Returns:
-        Dict with processing statistics
+    Process comments for a single subreddit from Arctic Shift file.
+    Pass 1: Filter with process_zst_file_multi to temp file
+    Pass 2: Deduplicate and apply [removed]/[deleted] preservation logic
     """
-    rc_file_path, subreddit_to_ids, target_subreddits, temp_dir = args
+    subreddit, target_submission_ids, output_dir = args
+    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=f"subreddits/{subreddit}")
 
-    rc_filename = os.path.basename(rc_file_path)
-    # Extract RC identifier for meaningful logging (e.g., "RC_2023-02")
-    rc_identifier = rc_filename.replace('.zst', '')
-
-    # Create worker logger with RC identifier in rc_files/ subdirectory
-    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=f"rc_files/{rc_identifier}")
-    rc_date = rc_filename.split('_')[1].split('.')[0]  # Extract YYYY-MM
-
-    def comment_processor(line: str, state: Dict) -> Dict[str, Any]:
-        """Process each comment line and route to appropriate subreddit temp file."""
-        try:
-            comment = json_loads(line)
-
-            # Check if comment is from target subreddit
-            subreddit = normalize_subreddit_name(comment.get('subreddit', ''))
-            if subreddit not in target_subreddits:
-                return {'matched': False}
-
-            # Extract submission ID using utility
-            submission_id = extract_submission_id(comment.get('link_id', ''))
-            if not submission_id:
-                return {'matched': False}
-
-            subreddit_target_ids = subreddit_to_ids.get(subreddit, set())
-
-            if submission_id in subreddit_target_ids:
-                # Use normalized subreddit name for temp directory path
-                # (Phase 2 will look for the normalized name)
-
-                # Determine output file path
-                output_file = os.path.join(temp_dir, subreddit, f"RC_{rc_date}.zst")
-
-                return {
-                    'matched': True,
-                    'output_files': [output_file],
-                    'data': comment
-                }
-
-        except Exception:
-            pass  # Skip malformed lines
-
-        return {'matched': False}
-
-    worker_logger.info(f"🔄 Processing {rc_filename}")
+    worker_logger.info(f"🔄 Processing {subreddit} ({len(target_submission_ids)} target submissions)")
     start_time = time.time()
 
+    arctic_file = get_arctic_shift_comment_file(subreddit)
+    if not arctic_file:
+        worker_logger.warning(f"⚠️  No Arctic Shift comment file found for {subreddit}")
+        return {'subreddit': subreddit, 'comments_collected': 0, 'submissions_with_comments': 0,
+                'lines_processed': 0, 'removed_deleted_count': 0, 'preserved_from_removal_count': 0,
+                'overwritten_with_better_count': 0, 'processing_time': 0, 'success': False,
+                'error': 'Arctic Shift file not found'}
+
+    temp_dir = None
     try:
-        # Process with multi-output utility
-        stats = process_zst_file_multi(rc_file_path, comment_processor, {}, logger=worker_logger)
+        # Pass 1: Filter comments to temp file
+        temp_dir = tempfile.mkdtemp(prefix=f"stage5_{subreddit}_")
+        temp_file = os.path.join(temp_dir, "filtered_comments.zst")
+
+        worker_logger.info(f"   Pass 1: Filtering comments...")
+        pass1_start = time.time()
+
+        def comment_filter(line: str, state: Dict) -> Dict[str, Any]:
+            try:
+                comment = json_loads(line)
+                submission_id = extract_submission_id(comment.get('link_id', ''))
+                if submission_id in target_submission_ids:
+                    return {'matched': True, 'output_files': [temp_file], 'data': comment}
+            except Exception:
+                pass
+            return {'matched': False}
+
+        filter_stats = process_zst_file_multi(arctic_file, comment_filter, {}, progress_interval=10_000_000, logger=worker_logger)
+        worker_logger.info(f"   ✅ Pass 1: {filter_stats['lines_matched']:,} matched from {filter_stats['lines_processed']:,} lines in {time.time()-pass1_start:.1f}s")
+
+        # Pass 2: Deduplicate with [removed]/[deleted] preservation
+        worker_logger.info(f"   Pass 2: Deduplicating and organizing...")
+        pass2_start = time.time()
+
+        submission_comments = defaultdict(dict)
+        total_comments = 0
+        removed_deleted_count = 0
+        preserved_from_removal_count = 0
+        overwritten_with_better_count = 0
+
+        for line_data in read_zst_lines(temp_file):
+            try:
+                comment = json_loads(line_data)
+                submission_id = extract_submission_id(comment.get('link_id', ''))
+                if not submission_id:
+                    continue
+
+                comment_id = comment.get('id', f'unknown_{total_comments}')
+                body = comment.get('body', '')
+                author = comment.get('author', '')
+                is_removed_or_deleted = body in ['[removed]', '[deleted]'] or author in ['[deleted]', '[removed]']
+
+                if comment_id not in submission_comments[submission_id]:
+                    submission_comments[submission_id][comment_id] = comment
+                    total_comments += 1
+                    if is_removed_or_deleted:
+                        removed_deleted_count += 1
+                elif not is_removed_or_deleted:
+                    old_comment = submission_comments[submission_id][comment_id]
+                    old_was_removed = (old_comment.get('body', '') in ['[removed]', '[deleted]'] or
+                                      old_comment.get('author', '') in ['[deleted]', '[removed]'])
+                    submission_comments[submission_id][comment_id] = comment
+                    if old_was_removed:
+                        overwritten_with_better_count += 1
+                else:
+                    preserved_from_removal_count += 1
+            except Exception:
+                continue
+
+        worker_logger.info(f"   ✅ Pass 2: {total_comments:,} unique comments in {time.time()-pass2_start:.1f}s")
+
+        # Clean up and write output
+        shutil.rmtree(temp_dir)
+        temp_dir = None
+
+        output_file = os.path.join(output_dir, f"{subreddit}_submission_comments.pkl")
+        output_data = {submission_id: dict(comments) for submission_id, comments in submission_comments.items()}
+        with open(output_file, 'wb') as f:
+            pickle.dump(output_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         elapsed = time.time() - start_time
-        subreddits_with_comments = len(stats["output_stats"])
+        total_submissions = len(submission_comments)
+        avg = total_comments / total_submissions if total_submissions > 0 else 0
 
-        worker_logger.info(f"✅ {rc_filename}: {stats['lines_processed']:,} lines, {stats['lines_matched']:,} comments -> {subreddits_with_comments} subreddits in {elapsed:.1f}s")
+        worker_logger.info(f"✅ {subreddit}: {total_comments:,} comments across {total_submissions} submissions (avg {avg:.1f}) in {elapsed:.1f}s")
+        if removed_deleted_count > 0:
+            worker_logger.info(f"   📊 {removed_deleted_count:,} [removed]/[deleted]")
+        if preserved_from_removal_count > 0:
+            worker_logger.info(f"   🛡️  {preserved_from_removal_count:,} preserved from overwrite")
+        if overwritten_with_better_count > 0:
+            worker_logger.info(f"   ✨ {overwritten_with_better_count:,} recovered")
 
         return {
-            'rc_file': rc_filename,
-            'total_lines': stats['lines_processed'],
-            'matched_comments': stats['lines_matched'],
-            'subreddits_with_comments': subreddits_with_comments,
+            'subreddit': subreddit,
+            'comments_collected': total_comments,
+            'submissions_with_comments': total_submissions,
+            'lines_processed': filter_stats['lines_processed'],
+            'removed_deleted_count': removed_deleted_count,
+            'preserved_from_removal_count': preserved_from_removal_count,
+            'overwritten_with_better_count': overwritten_with_better_count,
             'processing_time': elapsed,
             'success': True
         }
 
     except Exception as e:
-        worker_logger.error(f"❌ Error processing {rc_filename}: {e}")
-        return {
-            'rc_file': rc_filename,
-            'total_lines': 0,
-            'matched_comments': 0,
-            'subreddits_with_comments': 0,
-            'processing_time': 0,
-            'success': False,
-            'error': str(e)
-        }
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+        worker_logger.error(f"❌ Error processing {subreddit}: {e}")
+        return {'subreddit': subreddit, 'comments_collected': 0, 'submissions_with_comments': 0,
+                'lines_processed': 0, 'removed_deleted_count': 0, 'preserved_from_removal_count': 0,
+                'overwritten_with_better_count': 0, 'processing_time': 0, 'success': False, 'error': str(e)}
 
-def organize_subreddit_comments(args: tuple) -> Dict[str, Any]:
-    """
-    Phase 2: Organize comments for a single subreddit into nested structure.
-
-    Args:
-        args: (subreddit, target_submission_ids, temp_dir, output_dir)
-
-    Returns:
-        Dict with organization statistics
-    """
-    subreddit, target_submission_ids, temp_dir, output_dir = args
-
-    # Create worker logger with subreddit identifier in subreddits/ subdirectory
-    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=f"subreddits/{subreddit}")
-
-    worker_logger.info(f"🔄 Organizing {subreddit} ({len(target_submission_ids)} target submissions)")
-    start_time = time.time()
-
-    # Build nested structure: {submission_id: {comment_id: comment_object}}
-    submission_comments = defaultdict(dict)
-    total_comments = 0
-    files_processed = 0
-    removed_deleted_count = 0
-    preserved_from_removal_count = 0
-    overwritten_with_better_count = 0
-
-    # Get subreddit's temp directory
-    subreddit_temp_dir = os.path.join(temp_dir, subreddit)
-    if not os.path.exists(subreddit_temp_dir):
-        worker_logger.warning(f"⚠️  No temp directory found for {subreddit}")
-        return {
-            'subreddit': subreddit,
-            'comments_organized': 0,
-            'submissions_with_comments': 0,
-            'files_processed': 0,
-            'removed_deleted_count': 0,
-            'preserved_from_removal_count': 0,
-            'overwritten_with_better_count': 0,
-            'processing_time': 0,
-            'success': False
-        }
-
-    # Get all RC files in subreddit's temp dir
-    rc_files = []
-    for filename in os.listdir(subreddit_temp_dir):
-        if filename.startswith('RC_') and filename.endswith('.zst'):
-            rc_files.append(os.path.join(subreddit_temp_dir, filename))
-
-    rc_files.sort()  # Process in chronological order
-
-    # Process each RC file for this subreddit
-    for rc_file_path in rc_files:
-        try:
-            for line_data in read_zst_lines(rc_file_path):
-                try:
-                    comment = json_loads(line_data)
-
-                    # Extract submission ID using utility
-                    submission_id = extract_submission_id(comment.get('link_id', ''))
-                    if not submission_id:
-                        continue
-
-                    # Check if this submission is in our target list
-                    if submission_id in target_submission_ids:
-                        comment_id = comment.get('id', f'unknown_{total_comments}')
-
-                        # Only add/overwrite if the new comment is not [removed]/[deleted]
-                        # This preserves original content when later versions are removed
-                        # Also check author field for [deleted]/[removed]
-                        body = comment.get('body', '')
-                        author = comment.get('author', '')
-                        is_removed_or_deleted = (body in ['[removed]', '[deleted]'] or
-                                                author in ['[deleted]', '[removed]'])
-
-                        # If comment doesn't exist yet, add it (even if removed/deleted)
-                        # If it exists and new version is not removed/deleted, overwrite it
-                        # If it exists and new version is removed/deleted, keep the old one
-                        if comment_id not in submission_comments[submission_id]:
-                            submission_comments[submission_id][comment_id] = comment
-                            total_comments += 1
-                            if is_removed_or_deleted:
-                                removed_deleted_count += 1
-                        elif not is_removed_or_deleted:
-                            # Overwrite only if the new version is not removed/deleted
-                            # Check if we're overwriting a removed/deleted version with a better one
-                            old_comment = submission_comments[submission_id][comment_id]
-                            old_body = old_comment.get('body', '')
-                            old_author = old_comment.get('author', '')
-                            old_was_removed_or_deleted = (old_body in ['[removed]', '[deleted]'] or
-                                                         old_author in ['[deleted]', '[removed]'])
-
-                            submission_comments[submission_id][comment_id] = comment
-
-                            if old_was_removed_or_deleted:
-                                overwritten_with_better_count += 1
-                        else:
-                            # We're skipping overwriting with [removed]/[deleted] - preserving original
-                            preserved_from_removal_count += 1
-
-                except Exception:
-                    continue
-
-            files_processed += 1
-
-        except Exception as e:
-            worker_logger.warning(f"⚠️  Error processing {os.path.basename(rc_file_path)} for {subreddit}: {e}")
-            continue
-
-    # Write pickle file for this subreddit
-    output_file = os.path.join(output_dir, f"{subreddit}_submission_comments.pkl")
-
-    # Convert defaultdict to regular dict for pickling
-    output_data = {submission_id: dict(comments) for submission_id, comments in submission_comments.items()}
-
-    with open(output_file, 'wb') as f:
-        pickle.dump(output_data, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    elapsed = time.time() - start_time
-    total_submissions = len(submission_comments)
-    avg_comments_per_submission = total_comments / total_submissions if total_submissions > 0 else 0
-
-    worker_logger.info(f"✅ {subreddit}: {total_comments:,} comments across {total_submissions} submissions "
-          f"(avg {avg_comments_per_submission:.1f} comments/submission) in {elapsed:.1f}s")
-    if removed_deleted_count > 0:
-        worker_logger.info(f"   📊 {removed_deleted_count:,} comments were [removed]/[deleted]")
-    if preserved_from_removal_count > 0:
-        worker_logger.info(f"   🛡️  {preserved_from_removal_count:,} comments preserved (would have been overwritten with [removed]/[deleted])")
-    if overwritten_with_better_count > 0:
-        worker_logger.info(f"   ✨ {overwritten_with_better_count:,} comments recovered (overwritten [removed]/[deleted] with full content)")
-
-    return {
-        'subreddit': subreddit,
-        'comments_organized': total_comments,
-        'submissions_with_comments': total_submissions,
-        'files_processed': files_processed,
-        'removed_deleted_count': removed_deleted_count,
-        'preserved_from_removal_count': preserved_from_removal_count,
-        'overwritten_with_better_count': overwritten_with_better_count,
-        'processing_time': elapsed,
-        'success': True
-    }
 
 def main():
-    """Main function to orchestrate the three-phase process."""
-    # Initialize logging
+    """Main function to orchestrate comment collection from Arctic Shift files."""
     logger = get_stage_logger(5, "collect_submission_comments")
     log_stage_start(logger, 5, "Collect and Organize Submission Comments")
-
     overall_start = time.time()
 
     try:
-        # Create directories
         create_directories()
 
-        # Load submission IDs from Stage 4
-        logger.info("📋 Loading submission IDs from Stage 4...")
-        _, subreddit_to_ids, target_subreddits = load_submission_ids(logger)
-
-        # Get RC files to process
-        rc_files = get_rc_files(logger)
-        if not rc_files:
-            logger.error("❌ No RC files found to process")
+        if not os.path.exists(ARCTIC_SHIFT_DATA):
+            logger.error(f"❌ Arctic Shift directory not found: {ARCTIC_SHIFT_DATA}")
             log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
             return 1
 
-        # Setup temp directory
-        temp_dir = os.path.join(PATHS['submission_comments'], 'temp')
-        os.makedirs(temp_dir, exist_ok=True)
+        logger.info("📋 Loading submission IDs from Stage 4...")
+        subreddit_to_ids = load_submission_ids(logger)
 
-        # Phase 1: Process RC files in parallel
-        logger.info(f"📁 Phase 1: Processing {len(rc_files)} RC files with {PROCESSES} processes")
-        phase1_start = time.time()
+        if not subreddit_to_ids:
+            logger.error("❌ No submission IDs found to process")
+            log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
+            return 1
 
-        rc_args = [(rc_file, subreddit_to_ids, target_subreddits, temp_dir) for rc_file in rc_files]
-        rc_results = process_files_parallel(rc_args, process_rc_file, PROCESSES, logger)
+        logger.info(f"🗂️  Processing {len(subreddit_to_ids)} subreddits with {PROCESSES} processes")
+        processing_start = time.time()
 
-        phase1_elapsed = time.time() - phase1_start
-        successful_rc = [r for r in rc_results if r['success']]
-        total_lines_processed = sum(r['total_lines'] for r in successful_rc)
-        total_comments_collected = sum(r['matched_comments'] for r in successful_rc)
+        subreddit_args = [(subreddit, target_ids, PATHS['organized_comments'])
+                         for subreddit, target_ids in subreddit_to_ids.items()]
+        results = process_files_parallel(subreddit_args, process_subreddit_comments, PROCESSES, logger)
 
-        logger.info(f"✅ Phase 1 complete in {phase1_elapsed:.1f}s")
-        logger.info(f"   📊 {len(successful_rc)}/{len(rc_files)} files processed successfully")
-        logger.info(f"   📊 {total_lines_processed:,} lines processed, {total_comments_collected:,} comments collected")
+        processing_elapsed = time.time() - processing_start
+        successful_results = [r for r in results if r['success']]
+        failed_results = [r for r in results if not r['success']]
 
-        # Phase 2: Organize comments by subreddit in parallel
-        logger.info(f"🗂️  Phase 2: Organizing comments for {len(subreddit_to_ids)} subreddits")
-        phase2_start = time.time()
+        total_comments = sum(r['comments_collected'] for r in successful_results)
+        total_submissions = sum(r['submissions_with_comments'] for r in successful_results)
+        total_lines = sum(r['lines_processed'] for r in successful_results)
 
-        subreddit_args = [(subreddit, target_ids, temp_dir, PATHS['organized_comments'])
-                          for subreddit, target_ids in subreddit_to_ids.items()]
-        org_results = process_files_parallel(subreddit_args, organize_subreddit_comments, PROCESSES, logger)
+        logger.info(f"✅ Processing complete in {processing_elapsed:.1f}s")
+        logger.info(f"   📊 {len(successful_results)}/{len(subreddit_to_ids)} subreddits processed")
+        logger.info(f"   📊 {total_lines:,} lines processed, {total_comments:,} comments collected")
+        logger.info(f"   📊 {total_submissions:,} submissions with comments")
 
-        phase2_elapsed = time.time() - phase2_start
-        successful_orgs = [r for r in org_results if r['success']]
-        total_comments_organized = sum(r['comments_organized'] for r in successful_orgs)
-        total_submissions = sum(r['submissions_with_comments'] for r in successful_orgs)
-
-        logger.info(f"✅ Phase 2 complete in {phase2_elapsed:.1f}s")
-        logger.info(f"   📊 {len(successful_orgs)}/{len(subreddit_to_ids)} subreddits organized successfully")
-        logger.info(f"   📊 {total_comments_organized:,} comments organized across {total_submissions:,} submissions")
-
-        # Phase 3: Keep temp directories (no cleanup)
-        logger.info(f"📁 Phase 3: Preserving temp directories for future use")
-        phase3_start = time.time()
-
-        if os.path.exists(temp_dir):
-            logger.info(f"   💾 Kept temp directory: {temp_dir}")
-        else:
-            logger.warning(f"   ⚠️  Temp directory does not exist: {temp_dir}")
-
-        phase3_elapsed = time.time() - phase3_start
-        logger.info(f"✅ Phase 3 complete in {phase3_elapsed:.1f}s")
-
-        # Write summary statistics
-        total_removed_deleted = sum(r.get('removed_deleted_count', 0) for r in successful_orgs)
-        total_preserved = sum(r.get('preserved_from_removal_count', 0) for r in successful_orgs)
-        total_overwritten_better = sum(r.get('overwritten_with_better_count', 0) for r in successful_orgs)
-
-        stats_file = os.path.join(PATHS['data'], 'stage5_submission_comment_organization_stats.json')
+        # Write statistics
         stats_data = {
             'summary': {
-                'total_subreddits': len(org_results),
-                'successful_subreddits': len(successful_orgs),
-                'total_comments_organized': total_comments_organized,
+                'total_subreddits': len(results),
+                'successful_subreddits': len(successful_results),
+                'failed_subreddits': len(failed_results),
+                'total_comments_collected': total_comments,
                 'total_submissions_with_comments': total_submissions,
-                'total_removed_deleted': total_removed_deleted,
-                'total_preserved_from_removal': total_preserved,
-                'total_overwritten_with_better': total_overwritten_better,
-                'avg_comments_per_submission': round(total_comments_organized / total_submissions, 2) if total_submissions > 0 else 0,
-                'phase1_time': round(phase1_elapsed, 1),
-                'phase2_time': round(phase2_elapsed, 1),
-                'phase3_time': round(phase3_elapsed, 1),
+                'total_lines_processed': total_lines,
+                'total_removed_deleted': sum(r.get('removed_deleted_count', 0) for r in successful_results),
+                'total_preserved_from_removal': sum(r.get('preserved_from_removal_count', 0) for r in successful_results),
+                'total_overwritten_with_better': sum(r.get('overwritten_with_better_count', 0) for r in successful_results),
+                'avg_comments_per_submission': round(total_comments / total_submissions, 2) if total_submissions > 0 else 0,
+                'processing_time': round(processing_elapsed, 1),
                 'total_time': round(time.time() - overall_start, 1),
-                'collection_date': time.strftime('%Y-%m-%d %H:%M:%S')
+                'collection_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'source': 'Arctic Shift subreddit files'
             },
             'subreddit_stats': [
                 {
                     'subreddit': r['subreddit'],
-                    'comments_organized': r['comments_organized'],
+                    'comments_collected': r['comments_collected'],
                     'submissions_with_comments': r['submissions_with_comments'],
-                    'files_processed': r['files_processed'],
+                    'lines_processed': r['lines_processed'],
                     'removed_deleted_count': r.get('removed_deleted_count', 0),
                     'preserved_from_removal_count': r.get('preserved_from_removal_count', 0),
                     'overwritten_with_better_count': r.get('overwritten_with_better_count', 0),
                     'processing_time': round(r['processing_time'], 2),
-                    'avg_comments_per_submission': round(r['comments_organized'] / r['submissions_with_comments'], 2) if r['submissions_with_comments'] > 0 else 0
+                    'avg_comments_per_submission': round(r['comments_collected'] / r['submissions_with_comments'], 2) if r['submissions_with_comments'] > 0 else 0
                 }
-                for r in sorted(successful_orgs, key=lambda x: x['comments_organized'], reverse=True)
+                for r in sorted(successful_results, key=lambda x: x['comments_collected'], reverse=True)
             ],
-            'failed_subreddits': [
-                {
-                    'subreddit': r['subreddit'],
-                    'reason': 'processing_failed'
-                }
-                for r in org_results if not r['success']
-            ]
+            'failed_subreddits': [{'subreddit': r['subreddit'], 'error': r.get('error', 'unknown')} for r in failed_results]
         }
 
+        stats_file = os.path.join(PATHS['data'], 'stage5_submission_comment_collection_stats.json')
         write_json_file(stats_data, stats_file, pretty=True)
 
-        # Final summary
         overall_elapsed = time.time() - overall_start
         logger.info(f"🎉 Stage 5 Complete!")
         logger.info(f"   ⏱️  Total time: {overall_elapsed:.1f}s")
-        logger.info(f"   📁 RC files processed: {len(successful_rc)}/{len(rc_files)}")
-        logger.info(f"   🗂️  Subreddits organized: {len(successful_orgs)}/{len(subreddit_to_ids)}")
-        logger.info(f"   💬 Comments organized: {total_comments_organized:,}")
+        logger.info(f"   🗂️  Subreddits processed: {len(successful_results)}/{len(subreddit_to_ids)}")
+        logger.info(f"   💬 Comments collected: {total_comments:,}")
         logger.info(f"   📝 Submissions with comments: {total_submissions:,}")
-        logger.info(f"   📊 Average comments per submission: {total_comments_organized/total_submissions:.1f}" if total_submissions > 0 else "   📊 No submissions found")
+        logger.info(f"   📊 Avg comments/submission: {total_comments/total_submissions:.1f}" if total_submissions > 0 else "   📊 No submissions found")
         logger.info(f"   📈 Statistics: {stats_file}")
 
-        # Show failed subreddits if any
-        failed_subreddits = [r for r in org_results if not r['success']]
-        if failed_subreddits:
-            logger.warning(f"⚠️  Failed subreddits ({len(failed_subreddits)}):")
-            for r in failed_subreddits[:10]:  # Show first 10
-                logger.warning(f"     {r['subreddit']}")
-            if len(failed_subreddits) > 10:
-                logger.warning(f"     ... and {len(failed_subreddits) - 10} more")
+        if failed_results:
+            logger.warning(f"⚠️  Failed subreddits ({len(failed_results)}):")
+            for r in failed_results[:10]:
+                logger.warning(f"     {r['subreddit']}: {r.get('error', 'unknown')}")
+            if len(failed_results) > 10:
+                logger.warning(f"     ... and {len(failed_results) - 10} more")
 
         log_stage_end(logger, 5, success=True, elapsed_time=overall_elapsed)
         return 0

@@ -178,9 +178,9 @@ def extract_community_rules(reddit: object, subreddit_name: str, logger) -> List
             rule_data['violation_reason_clean'] = clean_rule_text(rule_data.get('violation_reason', ''))
 
             # Add comprehensive text for embedding (used in Stage 4)
-            rule_text = f"Short Name: {rule_data['short_name_clean']}\nDescription: {rule_data['description_clean']}"
-            if rule_data['violation_reason_clean']:
-                rule_text += f"\nViolation Reason: {rule_data['violation_reason_clean']}"
+            rule_text = f"{rule_data['short_name_clean'].strip('.')}. {rule_data['description_clean']}"
+            if rule_data['violation_reason_clean'] != rule_data['short_name_clean']:
+                rule_text = f"{rule_data['violation_reason_clean'].strip('.')}. {rule_text}"
             rule_data['rule_comprehensive'] = rule_text.strip()
 
             # Remove PRAW internals
@@ -400,7 +400,7 @@ def main():
                 'reddit_api_used': len(reddit_clients) > 0,
                 'filtering_method': 'Reddit API over18 flag' if reddit_clients else 'No filtering (API required)'
             },
-            'subreddits': sfw_subreddits
+            'subreddits': sfw_subreddits  # Each has 'subreddit' object with mod_comment_count and 'rules' list
         }
 
         # Save results
