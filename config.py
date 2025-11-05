@@ -24,14 +24,13 @@ GOLD_PERCENTILE = 98  # Top 2% of similarity scores considered gold matches (Sta
 AMBIGUOUS_PERCENTILE = 98  # Top 2% of similarity scores considered ambiguous matches (Stage 4 Phase 2)
 MIN_MATCHED_COMMENTS = 25 # Minimum matched comments for subreddit inclusion in Stage 4
 MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 4
-# Stage 9: Dataset split configuration
-MIN_TEST_THREAD_PAIRS = 25      # Minimum pairs for test_1k (also used in Stage 6 filtering)
-MIN_TRAIN_THREAD_PAIRS = 250    # Minimum pairs for train/val/test splits
 
-# Split sizes for subreddits with ≥500 pairs
-TRAIN_SPLIT = 200
-VAL_SPLIT = 25
-TEST_SPLIT = 25
+# Stage 9: Dataset split configuration
+MIN_TEST_THREAD_PAIRS = 25  # Minimum pairs required to include a subreddit (also used in Stage 6 filtering)
+TEST_PAIRS_PER_SUBREDDIT = 25  # First 25 pairs from each subreddit go to test
+VAL_SPLIT_RATIO = 0.1  # 10% of remaining pairs (after test) go to val
+TRAIN_SPLIT_RATIO = 0.9  # 90% of remaining pairs (after test) go to train
+
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # Model used in Stage 4 for semantic matching
 # Auto-detect number of CPU cores (use all available cores)
 PROCESSES = multiprocessing.cpu_count()
