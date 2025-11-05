@@ -429,7 +429,7 @@ def load_qualified_subreddits_from_stage6(logger=None) -> List[Dict[str, Any]]:
     Load full stats for qualified subreddits from Stage 6 summary.
 
     This function is used by Stage 7, 8, and 9 to get full statistics for subreddits
-    that have ≥500 successful thread pairs from Stage 6.
+    that have ≥25 successful thread pairs from Stage 6.
 
     Args:
         logger: Optional logger for messages (if None, uses print)
@@ -444,7 +444,7 @@ def load_qualified_subreddits_from_stage6(logger=None) -> List[Dict[str, Any]]:
         - rank: JSD-based rank
         - (and all other fields from Stage 6 summary)
     """
-    from config import PATHS
+    from config import PATHS, MIN_TEST_THREAD_PAIRS
 
     summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
 
@@ -459,13 +459,13 @@ def load_qualified_subreddits_from_stage6(logger=None) -> List[Dict[str, Any]]:
     try:
         summary = read_json_file(summary_file)
 
-        # Get full stats for subreddits with successful thread pairs
+        # Get full stats for subreddits with >= MIN_TEST_THREAD_PAIRS successful thread pairs
         qualified_subreddits = []
         for subreddit_stat in summary.get('subreddit_stats', []):
-            if subreddit_stat.get('successful_pairs', 0) > 0:
+            if subreddit_stat.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS:
                 qualified_subreddits.append(subreddit_stat)
 
-        msg = f"Loaded {len(qualified_subreddits)} qualified subreddits from Stage 6 summary"
+        msg = f"Loaded {len(qualified_subreddits)} qualified subreddits (>= {MIN_TEST_THREAD_PAIRS} thread pairs) from Stage 6 summary"
         if logger:
             logger.info(msg)
         else:

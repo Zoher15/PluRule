@@ -2,14 +2,13 @@
 """
 Stage 6: Build Comment Trees and Discussion Threads
 
-Integrated stage that builds comment trees and creates moderated/unmoderated
-discussion thread pairs. Eliminates intermediate file I/O by keeping trees
-in memory for immediate thread creation.
+Builds hierarchical comment tree structures and creates moderated/unmoderated
+discussion thread pairs for training data.
 
 Input:
-- organized_comments/{subreddit}_submission_comments.pkl (from Stage 5)
+- organized_comments/{subreddit}/submission_{id}.pkl (from Stage 5)
 - matched_comments/{subreddit}_match.jsonl.zst (from Stage 4)
-- data/top_{N}_sfw_subreddits.json (for rule sets)
+- data/stage2_sfw_subreddits_min_{N}_comments.json (for rule sets)
 
 Output:
 - comment_trees/{subreddit}_comment_trees.pkl
@@ -22,6 +21,7 @@ import time
 import pickle
 from collections import deque, defaultdict
 from typing import Dict, List, Any, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,33 +34,87 @@ from utils.reddit import (normalize_subreddit_name, extract_submission_id, extra
 from utils.stats import calculate_jsd_from_uniform, rank_by_score
 
 
+# ============================================================================
+# CONFIGURATION & DATA LOADING
+# ============================================================================
+
+def load_qualified_subreddits_from_stage6(logger=None) -> List[Dict[str, Any]]:
+    """
+    Load full stats for qualified subreddits from Stage 6 summary.
+
+    This function is used by Stage 7, 8, and 9 to get full statistics for subreddits
+    that have ≥25 successful thread pairs from Stage 6.
+
+    Args:
+        logger: Optional logger for messages (if None, uses print)
+
+    Returns:
+        List of subreddit stat dictionaries (full data from Stage 6), including:
+        - subreddit: name
+        - successful_pairs: number of successful thread pairs
+        - language: subreddit language
+        - rule_distribution: dict of rule name to count
+        - jsd_from_uniform: JSD score
+        - rank: JSD-based rank
+        - (and all other fields from Stage 6 summary)
+    """
+    from config import PATHS, MIN_TEST_THREAD_PAIRS
+
+    summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
+
+    if not os.path.exists(summary_file):
+        msg = f"❌ Stage 6 summary not found: {summary_file}"
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        return []
+
+    try:
+        summary = read_json_file(summary_file)
+
+        # Get full stats for subreddits with >= MIN_TEST_THREAD_PAIRS successful thread pairs
+        qualified_subreddits = []
+        for subreddit_stat in summary.get('subreddit_stats', []):
+            if subreddit_stat.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS:
+                qualified_subreddits.append(subreddit_stat)
+
+        msg = f"Loaded {len(qualified_subreddits)} qualified subreddits (>= {MIN_TEST_THREAD_PAIRS} thread pairs) from Stage 6 summary"
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
+
+        return qualified_subreddits
+
+    except Exception as e:
+        msg = f"❌ Error loading Stage 6 summary: {e}"
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        return []
+
 def load_target_subreddits_and_rules(logger) -> Tuple[Dict[str, str], Dict[str, Dict[str, int]]]:
     """Load subreddits with their languages and complete rule sets."""
     subreddits_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
 
     try:
         data = read_json_file(subreddits_file)
-
         subreddit_languages = {}
         subreddit_rules = {}
 
         for item in data.get('subreddits', []):
             subreddit_data = item.get('subreddit', {})
             subreddit_name = normalize_subreddit_name(subreddit_data.get('display_name', ''))
-            language = subreddit_data.get('lang', '')
+            subreddit_languages[subreddit_name] = subreddit_data.get('lang', '')
 
-            subreddit_languages[subreddit_name] = language
-
-            # Initialize all rules for this subreddit with 0 counts
-            # Use short_name_clean to match Stage 4's matched_rule format
-            # Rules are at item level, not subreddit_data level
-            rule_stats = {}
-            for rule in item.get('rules', []):
-                rule_name = rule.get('short_name_clean', '')
-                if rule_name:
-                    rule_stats[rule_name] = 0
-
-            subreddit_rules[subreddit_name] = rule_stats
+            # Initialize all rules with 0 counts (use short_name_clean to match Stage 4)
+            subreddit_rules[subreddit_name] = {
+                rule.get('short_name_clean', ''): 0
+                for rule in item.get('rules', [])
+                if rule.get('short_name_clean', '')
+            }
 
         logger.info(f"Loaded {len(subreddit_languages)} subreddits with complete rule sets")
         return subreddit_languages, subreddit_rules
@@ -70,34 +124,53 @@ def load_target_subreddits_and_rules(logger) -> Tuple[Dict[str, str], Dict[str, 
         return {}, {}
 
 
+def load_submission_comments(submission_comments_dir: str, submission_id: str, logger) -> Optional[Dict]:
+    """Load comments for a single submission from its pickle file."""
+    filepath = os.path.join(submission_comments_dir, f"submission_{submission_id}.pkl")
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with open(filepath, 'rb') as f:
+            return pickle.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load submission_{submission_id}.pkl: {e}")
+        return None
+
+
+def load_mod_comments(match_file_path: str, logger) -> List[Dict]:
+    """Load moderator comments from match file (already sampled in Stage 4)."""
+    try:
+        lines = read_zst_lines(match_file_path)
+        mod_comments = [json_loads(line) for line in lines if line.strip()]
+        logger.info(f"Loaded {len(mod_comments)} moderator comments from {os.path.basename(match_file_path)}")
+        return mod_comments
+    except Exception as e:
+        logger.error(f"Failed to load match file {match_file_path}: {e}")
+        return []
+
+
+# ============================================================================
+# TREE BUILDING
+# ============================================================================
+
 def calculate_depth_levels(root_comments: List[str], children_map: Dict[str, List[str]]) -> Dict[int, List[str]]:
     """Calculate depth levels for comments using BFS."""
-    depth_levels = {}
-
     if not root_comments:
-        return depth_levels
+        return {}
 
-    # Initialize depth 0 with root comments
-    depth_levels[0] = root_comments[:]
+    depth_levels = {0: root_comments[:]}
     comment_depths = {comment_id: 0 for comment_id in root_comments}
-
-    # BFS to assign depths using deque for O(1) popleft
     queue = deque((comment_id, 0) for comment_id in root_comments)
 
     while queue:
         current_comment, current_depth = queue.popleft()
-
-        # Get children of current comment
         child_ids = children_map.get(current_comment, [])
 
         if child_ids:
             next_depth = current_depth + 1
-
-            # Initialize depth level if not exists
             if next_depth not in depth_levels:
                 depth_levels[next_depth] = []
 
-            # Add children to next depth level
             for child_id in child_ids:
                 if child_id not in comment_depths:  # Avoid cycles
                     depth_levels[next_depth].append(child_id)
@@ -107,178 +180,136 @@ def calculate_depth_levels(root_comments: List[str], children_map: Dict[str, Lis
     return depth_levels
 
 
-def build_submission_tree(submission_id: str, comments: Dict[str, Dict]) -> Dict:
+def build_submission_tree(comments: Dict[str, Dict]) -> Dict:
     """Build tree structure for a single submission."""
     children_map = {}  # parent_id -> [child_ids]
-    parent_map = {}  # child_id -> parent_id (clean IDs)
-    root_comments = []  # comments that reply directly to submission
+    parent_map = {}    # child_id -> parent_id
+    root_comments = []
 
-    # Build parent->children mapping
     for comment_id, comment_data in comments.items():
         parent_id = comment_data.get('parent_id', '')
-
-        if not parent_id:
+        if not parent_id or isinstance(parent_id, int):  # Skip ambiguous integer parent_ids
             continue
 
-        # Clean parent_id using utility functions consistently
+        # Determine if direct reply to submission or comment
         if parent_id.startswith('t3_'):
-            # Direct reply to submission
             clean_parent_id = extract_submission_id(parent_id)
             root_comments.append(comment_id)
         else:
-            # Reply to another comment (t1_ prefix or already clean)
             clean_parent_id = extract_comment_id(parent_id)
 
-        # Initialize parent in children_map if not exists
-        if clean_parent_id not in children_map:
-            children_map[clean_parent_id] = []
-
-        # Add this comment as child of its parent
-        children_map[clean_parent_id].append(comment_id)
-
-        # Add to parent mapping (child -> parent)
+        children_map.setdefault(clean_parent_id, []).append(comment_id)
         parent_map[comment_id] = clean_parent_id
-
-    # Calculate depth levels using BFS
-    depth_levels = calculate_depth_levels(root_comments, children_map)
 
     return {
         'children_map': children_map,
         'parent_map': parent_map,
         'root_comments': root_comments,
-        'depth_levels': depth_levels,
+        'depth_levels': calculate_depth_levels(root_comments, children_map),
         'total_comments': len(comments)
     }
 
 
-def build_subreddit_trees(submission_comments: Dict[str, Dict]) -> Dict[str, Any]:
-    """Build trees for all submissions in a subreddit's data."""
+def build_subreddit_trees(submission_comments_dir: str, subreddit_name: str, logger) -> Dict[str, Any]:
+    """Build trees for all submissions in a subreddit by lazy loading from directory."""
+    if not os.path.exists(submission_comments_dir) or not os.path.isdir(submission_comments_dir):
+        logger.warning(f"Directory not found: {submission_comments_dir}")
+        return {
+            'trees': {},
+            'metadata': {'total_submissions': 0, 'total_comments': 0},
+            'subreddit': subreddit_name,
+            'source_dir': submission_comments_dir
+        }
+
+    submission_files = [f for f in os.listdir(submission_comments_dir)
+                       if f.startswith('submission_') and f.endswith('.pkl')]
+
+    logger.info(f"  🌳 Building trees for {len(submission_files)} submissions (parallel)")
+
+    def process_submission_tree(filename):
+        """Process a single submission tree."""
+        submission_id = filename[11:-4]  # Extract from "submission_{id}.pkl"
+        comments = load_submission_comments(submission_comments_dir, submission_id, logger)
+        if comments:
+            return submission_id, build_submission_tree(comments)
+        return None, None
+
     trees = {}
     total_comments = 0
 
-    for submission_id, comments in submission_comments.items():
-        if not comments:  # Skip empty submissions
-            continue
-
-        tree = build_submission_tree(submission_id, comments)
-        trees[submission_id] = tree
-        total_comments += tree['total_comments']
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(process_submission_tree, f): f for f in submission_files}
+        for future in as_completed(futures):
+            submission_id, tree = future.result()
+            if tree:
+                trees[submission_id] = tree
+                total_comments += tree['total_comments']
 
     return {
         'trees': trees,
-        'metadata': {
-            'total_submissions': len(trees),
-            'total_comments': total_comments
-        }
+        'metadata': {'total_submissions': len(trees), 'total_comments': total_comments},
+        'subreddit': subreddit_name,
+        'source_dir': submission_comments_dir
     }
 
 
-def load_mod_comments(match_file_path: str, logger) -> List[Dict]:
-    """Load moderator comments from match file (already sampled in Stage 4)."""
-    try:
-        lines = read_zst_lines(match_file_path)
-        mod_comments = []
-
-        for line in lines:
-            if line.strip():
-                mod_comment = json_loads(line)
-                mod_comments.append(mod_comment)
-
-        logger.info(f"Loaded {len(mod_comments)} moderator comments from {os.path.basename(match_file_path)}")
-        return mod_comments
-
-    except Exception as e:
-        logger.error(f"Failed to load match file {match_file_path}: {e}")
-        return []
-
+# ============================================================================
+# THREAD BUILDING
+# ============================================================================
 
 def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dict],
                                         tree: Dict[str, Any], mode: str = 'unmoderated') -> Tuple[List[Dict], bool, Optional[str]]:
     """
-    Build thread from comment to root and check for moderator responses and media while traversing.
+    Build thread from comment to root and check for issues.
 
-    Two modes for checking moderator responses:
-
-    MODERATED MODE ('moderated'):
-    - Used when building a thread that we EXPECT to have a mod response at the leaf
-    - The leaf comment (comment_id) is the parent of a moderator comment
-    - We skip checking if the LEAF comment has mod children (because it should - that's our mod action)
-    - We do NOT check if comments in the thread are moderator comments or have mod responses
-
-    UNMODERATED MODE ('unmoderated'):
-    - Used when building an alternative thread that should be clean
-    - We check ONLY if the LEAF comment has moderator responses as direct children
-    - We do NOT check other positions in the thread for mod responses
-    - This ensures the leaf doesn't have direct moderation, but ancestors can
+    Modes:
+    - 'moderated': Expects mod response at leaf, skips checking leaf's children
+    - 'unmoderated': Checks that leaf has NO mod responses as direct children
 
     Both modes check:
-    1. If ANY comment in the thread has been removed or deleted ([removed] or [deleted] in body)
-    2. If each comment has media content (embedded images/videos)
-    3. ONLY FOR UNMODERATED: If the LEAF comment has moderator responses as direct children
-
-    Args:
-        comment_id: The leaf comment ID to build thread from
-        comments: Dictionary of all comments for this submission
-        tree: Tree structure with children mapping for this submission
-        mode: Either 'moderated' or 'unmoderated' to control checking behavior
+    1. If ANY comment (including all ancestors) has been removed/deleted body OR author
+    2. If any comment has media content
+    3. UNMODERATED only: If leaf comment has moderator responses as direct children
 
     Returns:
-        - thread: List of comment dicts from root to leaf with 'level' field
-        - has_issue: True if any moderator response, removed/deleted content, or media found (based on mode rules)
-        - issue_type: 'mod_response', 'removed_or_deleted', 'has_media', or None
+        (thread, has_issue, issue_type) where issue_type is 'mod_response', 'removed_or_deleted', 'has_media', or None
     """
-    # Build path from leaf to root, checking for issues as we go
     path = []
     current_id = comment_id
     children_map = tree.get('children_map', {})
-
-    # Track position while building path upward
     position = 0
+    visited = set()  # Prevent infinite loops from circular references
 
-    while current_id in comments:
+    while current_id in comments and current_id not in visited:
+        visited.add(current_id)
         comment = comments[current_id]
         path.append(current_id)
 
-        # Check if ANY comment in the thread has been removed or deleted
-        # We want all comments in the thread to have valid content
+        # Check if ANY comment has been removed/deleted (body OR author)
         body = comment.get('body', '')
-        if body in ['[removed]', '[deleted]']:
-            # Early exit - skip threads where any comment is removed/deleted
+        author = comment.get('author', '')
+        if body in ['[removed]', '[deleted]'] or author in ['[deleted]', '[removed]']:
             return [], True, 'removed_or_deleted'
 
-        # Check if THIS comment contains media (embedded images/videos)
+        # Check if ANY comment contains media
         if comment.get('media') or comment.get('media_metadata'):
-            # Early exit - skip threads with media comments
             return [], True, 'has_media'
 
-        # Check if the LEAF comment has moderator responses as direct children
-        # MODERATED MODE: Skip this check for the leaf comment (position 0) because
-        #                 that's where we expect the mod response to be
-        # UNMODERATED MODE: Check ONLY the leaf (position 0) for mod children
-        if position == 0:
-            if mode == 'unmoderated':
-                # For unmoderated threads, reject if leaf has any mod children
-                child_ids = children_map.get(current_id, [])
-                for child_id in child_ids:
-                    child_comment = comments.get(child_id, {})
-                    if is_moderator_comment(child_comment):
-                        # Early exit - no need to build full thread
-                        return [], True, 'mod_response'
-            # For moderated mode, we don't check the leaf's children (we expect a mod response)
+        # Check if LEAF comment has moderator responses (mode-dependent)
+        if position == 0 and mode == 'unmoderated':
+            for child_id in children_map.get(current_id, []):
+                if is_moderator_comment(comments.get(child_id, {})):
+                    return [], True, 'mod_response'
 
         # Move to parent
         parent_id = comment.get('parent_id', '')
-
-        # Stop if we reach submission
         if parent_id.startswith('t3_'):
             break
 
-        # Clean parent_id using utility function (handles t1_ prefix or already clean)
-        parent_id_clean = extract_comment_id(parent_id)
-        current_id = parent_id_clean
+        current_id = extract_comment_id(parent_id)
         position += 1
 
-    # No issues found, build the final thread in root-to-leaf order
+    # Build final thread in root-to-leaf order
     path.reverse()
     thread = []
     for level, thread_comment_id in enumerate(path):
@@ -289,56 +320,25 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
     return thread, False, None
 
 
-def count_common_ancestors_from_threads(thread1: List[Dict], thread2: List[Dict]) -> int:
-    """
-    Count common ancestors between two threads (already built).
-
-    Threads are lists of comment dicts ordered from root to leaf.
-    We compare the comment IDs to find the common prefix.
-
-    Args:
-        thread1: First thread (root to leaf)
-        thread2: Second thread (root to leaf)
-
-    Returns:
-        Number of common ancestors (comments that appear in the same position in both paths)
-    """
+def count_common_ancestors(thread1: List[Dict], thread2: List[Dict]) -> int:
+    """Count common ancestors between two threads (already built, root to leaf)."""
     common_count = 0
     for i in range(min(len(thread1), len(thread2))):
-        # Compare comment IDs
         if thread1[i].get('id') == thread2[i].get('id'):
             common_count += 1
         else:
             break
-
     return common_count
 
 
 def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict],
                          submission_id: str, comments: Dict[str, Dict],
-                         trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[str], Optional[List[Dict]], Optional[int], Optional[Dict]]:
-    """Find best alternative comment for unmoderated thread.
-
-    Args:
-        moderated_comment_id: ID of the moderated comment
-        moderated_thread: Already-built thread for moderated comment (to avoid rebuilding)
-        submission_id: ID of the submission
-        comments: All comments for this submission
-        trees: Tree structures
-        logger: Logger instance
-        used_alternatives: Set of already-used alternative comment IDs for this submission
-
-    Returns:
-        Tuple of (alt_comment_id, alt_thread, moderated_depth, rejection_stats)
-        - alt_comment_id: ID of the best alternative comment
-        - alt_thread: The built thread for the alternative (to avoid rebuilding)
-        - moderated_depth: Depth of the moderated comment (for failure tracking)
-        - rejection_stats: Dictionary with counts of why alternatives were rejected
+                         trees: Dict[str, Any], logger, used_alternatives: set) -> Tuple[Optional[str], Optional[List[Dict]], Optional[int], Optional[Dict]]:
     """
-    if used_alternatives is None:
-        used_alternatives = set()
+    Find best alternative comment for unmoderated thread at same depth.
 
-    # Initialize rejection statistics
+    Returns: (alt_comment_id, alt_thread, moderated_depth, rejection_stats)
+    """
     rejection_stats = {
         'total_alternatives_at_depth': 0,
         'rejected_mod_response': 0,
@@ -363,10 +363,8 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
     if moderated_depth is None:
         return None, None, None, rejection_stats
 
-    # Get all comments at same depth
+    # Get alternatives at same depth (exclude moderated comment and used alternatives)
     same_depth_comments = depth_levels.get(moderated_depth, [])
-
-    # Remove moderated comment and already-used alternatives, sort for determinism
     alternatives = sorted([cid for cid in same_depth_comments
                           if cid != moderated_comment_id and cid not in used_alternatives])
 
@@ -375,47 +373,36 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
     if not alternatives:
         return None, None, moderated_depth, rejection_stats
 
-    # Find best alternative based on common ancestors and score
+    # Find best alternative: most common ancestors, then lowest score
     best_alternative = None
     best_alternative_thread = None
     max_common_ancestors = -1
     lowest_score = float('inf')
 
     for alt_id in alternatives:
-        # Build thread and check for mod responses/media in one pass (UNMODERATED mode)
-        # This checks the entire thread including the leaf for any mod responses or media
         alt_thread, has_issue, issue_type = build_thread_and_check_mod_response(
             alt_id, comments, tree, mode='unmoderated'
         )
 
-        # Track rejection reasons
         if has_issue:
-            if issue_type == 'mod_response':
-                rejection_stats['rejected_mod_response'] += 1
-            elif issue_type == 'removed_or_deleted':
-                rejection_stats['rejected_removed_or_deleted'] += 1
-            elif issue_type == 'has_media':
-                rejection_stats['rejected_has_media'] += 1
+            rejection_stats[f'rejected_{issue_type}'] = rejection_stats.get(f'rejected_{issue_type}', 0) + 1
             continue
 
-        # Check if thread length matches exactly
-        # Comments at same depth should have same thread length if data is complete
+        # Check thread length matches
         if len(alt_thread) != len(moderated_thread):
             rejection_stats['rejected_length_mismatch'] += 1
-            logger.warning(f"Length mismatch for alternative {alt_id} at depth {moderated_depth}: expected {len(moderated_thread)}, got {len(alt_thread)}. This suggests missing parent comments in the data.")
+            logger.warning(f"Length mismatch for alternative {alt_id} at depth {moderated_depth}: "
+                          f"expected {len(moderated_thread)}, got {len(alt_thread)}. This suggests missing parent comments.")
             continue
 
-        # Count common ancestors using already-built threads (no need to rebuild paths)
-        common_ancestors = count_common_ancestors_from_threads(moderated_thread, alt_thread)
-
-        # Get comment score
+        # Select best based on common ancestors and score
+        common_ancestors = count_common_ancestors(moderated_thread, alt_thread)
         score = comments.get(alt_id, {}).get('score', 0)
 
-        # Select best: most common ancestors first, then lowest score
         if (common_ancestors > max_common_ancestors or
             (common_ancestors == max_common_ancestors and score < lowest_score)):
             best_alternative = alt_id
-            best_alternative_thread = alt_thread  # Save the thread to avoid rebuilding
+            best_alternative_thread = alt_thread
             max_common_ancestors = common_ancestors
             lowest_score = score
 
@@ -423,25 +410,12 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
 
 
 def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
-                     trees: Dict[str, Any], logger, used_alternatives: set = None) -> Tuple[Optional[Dict], Optional[int], Optional[str], Optional[Dict]]:
-    """Build moderated and unmoderated thread pair for a moderator comment.
-
-    Args:
-        mod_comment: The moderator comment
-        comments: All comments for this submission
-        trees: Tree structures
-        logger: Logger instance
-        used_alternatives: Set of already-used alternative comment IDs for this submission
-
-    Returns:
-        Tuple of (pair_dict, moderated_depth, failure_reason, rejection_stats)
-        - pair_dict: The thread pair if successful, None otherwise
-        - moderated_depth: Depth of moderated comment (for failure tracking)
-        - failure_reason: String indicating why pair failed ('moderated_thread_has_mod_response' or None)
-        - rejection_stats: Dictionary with counts of why alternatives were rejected (None if no search performed)
+                     trees: Dict[str, Any], logger, used_alternatives: set) -> Tuple[Optional[Dict], Optional[int], Optional[str], Optional[Dict]]:
     """
-    if used_alternatives is None:
-        used_alternatives = set()
+    Build moderated and unmoderated thread pair for a moderator comment.
+
+    Returns: (pair_dict, moderated_depth, failure_reason, rejection_stats)
+    """
     mod_comment_id = mod_comment.get('id')
     moderated_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
     submission_id = extract_submission_id(mod_comment.get('link_id', ''))
@@ -449,35 +423,20 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
     if not moderated_comment_id or not submission_id:
         return None, None, None, None
 
-    # Check if we have the data
-    if submission_id not in trees.get('trees', {}):
+    if submission_id not in trees.get('trees', {}) or moderated_comment_id not in comments:
         return None, None, None, None
 
-    if moderated_comment_id not in comments:
-        return None, None, None, None
-
-    # Get the tree for this submission
     tree = trees['trees'][submission_id]
 
-    # Build moderated thread and check for OTHER mod responses/media in one pass (MODERATED mode)
-    # This skips checking the leaf's children since we expect a mod response there
+    # Build moderated thread (mode='moderated' skips checking leaf's children)
     moderated_thread, has_issue, issue_type = build_thread_and_check_mod_response(
         moderated_comment_id, comments, tree, mode='moderated'
     )
 
-    # If thread building failed or has issues, return with proper failure reason
     if not moderated_thread or has_issue:
-        if issue_type == 'has_media':
-            logger.warning(f"Moderated thread contains media for {moderated_comment_id} in submission {submission_id}.")
-            return None, None, 'moderated_thread_has_media', None
-        elif issue_type == 'mod_response':
-            logger.warning(f"Moderated thread has other mod responses besides the expected one for {moderated_comment_id} in submission {submission_id}.")
-            return None, None, 'moderated_thread_has_mod_response', None
-        elif issue_type == 'removed_or_deleted':
-            logger.warning(f"Moderated thread contains removed/deleted comments for {moderated_comment_id} in submission {submission_id}.")
-            return None, None, 'moderated_thread_has_removed_or_deleted', None
+        return None, None, f'moderated_thread_has_{issue_type}' if issue_type else None, None
 
-    # Find best alternative at exact same depth (no fallback)
+    # Find best alternative at same depth
     alt_comment_id, unmoderated_thread, moderated_depth, rejection_stats = find_best_alternative(
         moderated_comment_id, moderated_thread,
         submission_id, comments, trees, logger, used_alternatives
@@ -486,14 +445,11 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
     if not alt_comment_id:
         return None, moderated_depth, None, rejection_stats
 
-    # unmoderated_thread already built in find_best_alternative (no need to rebuild)
-    # common_ancestors already calculated in find_best_alternative using the threads
-    # Calculate it again here for the final pair metadata
-    common_ancestors = count_common_ancestors_from_threads(moderated_thread, unmoderated_thread)
+    common_ancestors = count_common_ancestors(moderated_thread, unmoderated_thread)
 
     return {
         'mod_comment_id': mod_comment_id,
-        'mod_comment': mod_comment,  # Store full moderator comment object
+        'mod_comment': mod_comment,
         'moderated_thread': moderated_thread,
         'unmoderated_thread': unmoderated_thread,
         'metadata': {
@@ -510,68 +466,225 @@ def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
     }, None, None, rejection_stats
 
 
+def build_discussion_threads(mod_comments: List[Dict], submission_comments_dir: str,
+                            trees_data: Dict[str, Any], complete_rule_set: Dict[str, int],
+                            logger) -> Dict[str, Any]:
+    """Build discussion thread pairs from moderator comments using parallel processing by submission."""
+    # Group mod comments by submission
+    mod_comments_by_submission = defaultdict(list)
+    for mod_comment in mod_comments:
+        submission_id = extract_submission_id(mod_comment.get('link_id', ''))
+        if submission_id:
+            mod_comments_by_submission[submission_id].append(mod_comment)
+
+    # Initialize tracking structures
+    thread_pairs = []
+    rule_stats = complete_rule_set.copy()
+
+    debug_counts = {
+        'missing_submission': 0,
+        'missing_parent_id': 0,
+        'missing_moderated_comment': 0,
+        'moderated_thread_has_mod_response': 0,
+        'moderated_thread_has_media': 0,
+        'moderated_thread_has_removed_or_deleted': 0,
+        'no_alternative_found': 0
+    }
+
+    alternative_rejection_stats = {
+        'total_alternatives_checked': 0,
+        'rejected_mod_response': 0,
+        'rejected_removed_or_deleted': 0,
+        'rejected_has_media': 0,
+        'rejected_length_mismatch': 0
+    }
+
+    failed_depth_distribution = defaultdict(int)
+    successful_depth_distribution = defaultdict(int)
+
+    def process_submission_threads(submission_id, submission_mod_comments):
+        """Process all mod comments for a single submission."""
+        # Lazy load submission comments once for all mod comments in this submission
+        comments = load_submission_comments(submission_comments_dir, submission_id, logger)
+        if not comments:
+            return {
+                'pairs': [],
+                'debug_counts': {'missing_submission': len(submission_mod_comments)},
+                'rejection_stats': {},
+                'failed_depths': {},
+                'successful_depths': {},
+                'rules': {}
+            }
+
+        # Track used alternatives within this submission (no lock needed - single thread per submission)
+        used_alternatives = set()
+        pairs = []
+        local_debug_counts = defaultdict(int)
+        local_rejection_stats = defaultdict(int)
+        local_failed_depths = defaultdict(int)
+        local_successful_depths = defaultdict(int)
+        local_rules = defaultdict(int)
+
+        for mod_comment in submission_mod_comments:
+            moderated_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
+            if not moderated_comment_id:
+                local_debug_counts['missing_parent_id'] += 1
+                continue
+
+            if moderated_comment_id not in comments:
+                local_debug_counts['missing_moderated_comment'] += 1
+                continue
+
+            # Build thread pair
+            pair, failed_depth, failure_reason, rejection_stats = build_thread_pair(
+                mod_comment, comments, trees_data, logger, used_alternatives
+            )
+
+            # Aggregate rejection statistics
+            if rejection_stats:
+                for key, value in rejection_stats.items():
+                    local_rejection_stats[key] += value
+
+            if pair:
+                pairs.append(pair)
+
+                # Mark alternative as used
+                unmod_comment_id = pair.get('metadata', {}).get('unmoderated_comment_id')
+                if unmod_comment_id:
+                    used_alternatives.add(unmod_comment_id)
+
+                # Track successful depth
+                moderated_thread = pair.get('moderated_thread', [])
+                if moderated_thread:
+                    local_successful_depths[len(moderated_thread)] += 1
+
+                # Track rule statistics
+                rule = mod_comment.get('matched_rule', {}).get('short_name_clean', 'unknown')
+                local_rules[rule] += 1
+
+            else:
+                # Track failure
+                if failure_reason:
+                    local_debug_counts[failure_reason] += 1
+                else:
+                    local_debug_counts['no_alternative_found'] += 1
+
+                if failed_depth is not None:
+                    local_failed_depths[failed_depth] += 1
+
+        return {
+            'pairs': pairs,
+            'debug_counts': dict(local_debug_counts),
+            'rejection_stats': dict(local_rejection_stats),
+            'failed_depths': dict(local_failed_depths),
+            'successful_depths': dict(local_successful_depths),
+            'rules': dict(local_rules)
+        }
+
+    # Process submissions in parallel
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(process_submission_threads, sub_id, mods): sub_id
+                  for sub_id, mods in mod_comments_by_submission.items()}
+
+        for future in as_completed(futures):
+            result = future.result()
+
+            # Aggregate results (no lock needed - main thread only)
+            thread_pairs.extend(result['pairs'])
+
+            for key, value in result['debug_counts'].items():
+                debug_counts[key] = debug_counts.get(key, 0) + value
+
+            for key, value in result['rejection_stats'].items():
+                alternative_rejection_stats[key] = alternative_rejection_stats.get(key, 0) + value
+
+            for depth, count in result['failed_depths'].items():
+                failed_depth_distribution[depth] += count
+
+            for depth, count in result['successful_depths'].items():
+                successful_depth_distribution[depth] += count
+
+            for rule, count in result['rules'].items():
+                rule_stats[rule] = rule_stats.get(rule, 0) + count
+
+    return {
+        'thread_pairs': thread_pairs,
+        'success_count': len(thread_pairs),
+        'rule_stats': rule_stats,
+        'debug_counts': debug_counts,
+        'alternative_rejection_stats': alternative_rejection_stats,
+        'failed_depth_distribution': failed_depth_distribution,
+        'successful_depth_distribution': successful_depth_distribution
+    }
+
+
+# ============================================================================
+# SUBREDDIT PROCESSING
+# ============================================================================
+
 def process_subreddit(args: tuple) -> Dict[str, Any]:
     """Process single subreddit: build trees and create discussion threads."""
     subreddit_name, complete_rule_set = args
 
-    # Create worker logger with subreddit identifier in subdirectory
     worker_logger = get_stage_logger(6, "build_trees_and_threads", worker_identifier=f"subreddits/{subreddit_name}")
-
     worker_logger.info(f"🔄 Processing {subreddit_name}")
     start_time = time.time()
 
     try:
-        # Define file paths
-        submission_comments_file = os.path.join(PATHS['organized_comments'], f"{subreddit_name}_submission_comments.pkl")
+        # Define paths
+        submission_comments_dir = os.path.join(PATHS['organized_comments'], subreddit_name)
         match_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
-
         trees_output = os.path.join(PATHS['comment_trees'], f"{subreddit_name}_comment_trees.pkl")
         threads_output = os.path.join(PATHS['discussion_threads'], f"{subreddit_name}_discussion_threads.pkl")
 
-        # Ensure both output directories exist
         ensure_directory(trees_output)
         ensure_directory(threads_output)
 
-        # Check if input files exist
-        for file_path in [submission_comments_file, match_file]:
-            if not os.path.exists(file_path):
-                return {
-                    'subreddit': subreddit_name,
-                    'status': 'failed',
-                    'error': f"Missing file: {file_path}",
-                    'trees_built': 0,
-                    'successful_pairs': 0,
-                    'total_mod_comments': 0
-                }
-
-        # Load submission comments
-        with open(submission_comments_file, 'rb') as f:
-            submission_comments = pickle.load(f)
-
-        if not submission_comments:
+        # Validate inputs
+        if not os.path.exists(submission_comments_dir) or not os.path.isdir(submission_comments_dir):
             return {
                 'subreddit': subreddit_name,
                 'status': 'failed',
-                'error': "No submission comments found",
+                'error': f"Missing directory: {submission_comments_dir}",
                 'trees_built': 0,
                 'successful_pairs': 0,
                 'total_mod_comments': 0
             }
 
-        # Build comment trees (in memory)
-        worker_logger.info(f"  🌳 Building trees for {len(submission_comments)} submissions")
-        trees_data = build_subreddit_trees(submission_comments)
-        trees_data['subreddit'] = subreddit_name
-        trees_data['source_file'] = submission_comments_file
+        if not os.path.exists(match_file):
+            return {
+                'subreddit': subreddit_name,
+                'status': 'failed',
+                'error': f"Missing file: {match_file}",
+                'trees_built': 0,
+                'successful_pairs': 0,
+                'total_mod_comments': 0
+            }
 
-        # Save trees to disk
+        # Count submissions
+        submission_files = [f for f in os.listdir(submission_comments_dir)
+                           if f.startswith('submission_') and f.endswith('.pkl')]
+
+        if not submission_files:
+            return {
+                'subreddit': subreddit_name,
+                'status': 'failed',
+                'error': "No submission pickle files found",
+                'trees_built': 0,
+                'successful_pairs': 0,
+                'total_mod_comments': 0
+            }
+
+        # Build trees
+        trees_data = build_subreddit_trees(submission_comments_dir, subreddit_name, worker_logger)
+        total_comments = trees_data['metadata']['total_comments']
+
+        # Save trees
         with open(trees_output, 'wb') as f:
             pickle.dump(trees_data, f)
 
         trees_built = len(trees_data['trees'])
-        total_comments = trees_data['metadata']['total_comments']
         trees_file_size = get_file_size_gb(trees_output)
-
         worker_logger.info(f"  ✅ Built {trees_built} trees with {total_comments:,} comments ({trees_file_size:.2f} GB)")
 
         # Load moderator comments
@@ -588,102 +701,21 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
                 'jsd_from_uniform': 1.0
             }
 
-        # Build discussion thread pairs
+        # Build discussion threads
         worker_logger.info(f"  🧵 Building discussion threads from {len(mod_comments)} mod comments")
 
-        thread_pairs = []
-        success_count = 0
-        rule_stats = complete_rule_set.copy()  # Initialize with complete rule set
-        debug_counts = {
-            'missing_submission': 0,
-            'missing_parent_id': 0,
-            'missing_moderated_comment': 0,
-            'moderated_thread_has_mod_response': 0,
-            'moderated_thread_has_media': 0,
-            'moderated_thread_has_removed_or_deleted': 0,
-            'no_alternative_found': 0
-        }
-        # Track alternative rejection reasons (aggregated across all mod comments)
-        alternative_rejection_stats = {
-            'total_alternatives_checked': 0,
-            'rejected_mod_response': 0,
-            'rejected_removed_or_deleted': 0,
-            'rejected_has_media': 0,
-            'rejected_length_mismatch': 0
-        }
-        failed_depth_distribution = defaultdict(int)
-        successful_depth_distribution = defaultdict(int)
+        threads_result = build_discussion_threads(
+            mod_comments, submission_comments_dir, trees_data, complete_rule_set, worker_logger
+        )
 
-        # Track used unmoderated alternatives per submission to prevent reuse
-        used_alternatives_per_submission = defaultdict(set)
-
-        for mod_comment in mod_comments:
-            # Extract submission ID using utility
-            submission_id = extract_submission_id(mod_comment.get('link_id', ''))
-
-            if submission_id not in submission_comments:
-                debug_counts['missing_submission'] += 1
-                continue
-
-            comments = submission_comments[submission_id]
-
-            # Check for missing parent_id
-            moderated_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
-            if not moderated_comment_id:
-                debug_counts['missing_parent_id'] += 1
-                continue
-
-            # Check if moderated comment exists
-            if moderated_comment_id not in comments:
-                debug_counts['missing_moderated_comment'] += 1
-                continue
-
-            # Get used alternatives for this submission
-            used_for_submission = used_alternatives_per_submission[submission_id]
-
-            # Build thread pair with tracking of used alternatives
-            pair, failed_depth, failure_reason, rejection_stats = build_thread_pair(
-                mod_comment, comments, trees_data, worker_logger, used_for_submission
-            )
-
-            # Aggregate rejection statistics from alternative search
-            if rejection_stats:
-                alternative_rejection_stats['total_alternatives_checked'] += rejection_stats.get('total_alternatives_at_depth', 0)
-                alternative_rejection_stats['rejected_mod_response'] += rejection_stats.get('rejected_mod_response', 0)
-                alternative_rejection_stats['rejected_removed_or_deleted'] += rejection_stats.get('rejected_removed_or_deleted', 0)
-                alternative_rejection_stats['rejected_has_media'] += rejection_stats.get('rejected_has_media', 0)
-                alternative_rejection_stats['rejected_length_mismatch'] += rejection_stats.get('rejected_length_mismatch', 0)
-
-            if pair:
-                thread_pairs.append(pair)
-                success_count += 1
-
-                # Mark the unmoderated alternative as used for this submission
-                unmod_comment_id = pair.get('metadata', {}).get('unmoderated_comment_id')
-                if unmod_comment_id:
-                    used_alternatives_per_submission[submission_id].add(unmod_comment_id)
-
-                # Track successful depth distribution
-                moderated_thread = pair.get('moderated_thread', [])
-                if moderated_thread:
-                    successful_depth = len(moderated_thread)
-                    successful_depth_distribution[successful_depth] += 1
-
-                # Track rule statistics
-                matched_rule = mod_comment.get('matched_rule', {})
-                # Use short_name_clean to match initialization in load_target_subreddits_and_rules
-                rule = matched_rule.get('short_name_clean', 'unknown')
-                rule_stats[rule] = rule_stats.get(rule, 0) + 1
-            else:
-                # Track specific failure reason if provided
-                if failure_reason:
-                    debug_counts[failure_reason] = debug_counts.get(failure_reason, 0) + 1
-                else:
-                    debug_counts['no_alternative_found'] += 1
-
-                # Track failed depth distribution
-                if failed_depth is not None:
-                    failed_depth_distribution[failed_depth] += 1
+        # Extract results
+        thread_pairs = threads_result['thread_pairs']
+        success_count = threads_result['success_count']
+        rule_stats = threads_result['rule_stats']
+        debug_counts = threads_result['debug_counts']
+        alternative_rejection_stats = threads_result['alternative_rejection_stats']
+        failed_depth_distribution = threads_result['failed_depth_distribution']
+        successful_depth_distribution = threads_result['successful_depth_distribution']
 
         # Save discussion threads
         result_data = {
@@ -703,7 +735,8 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         success_rate = (success_count / len(mod_comments)) * 100 if mod_comments else 0
         threads_file_size = get_file_size_gb(threads_output)
 
-        worker_logger.info(f"  🎉 {subreddit_name}: {trees_built} trees, {success_count}/{len(mod_comments)} thread pairs ({success_rate:.1f}%) in {elapsed:.1f}s")
+        worker_logger.info(f"  🎉 {subreddit_name}: {trees_built} trees, {success_count}/{len(mod_comments)} "
+                          f"thread pairs ({success_rate:.1f}%) in {elapsed:.1f}s")
 
         # Calculate JSD from uniform distribution
         jsd_score = calculate_jsd_from_uniform(rule_stats)
@@ -740,16 +773,18 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         }
 
 
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
 def main():
     """Main execution function."""
-    # Initialize logging
     logger = get_stage_logger(6, "build_trees_and_threads")
     log_stage_start(logger, 6, "Build Comment Trees and Discussion Threads")
 
     start_time = time.time()
 
     try:
-        # Create directories
         create_directories()
 
         # Load subreddits and rule sets
@@ -763,14 +798,12 @@ def main():
 
         # Find subreddits with required input files
         subreddits_to_process = []
-
         for subreddit in subreddit_languages.keys():
-            submission_comments_file = os.path.join(PATHS['organized_comments'], f"{subreddit}_submission_comments.pkl")
+            submission_comments_dir = os.path.join(PATHS['organized_comments'], subreddit)
             match_file = os.path.join(PATHS['matched_comments'], f"{subreddit}_match.jsonl.zst")
 
-            if os.path.exists(submission_comments_file) and os.path.exists(match_file):
-                complete_rule_set = subreddit_rules.get(subreddit, {})
-                subreddits_to_process.append((subreddit, complete_rule_set))
+            if os.path.exists(submission_comments_dir) and os.path.isdir(submission_comments_dir) and os.path.exists(match_file):
+                subreddits_to_process.append((subreddit, subreddit_rules.get(subreddit, {})))
 
         if not subreddits_to_process:
             logger.error("❌ No subreddits found with required input files!")
@@ -795,26 +828,23 @@ def main():
         total_trees_size = sum(r.get('trees_file_size_gb', 0) for r in completed_results)
         total_threads_size = sum(r.get('threads_file_size_gb', 0) for r in completed_results)
 
-        # Filter to subreddits with ≥MIN_TEST_THREAD_PAIRS successful pairs (keep ALL, no top-N filtering)
+        # Filter to subreddits with ≥MIN_TEST_THREAD_PAIRS successful pairs
         qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS]
 
-        # Add language information to all qualified results
+        # Add language information
         for result in qualified_results:
-            subreddit_name = result['subreddit']
-            result['language'] = subreddit_languages.get(subreddit_name, 'unknown')
+            result['language'] = subreddit_languages.get(result['subreddit'], 'unknown')
 
-        # Separate English from other languages for ranking
+        # Separate and rank English subreddits
         english_results = [r for r in qualified_results if r.get('language') == 'en']
         other_language_results = [r for r in qualified_results if r.get('language') != 'en']
 
-        # Rank ALL English subreddits by JSD (ascending=True means lower JSD = better rank)
         english_results = rank_by_score(english_results, 'jsd_from_uniform', ascending=True)
 
-        # Other languages get no rank
         for result in other_language_results:
             result['rank'] = None
 
-        # Create summary statistics
+        # Create summary
         elapsed = time.time() - start_time
 
         summary = {
@@ -848,7 +878,8 @@ def main():
         logger.info(f"📊 Processed {len(completed_results)}/{len(subreddits_to_process)} subreddits")
         logger.info(f"🌳 Built {total_trees:,} comment trees")
         logger.info(f"🧵 Created {total_successful_pairs:,} discussion thread pairs")
-        logger.info(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%" if total_mod_comments > 0 else "📈 No mod comments processed")
+        logger.info(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%"
+                   if total_mod_comments > 0 else "📈 No mod comments processed")
         logger.info(f"✅ Qualified subreddits (≥{MIN_TEST_THREAD_PAIRS} pairs): {len(qualified_results)}")
         logger.info(f"   🏆 English subreddits: {len(english_results)}")
         logger.info(f"   🌍 Other language subreddits: {len(other_language_results)}")
@@ -856,7 +887,7 @@ def main():
 
         if failed_results:
             logger.warning(f"⚠️  Failed subreddits ({len(failed_results)}):")
-            for result in failed_results[:10]:  # Show first 10
+            for result in failed_results[:10]:
                 logger.warning(f"  {result['subreddit']}: {result.get('error', 'Unknown error')}")
             if len(failed_results) > 10:
                 logger.warning(f"  ... and {len(failed_results) - 10} more")

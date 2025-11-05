@@ -23,7 +23,7 @@ from config import PATHS, PROCESSES, ARCTIC_SHIFT_DATA, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, process_zst_file_multi)
-from utils.reddit import is_bot_or_automoderator, is_moderator_comment, normalize_subreddit_name
+from utils.reddit import is_bot_or_automoderator, is_moderator_comment, normalize_subreddit_name, clean_rule_text
 
 
 def get_all_arctic_shift_subreddits(logger):
@@ -83,6 +83,10 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
                 author = comment.get('author', '')
                 if is_bot_or_automoderator(author):
                     return {'matched': False}
+
+                # Add cleaned body text
+                body = comment.get('body', '')
+                comment['body_clean'] = clean_rule_text(body)
 
                 # Valid mod comment - write to output
                 return {
