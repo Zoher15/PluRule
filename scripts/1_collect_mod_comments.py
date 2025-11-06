@@ -55,7 +55,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
     Process a single subreddit from Arctic Shift: filter for mod comments and write to output.
     Uses process_zst_file_multi for efficient streaming.
     """
-    subreddit, arctic_file = args
+    subreddit, arctic_file, _ = args  # Third element is file_size (for sorting only)
     worker_logger = get_stage_logger(1, "collect_mod_comments", worker_identifier=f"subreddits/{subreddit}")
 
     worker_logger.info(f"🔄 Processing r/{subreddit}")
