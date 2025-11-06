@@ -179,7 +179,7 @@ def extract_community_rules(reddit: object, subreddit_name: str, logger) -> List
 
             # Add comprehensive text for embedding (used in Stage 4)
             rule_text = f"{rule_data['short_name_clean'].strip('.')}. {rule_data['description_clean']}"
-            if rule_data['violation_reason_clean'] != rule_data['short_name_clean']:
+            if rule_data['violation_reason_clean'] and rule_data['violation_reason_clean'] != rule_data['short_name_clean']:
                 rule_text = f"{rule_data['violation_reason_clean'].strip('.')}. {rule_text}"
             rule_data['rule_comprehensive'] = rule_text.strip()
 
