@@ -20,9 +20,9 @@ ARCTIC_SHIFT_DATA = "/N/project/cnets/datasets/reddit/Arcticshift/Subreddits/sub
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
 MIN_RULES_FOR_MATCHING = 2  # Minimum rules needed for semantic matching (skip subreddits with ≤1 rule)
-GOLD_PERCENTILE = 98  # Top 2% of similarity scores considered gold matches (Stage 4 Phase 2)
+GOLD_PERCENTILE = 99  # Top 2% of similarity scores considered gold matches (Stage 4 Phase 2)
 AMBIGUOUS_PERCENTILE = 98  # Top 2% of similarity scores considered ambiguous matches (Stage 4 Phase 2)
-MIN_MATCHED_COMMENTS = 25 # Minimum matched comments for subreddit inclusion in Stage 4
+MIN_MATCHED_COMMENTS = 1 # Minimum matched comments for subreddit inclusion in Stage 4
 MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 4
 
 # Stage 9: Dataset split configuration

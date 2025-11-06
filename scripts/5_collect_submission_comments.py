@@ -247,8 +247,10 @@ def main():
         logger.info(f"🗂️  Processing {len(subreddit_to_ids)} subreddits with {PROCESSES} processes")
         logger.info(f"⚡ Memory-optimized: <1GB per worker")
 
+        # Sort by number of submission IDs (largest first) to avoid stragglers
+        sorted_subreddits = sorted(subreddit_to_ids.items(), key=lambda x: len(x[1]), reverse=True)
         subreddit_args = [(subreddit, target_ids, PATHS['organized_comments'])
-                         for subreddit, target_ids in subreddit_to_ids.items()]
+                         for subreddit, target_ids in sorted_subreddits]
         results = process_files_parallel(subreddit_args, process_subreddit_comments, PROCESSES, logger)
 
         successful_results = [r for r in results if r['success']]

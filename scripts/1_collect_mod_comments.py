@@ -173,8 +173,11 @@ def main():
             log_stage_end(logger, 1, success=False, elapsed_time=time.time() - start_time)
             return 1
 
+        # Sort by file size (largest first) to avoid stragglers
+        subreddit_files = sorted(subreddit_files, key=lambda f: os.path.getsize(f), reverse=True)
+
         # Process subreddits in parallel
-        logger.info(f"🗂️  Processing {len(subreddit_files)} subreddits with {PROCESSES} processes")
+        logger.info(f"🗂️  Processing {len(subreddit_files)} subreddits with {PROCESSES} processes (largest first)")
         processing_start = time.time()
 
         results = process_files_parallel(subreddit_files, process_subreddit, PROCESSES, logger)
