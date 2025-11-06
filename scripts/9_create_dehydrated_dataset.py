@@ -85,9 +85,10 @@ def load_successful_submissions(logger) -> Tuple[Dict[str, Set[str]], Dict[str, 
             submission = json_loads(line)
             sub_id = submission.get('id')
             if sub_id in needed_ids:
-                # Skip submissions with [removed] in selftext_html
-                selftext_html = submission.get('selftext_html', '')
-                if selftext_html and '[removed]' in selftext_html:
+                # Skip submissions with [removed] or [deleted] in selftext, selftext_html, title, or author
+                selftext, selftext_html, title, author = submission.get('selftext', ''), submission.get('selftext_html', ''), submission.get('title', ''), submission.get('author', '')
+                if (selftext in ['[removed]', '[deleted]'] or (selftext_html and '[removed]' in selftext_html) or
+                    title in ['[removed]', '[deleted]'] or author in ['[deleted]', '[removed]']):
                     removed_count += 1
                     found_count += 1
                     continue
