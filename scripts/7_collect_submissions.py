@@ -18,11 +18,11 @@ import sys
 import os
 import time
 import pickle
-from typing import Dict, Set, Any, List
+from typing import Dict, Set, Any
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, ARCTIC_SHIFT_DATA, MIN_TEST_THREAD_PAIRS, create_directories
+from config import PATHS, PROCESSES, ARCTIC_SHIFT_DATA, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import write_json_file, process_files_parallel, json_loads, process_zst_file_multi, read_json_file
 from utils.reddit import validate_submission_structure
@@ -31,27 +31,6 @@ from utils.reddit import validate_submission_structure
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
-
-def load_qualified_subreddits_from_stage6(logger) -> List[Dict[str, Any]]:
-    """Load subreddits with >= MIN_TEST_THREAD_PAIRS successful thread pairs from Stage 6."""
-    summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
-
-    if not os.path.exists(summary_file):
-        logger.error(f"❌ Stage 6 summary not found: {summary_file}")
-        return []
-
-    try:
-        summary = read_json_file(summary_file)
-        qualified = [
-            stat for stat in summary.get('subreddit_stats', [])
-            if stat.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS
-        ]
-        logger.info(f"Loaded {len(qualified)} qualified subreddits (>= {MIN_TEST_THREAD_PAIRS} thread pairs)")
-        return qualified
-    except Exception as e:
-        logger.error(f"❌ Error loading Stage 6 summary: {e}")
-        return []
-
 
 def extract_submission_ids_from_threads(subreddit: str, logger) -> Set[str]:
     """Extract unique submission IDs from a subreddit's discussion thread pairs."""
@@ -203,14 +182,24 @@ def main():
             log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        # Load qualified subreddits from Stage 6 (>= MIN_TEST_THREAD_PAIRS pairs)
-        logger.info("📋 Loading qualified subreddits from Stage 6...")
-        qualified_subreddits = load_qualified_subreddits_from_stage6(logger)
+        # Load subreddits from Stage 6
+        logger.info("📋 Loading subreddits from Stage 6...")
+        summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
 
-        if not qualified_subreddits:
-            logger.error("❌ No qualified subreddits found from Stage 6!")
+        if not os.path.exists(summary_file):
+            logger.error(f"❌ Stage 6 summary not found: {summary_file}")
             log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
             return 1
+
+        summary = read_json_file(summary_file)
+        qualified_subreddits = summary.get('subreddit_stats', [])
+
+        if not qualified_subreddits:
+            logger.error("❌ No subreddits found from Stage 6!")
+            log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
+            return 1
+
+        logger.info(f"Loaded {len(qualified_subreddits)} subreddits from Stage 6")
 
         # Extract submission IDs from discussion thread pairs
         logger.info("🔍 Extracting submission IDs from discussion threads...")

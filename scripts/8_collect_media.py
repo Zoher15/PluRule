@@ -13,6 +13,7 @@ Priority Hierarchy (early stopping):
 
 Input:
 - data/submissions/{subreddit}_submissions.zst (from Stage 7)
+- data/stage7_submission_collection_stats.json (for subreddit list)
 
 Output:
 - media/{subreddit}/{submission_id}_{media_id}.{ext}
@@ -32,7 +33,7 @@ from urllib3.util.retry import Retry
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, MIN_TEST_THREAD_PAIRS
+from config import PATHS, PROCESSES
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end
 from utils.files import read_zst_lines, json_loads, write_json_file, process_files_parallel, ensure_directory, read_json_file
 
@@ -72,27 +73,6 @@ CONTENT_TYPE_TO_EXT = {
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
-
-def load_qualified_subreddits_from_stage6(logger) -> List[Dict[str, Any]]:
-    """Load subreddits with >= MIN_TEST_THREAD_PAIRS successful thread pairs."""
-    summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
-
-    if not os.path.exists(summary_file):
-        logger.error(f"❌ Stage 6 summary not found: {summary_file}")
-        return []
-
-    try:
-        summary = read_json_file(summary_file)
-        qualified = [
-            stat for stat in summary.get('subreddit_stats', [])
-            if stat.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS
-        ]
-        logger.info(f"Loaded {len(qualified)} qualified subreddits (>= {MIN_TEST_THREAD_PAIRS} thread pairs)")
-        return qualified
-    except Exception as e:
-        logger.error(f"❌ Error loading Stage 6 summary: {e}")
-        return []
-
 
 def extract_extension_from_url(url: str) -> Optional[str]:
     """Extract file extension from URL (without dot)."""
@@ -529,12 +509,24 @@ def main():
     start_time = time.time()
 
     try:
-        # Load qualified subreddits
-        qualified_stats = load_qualified_subreddits_from_stage6(logger)
-        if not qualified_stats:
-            logger.error("❌ No qualified subreddits found!")
+        # Load subreddits from Stage 7
+        logger.info("📋 Loading subreddits from Stage 7...")
+        summary_file = os.path.join(PATHS['data'], 'stage7_submission_collection_stats.json')
+
+        if not os.path.exists(summary_file):
+            logger.error(f"❌ Stage 7 summary not found: {summary_file}")
             log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
             return 1
+
+        summary = read_json_file(summary_file)
+        qualified_stats = summary.get('subreddit_stats', [])
+
+        if not qualified_stats:
+            logger.error("❌ No subreddits found from Stage 7!")
+            log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
+            return 1
+
+        logger.info(f"Loaded {len(qualified_stats)} subreddits from Stage 7")
 
         subreddits = [s['subreddit'] for s in qualified_stats]
         logger.info(f"Processing {len(subreddits)} subreddits")

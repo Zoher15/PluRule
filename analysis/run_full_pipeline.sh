@@ -9,7 +9,7 @@
 set -e  # Exit on any error
 
 # Parse arguments
-SKIP_EMBED=true
+SKIP_EMBED=false
 SKIP_CLUSTER=false
 SKIP_LABEL=false
 SKIP_PLOT=false
@@ -113,8 +113,9 @@ echo "✅ FULL PIPELINE COMPLETE!"
 echo "================================================================================"
 echo ""
 echo "Outputs:"
-echo "  - Embeddings: output/embeddings/test_1k_*_embeddings.tsv"
-echo "  - Metadata: output/embeddings/test_1k_*_metadata.tsv"
+echo "  - Subreddit Embeddings: output/embeddings/test_subreddit_embeddings.tsv"
+echo "  - Rule Embeddings: output/embeddings/all_rule_embeddings.tsv"
+echo "  - Metadata: output/embeddings/test_subreddit_metadata.tsv, output/embeddings/all_rule_metadata.tsv"
 echo "  - Grid search: output/clustering/*_grid_search_results.json"
 echo "  - Labels: output/clustering/*_cluster_labels.json"
 echo "  - Analysis: output/clustering/*_cluster_analysis.txt"

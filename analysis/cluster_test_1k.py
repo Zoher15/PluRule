@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cluster Test_1k Communities and Rules
+Cluster Test Communities and All Rules
 
 Two modes:
 1. Grid search: Find optimal UMAP + HDBSCAN parameters
@@ -17,10 +17,10 @@ Output:
   - output/clustering/rule_grid_search_results.json
 
 - Apply best mode:
-  - output/embeddings/test_1k_subreddit_metadata.tsv (updated with cluster columns)
-  - output/embeddings/test_1k_rule_metadata.tsv (updated with cluster columns)
-  - output/embeddings/test_1k_subreddit_embeddings_reduced.tsv
-  - output/embeddings/test_1k_rule_embeddings_reduced.tsv
+  - output/embeddings/test_subreddit_metadata.tsv (updated with cluster columns)
+  - output/embeddings/all_rule_metadata.tsv (updated with cluster columns)
+  - output/embeddings/test_subreddit_embeddings_reduced.tsv
+  - output/embeddings/all_rule_embeddings_reduced.tsv
 """
 
 import sys
@@ -313,12 +313,14 @@ def apply_best_clustering(embeddings: np.ndarray, metadata: pd.DataFrame, best_p
     metadata['cluster_probability'] = probabilities
 
     # Save updated metadata
-    metadata_file = embeddings_dir / f'test_1k_{entity_type}_metadata.tsv'
+    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
+    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+    metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
     metadata.to_csv(metadata_file, sep='\t', index=False)
     logger.info(f"  ✅ Saved clustered metadata to: {metadata_file}")
 
     # Save reduced embeddings
-    reduced_file = embeddings_dir / f'test_1k_{entity_type}_embeddings_reduced.tsv'
+    reduced_file = embeddings_dir / f'{prefix}_embeddings_reduced.tsv'
     np.savetxt(reduced_file, reduced_embeddings, delimiter='\t')
     logger.info(f"  ✅ Saved reduced embeddings to: {reduced_file}")
 
@@ -331,9 +333,11 @@ def process_entity_type(entity_type: str, param_grid: Dict, embeddings_dir: Path
     logger.info("="*80)
 
     # Load data
+    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
+    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
     embeddings, metadata = load_embeddings(
-        str(embeddings_dir / f'test_1k_{entity_type}_embeddings.tsv'),
-        str(embeddings_dir / f'test_1k_{entity_type}_metadata.tsv'),
+        str(embeddings_dir / f'{prefix}_embeddings.tsv'),
+        str(embeddings_dir / f'{prefix}_metadata.tsv'),
         logger
     )
 

@@ -25,8 +25,8 @@ Input (source of truth for manual overrides):
 Output (updated):
 - output/clustering/subreddit_cluster_labels.json (updated with new labels)
 - output/clustering/rule_cluster_labels.json (updated with new labels)
-- output/embeddings/test_1k_subreddit_metadata.tsv (cluster_label column + cluster_id merged)
-- output/embeddings/test_1k_rule_metadata.tsv (cluster_label column + cluster_id merged)
+- output/embeddings/test_subreddit_metadata.tsv (cluster_label column + cluster_id merged)
+- output/embeddings/all_rule_metadata.tsv (cluster_label column + cluster_id merged)
 """
 
 import json
@@ -208,7 +208,9 @@ def reapply_entity_labels(entity_type: str, embeddings_dir: Path, clustering_dir
     logger.info(f"✅ Updated {labels_file}")
 
     # Update metadata TSV
-    metadata_file = embeddings_dir / f'test_1k_{entity_type}_metadata.tsv'
+    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
+    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+    metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
     if not metadata_file.exists():
         logger.error(f"❌ Error: {metadata_file} not found")
         return

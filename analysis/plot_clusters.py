@@ -10,10 +10,10 @@ Usage:
     python plot_clusters.py --entity rule           # Plot only rules
 
 Input:
-- output/embeddings/test_1k_subreddit_embeddings_reduced.tsv
-- output/embeddings/test_1k_subreddit_metadata.tsv (with cluster_id and cluster_label)
-- output/embeddings/test_1k_rule_embeddings_reduced.tsv
-- output/embeddings/test_1k_rule_metadata.tsv (with cluster_id and cluster_label)
+- output/embeddings/test_subreddit_embeddings_reduced.tsv
+- output/embeddings/test_subreddit_metadata.tsv (with cluster_id and cluster_label)
+- output/embeddings/all_rule_embeddings_reduced.tsv
+- output/embeddings/all_rule_metadata.tsv (with cluster_id and cluster_label)
 - output/clustering/subreddit_grid_search_results.json (for UMAP params)
 - output/clustering/rule_grid_search_results.json (for UMAP params)
 
@@ -193,12 +193,14 @@ def plot_entity_type(entity_type: str, embeddings_dir: Path, clustering_dir: Pat
     logger.info("="*80)
 
     # Load metadata
-    metadata_file = embeddings_dir / f'test_1k_{entity_type}_metadata.tsv'
+    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
+    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+    metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
     logger.info(f"Loading metadata from {metadata_file}...")
     metadata = pd.read_csv(metadata_file, sep='\t')
 
     # Load reduced embeddings
-    reduced_file = embeddings_dir / f'test_1k_{entity_type}_embeddings_reduced.tsv'
+    reduced_file = embeddings_dir / f'{prefix}_embeddings_reduced.tsv'
     logger.info(f"Loading reduced embeddings from {reduced_file}...")
     embeddings = np.loadtxt(reduced_file, delimiter='\t')
     logger.info(f"  Loaded shape {embeddings.shape}")

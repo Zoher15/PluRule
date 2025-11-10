@@ -23,7 +23,7 @@ from config import PATHS, PROCESSES, ARCTIC_SHIFT_DATA, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, process_zst_file_multi)
-from utils.reddit import is_bot_or_automoderator, is_moderator_comment, normalize_subreddit_name, clean_rule_text
+from utils.reddit import is_bot_or_automoderator, is_moderator_reply_to_comment, normalize_subreddit_name, clean_rule_text
 
 
 def get_all_arctic_shift_subreddits(logger):
@@ -79,7 +79,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
                 comment = json_loads(line)
 
                 # Check if it's a moderator comment
-                if not is_moderator_comment(comment):
+                if not is_moderator_reply_to_comment(comment):
                     return {'matched': False}
 
                 # Filter out bots and AutoModerator

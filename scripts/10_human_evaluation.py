@@ -13,6 +13,7 @@ import os
 import sys
 import json
 import random
+import hashlib
 import time
 from typing import List, Dict, Any
 from collections import defaultdict
@@ -29,6 +30,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import PATHS, PROCESSES
 from utils.files import write_json_file
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def stable_hash(value: str) -> int:
+    """Create deterministic integer hash from string (reproducible across runs)."""
+    return int.from_bytes(hashlib.sha256(value.encode('utf-8')).digest(), 'big')
 
 # Configuration
 COMMENTS_PER_SUBREDDIT = 4
@@ -98,7 +107,7 @@ def sample_comments_from_subreddit(subreddit_data: Dict, num_samples: int, subre
 
     # Sample thread pairs using subreddit-specific RNG for independence
     sample_size = min(num_samples, len(thread_pairs))
-    subreddit_rng = random.Random(hash(subreddit_name))
+    subreddit_rng = random.Random(stable_hash(subreddit_name))
     sampled_pairs = subreddit_rng.sample(thread_pairs, sample_size)
 
     # Extract moderator comments

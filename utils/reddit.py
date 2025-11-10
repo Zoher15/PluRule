@@ -55,7 +55,20 @@ def is_moderator_comment(comment: Dict[str, Any]) -> bool:
         comment: Comment data dictionary
 
     Returns:
-        True if comment is from a moderator replying to another comment
+        True if comment is distinguished as a moderator
+    """
+    return comment.get('distinguished') == 'moderator'
+
+
+def is_moderator_reply_to_comment(comment: Dict[str, Any]) -> bool:
+    """
+    Check if a comment is a distinguished moderator comment replying to another comment.
+
+    Args:
+        comment: Comment data dictionary
+
+    Returns:
+        True if comment is from a moderator replying to another comment (not submission)
     """
     return (comment.get('distinguished') == 'moderator' and
             comment.get('parent_id', '').startswith('t1_'))

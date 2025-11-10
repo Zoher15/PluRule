@@ -11,12 +11,12 @@ Usage:
     python label_clusters.py --entity rule           # Label only rules
 
 Input:
-- output/embeddings/test_1k_subreddit_metadata.tsv (with cluster_id column)
-- output/embeddings/test_1k_rule_metadata.tsv (with cluster_id column)
+- output/embeddings/test_subreddit_metadata.tsv (with cluster_id column)
+- output/embeddings/all_rule_metadata.tsv (with cluster_id column)
 
 Output:
-- output/embeddings/test_1k_subreddit_metadata.tsv (updated with cluster_label column)
-- output/embeddings/test_1k_rule_metadata.tsv (updated with cluster_label column)
+- output/embeddings/test_subreddit_metadata.tsv (updated with cluster_label column)
+- output/embeddings/all_rule_metadata.tsv (updated with cluster_label column)
 - output/clustering/subreddit_cluster_labels.json
 - output/clustering/rule_cluster_labels.json
 """
@@ -190,7 +190,9 @@ def label_entity_type(entity_type: str, embeddings_dir: Path, clustering_dir: Pa
     logger.info("="*80)
 
     # Load clustered metadata
-    metadata_file = embeddings_dir / f'test_1k_{entity_type}_metadata.tsv'
+    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
+    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+    metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
     logger.info(f"Loading clustered metadata from {metadata_file}...")
     metadata = pd.read_csv(metadata_file, sep='\t')
 
@@ -307,7 +309,9 @@ def main():
         max_global_tokens = 0
 
         for entity_type in entity_types:
-            metadata_file = embeddings_dir / f'test_1k_{entity_type}_metadata.tsv'
+            # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
+            prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+            metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
             if not metadata_file.exists():
                 logger.error(f"Error: {metadata_file} not found. Run cluster_test_1k.py --apply-best first.")
                 return 1

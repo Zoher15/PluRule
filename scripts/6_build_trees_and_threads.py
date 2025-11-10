@@ -38,63 +38,6 @@ from utils.stats import calculate_jsd_from_uniform, rank_by_score
 # CONFIGURATION & DATA LOADING
 # ============================================================================
 
-def load_qualified_subreddits_from_stage6(logger=None) -> List[Dict[str, Any]]:
-    """
-    Load full stats for qualified subreddits from Stage 6 summary.
-
-    This function is used by Stage 7, 8, and 9 to get full statistics for subreddits
-    that have ≥25 successful thread pairs from Stage 6.
-
-    Args:
-        logger: Optional logger for messages (if None, uses print)
-
-    Returns:
-        List of subreddit stat dictionaries (full data from Stage 6), including:
-        - subreddit: name
-        - successful_pairs: number of successful thread pairs
-        - language: subreddit language
-        - rule_distribution: dict of rule name to count
-        - jsd_from_uniform: JSD score
-        - rank: JSD-based rank
-        - (and all other fields from Stage 6 summary)
-    """
-    from config import PATHS, MIN_TEST_THREAD_PAIRS
-
-    summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
-
-    if not os.path.exists(summary_file):
-        msg = f"❌ Stage 6 summary not found: {summary_file}"
-        if logger:
-            logger.error(msg)
-        else:
-            print(msg)
-        return []
-
-    try:
-        summary = read_json_file(summary_file)
-
-        # Get full stats for subreddits with >= MIN_TEST_THREAD_PAIRS successful thread pairs
-        qualified_subreddits = []
-        for subreddit_stat in summary.get('subreddit_stats', []):
-            if subreddit_stat.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS:
-                qualified_subreddits.append(subreddit_stat)
-
-        msg = f"Loaded {len(qualified_subreddits)} qualified subreddits (>= {MIN_TEST_THREAD_PAIRS} thread pairs) from Stage 6 summary"
-        if logger:
-            logger.info(msg)
-        else:
-            print(msg)
-
-        return qualified_subreddits
-
-    except Exception as e:
-        msg = f"❌ Error loading Stage 6 summary: {e}"
-        if logger:
-            logger.error(msg)
-        else:
-            print(msg)
-        return []
-
 def load_target_subreddits_and_rules(logger) -> Tuple[Dict[str, str], Dict[str, Dict[str, int]]]:
     """Load subreddits with their languages and complete rule sets."""
     subreddits_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
@@ -858,16 +801,13 @@ def main():
         total_trees_size = sum(r.get('trees_file_size_gb', 0) for r in completed_results)
         total_threads_size = sum(r.get('threads_file_size_gb', 0) for r in completed_results)
 
-        # Filter to subreddits with ≥MIN_TEST_THREAD_PAIRS successful pairs
-        qualified_results = [r for r in completed_results if r.get('successful_pairs', 0) >= MIN_TEST_THREAD_PAIRS]
-
-        # Add language information
-        for result in qualified_results:
+        # Add language information to all completed results
+        for result in completed_results:
             result['language'] = subreddit_languages.get(result['subreddit'], 'unknown')
 
         # Separate and rank English subreddits
-        english_results = [r for r in qualified_results if r.get('language') == 'en']
-        other_language_results = [r for r in qualified_results if r.get('language') != 'en']
+        english_results = [r for r in completed_results if r.get('language') == 'en']
+        other_language_results = [r for r in completed_results if r.get('language') != 'en']
 
         english_results = rank_by_score(english_results, 'jsd_from_uniform', ascending=True)
 
@@ -882,7 +822,6 @@ def main():
                 'total_subreddits_processed': len(subreddits_to_process),
                 'completed_subreddits': len(completed_results),
                 'failed_subreddits': len(failed_results),
-                'subreddits_with_500_plus_pairs': len(qualified_results),
                 'english_subreddits': len(english_results),
                 'other_language_subreddits': len(other_language_results),
                 'total_trees_built': total_trees,
@@ -910,7 +849,6 @@ def main():
         logger.info(f"🧵 Created {total_successful_pairs:,} discussion thread pairs")
         logger.info(f"📈 Overall success rate: {total_successful_pairs/total_mod_comments*100:.1f}%"
                    if total_mod_comments > 0 else "📈 No mod comments processed")
-        logger.info(f"✅ Qualified subreddits (≥{MIN_TEST_THREAD_PAIRS} pairs): {len(qualified_results)}")
         logger.info(f"   🏆 English subreddits: {len(english_results)}")
         logger.info(f"   🌍 Other language subreddits: {len(other_language_results)}")
         logger.info(f"Summary saved to: {summary_file}")

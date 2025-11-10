@@ -26,10 +26,12 @@ MIN_MATCHED_COMMENTS = 1 # Minimum matched comments for subreddit inclusion in S
 MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 4
 
 # Stage 9: Dataset split configuration
-MIN_TEST_THREAD_PAIRS = 25  # Minimum pairs required to include a subreddit (also used in Stage 6 filtering)
-TEST_PAIRS_PER_SUBREDDIT = 25  # First 25 pairs from each subreddit go to test
-VAL_SPLIT_RATIO = 0.1  # 10% of remaining pairs (after test) go to val
-TRAIN_SPLIT_RATIO = 0.9  # 90% of remaining pairs (after test) go to train
+# Note: No minimum threshold - all subreddits with ≥1 pair are included
+# Split logic per subreddit:
+#   n=1: 1 test, 0 val, 0 train
+#   n=2: 1 test, 0 val, 1 train
+#   3≤n<10: 1 test, 1 val, (n-2) train
+#   n≥10: 10% test, 10% val, 80% train (rounded, min 1 each)
 
 EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # Model used in Stage 4 for semantic matching
 # Auto-detect number of CPU cores (use all available cores)
