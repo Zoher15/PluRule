@@ -87,9 +87,8 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
                 continue
 
             # Filter [removed]/[deleted]
-            if any(sub.get(f, '') in ['[removed]', '[deleted]'] for f in ['selftext', 'title', 'author']):
-                continue
-            if sub.get('selftext_html') and '[removed]' in sub.get('selftext_html', ''):
+            if any('[removed]' in str(sub.get(f, '')) or '[deleted]' in str(sub.get(f, ''))
+                   for f in ['selftext', 'title', 'author', 'selftext_html']):
                 continue
 
             submissions[sub_id] = sub
@@ -186,15 +185,46 @@ def analyze_thread_distribution(subreddit_data: Dict[str, Dict], logger) -> Dict
                 histogram[labels[i]] += 1
                 break
 
+    # Calculate Pushshift vs ArcticShift distribution
+    # Threshold: end of Feb 2023 (1677628799 = 2023-02-28 23:59:59 UTC)
+    pushshift_cutoff = 1677628799
+    pushshift_count = 0
+    arcticshift_count = 0
+
+    for data in subreddit_data.values():
+        for pair in data['thread_pairs']:
+            created_utc = pair.get('mod_comment', {}).get('created_utc', 0)
+            # Convert to int if it's a string
+            if isinstance(created_utc, str):
+                created_utc = int(float(created_utc))
+            if created_utc <= pushshift_cutoff:
+                pushshift_count += 1
+            else:
+                arcticshift_count += 1
+
+    total_mod_comments = pushshift_count + arcticshift_count
+    pushshift_pct = (pushshift_count / total_mod_comments * 100) if total_mod_comments > 0 else 0
+    arcticshift_pct = (arcticshift_count / total_mod_comments * 100) if total_mod_comments > 0 else 0
+
     logger.info(f"  {n} subreddits, {percentiles['total']} pairs")
     logger.info(f"  Min: {percentiles['min']}, Median: {percentiles['median']}, Max: {percentiles['max']}, Mean: {percentiles['mean']:.1f}")
     logger.info(f"  Histogram: " + ", ".join(f"{k}:{v}" for k, v in histogram.items() if v > 0))
+    logger.info(f"  Data sources: Pushshift: {pushshift_count} ({pushshift_pct:.1f}%), ArcticShift: {arcticshift_count} ({arcticshift_pct:.1f}%)")
 
     return {
         'analysis_date': time.strftime('%Y-%m-%d %H:%M:%S'),
         'total_subreddits': n,
         'percentiles': percentiles,
         'histogram': histogram,
+        'data_sources': {
+            'pushshift_cutoff_date': '2023-02-28 23:59:59 UTC',
+            'pushshift_cutoff_timestamp': pushshift_cutoff,
+            'pushshift_mod_comments': pushshift_count,
+            'arcticshift_mod_comments': arcticshift_count,
+            'total_mod_comments': total_mod_comments,
+            'pushshift_percentage': round(pushshift_pct, 2),
+            'arcticshift_percentage': round(arcticshift_pct, 2)
+        },
         'split_strategy': 'Adaptive: n=1→(1,0,0), n=2→(1,0,1), 3≤n<10→(1,1,n-2), n≥10→(10%,10%,80%)',
         'subreddit_details': sorted([
             {

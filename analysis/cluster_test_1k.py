@@ -413,19 +413,19 @@ def main():
         # Note: UMAP uses cosine on original 4096D, HDBSCAN uses euclidean on reduced space
         param_grids = {
             'subreddit': {
-                'n_neighbors': [10, 25, 50, 100],
+                'n_neighbors': [10, 25, 50, 100, 200],
                 'n_components': [25, 50, 75, 100, 150],
-                'min_dist': [0.0, 0.3, 0.5],
-                'min_cluster_size': [5, 8, 10],
-                'min_samples': [3, 5, 10],
+                'min_dist': [0.0, 0.3, 0.5, 0.7],
+                'min_cluster_size': [5, 10, 20, 30],
+                'min_samples': [5, 10, 20, 30],
                 'metric': ['euclidean']
             },
             'rule': {
-                'n_neighbors': [10, 25, 50, 100],
+                'n_neighbors': [10, 25, 50, 100, 200],
                 'n_components': [25, 50, 75, 100, 150],
-                'min_dist': [0.3, 0.5, 0.7],
-                'min_cluster_size': [10, 20, 30],
-                'min_samples': [10, 15, 20, 30],
+                'min_dist': [0.0, 0.3, 0.5, 0.7],
+                'min_cluster_size': [5, 10, 20, 30],
+                'min_samples': [5, 10, 20, 30],
                 'metric': ['euclidean']
             }
         }

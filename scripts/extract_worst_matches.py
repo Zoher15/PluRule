@@ -29,7 +29,7 @@ def process_subreddit(subreddit):
         return subreddit, [], 0, 0
 
     # Load Stage 2 data to get rule details
-    stage2_file = os.path.join(PATHS['data'], 'stage2_sfw_subreddits_min_25_comments.json')
+    stage2_file = os.path.join(PATHS['data'], 'stage2_sfw_subreddits_min_1_comments.json')
     stage2_data = read_json_file(stage2_file)
 
     # Find rules for this subreddit

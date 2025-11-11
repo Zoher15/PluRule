@@ -12,6 +12,7 @@ logs/
 data/
 old/
 archive_new.tar.gz
+archive_final.tar.gz
 output/
 trash/
 

@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Embed Test Communities and All Dataset Rules
+Embed All Communities and All Dataset Rules
 
 Creates embeddings for:
-1. Subreddit embeddings: Test set only - based on title + public description from Stage 2
-2. Rule embeddings: ALL rules from train/val/test with cumulative violations (deduplicated)
+1. Subreddit embeddings: Unique subreddits from train/val/test - based on title + public description from Stage 2
+   - Deduplicated by subreddit name (each subreddit embedded once, even if in multiple splits)
+2. Rule embeddings: ALL rules from train/val/test with cumulative violations (deduplicated by text)
 
 Output:
 - output/embeddings/test_subreddit_embeddings.tsv - Embedding vectors (one per line, tab-separated)
-- output/embeddings/test_subreddit_metadata.tsv - Metadata (Subreddit, Language, Title, Description, FullText)
+- output/embeddings/test_subreddit_metadata.tsv - Metadata (Subreddit, Language, Title, Description, FullText, Splits)
 - output/embeddings/all_rule_embeddings.tsv - Embedding vectors (one per line, tab-separated)
 - output/embeddings/all_rule_metadata.tsv - Metadata (Subreddit, ShortName, Description, FullText, TotalViolations, Splits, NumSubreddits)
 
-Note: Rules are deduplicated by text content. If the same rule appears in multiple subreddits or splits,
-it is embedded only once, with cumulative violation counts and comma-separated subreddit/split lists.
+Note: Both subreddits and rules are deduplicated. Subreddits by name, rules by text content.
+Splits field shows comma-separated list of which datasets (train/val/test) contain each item.
 """
 
 import sys
@@ -43,30 +44,12 @@ from vllm import LLM
 from vllm.inputs import TokensPrompt
 
 
-def load_test_data(logger) -> Dict:
-    """Load test hydrated dataset."""
-    test_file = '/N/scratch/zkachwal/data-reddit-mod-collection-pipeline/data/test_hydrated.json.zst'
-
-    if not os.path.exists(test_file):
-        raise FileNotFoundError(f"test file not found: {test_file}")
-
-    logger.info(f"Loading test dataset from {test_file}...")
-
-    with open(test_file, 'rb') as f:
-        dctx = zstandard.ZstdDecompressor()
-        with dctx.stream_reader(f) as reader:
-            data = json.loads(reader.read())
-
-    logger.info(f"  Loaded {len(data.get('subreddits', []))} subreddits")
-    return data
-
-
-def load_all_datasets_for_rules(logger) -> Dict:
-    """Load train, val, and test datasets and combine all rules.
+def load_all_datasets(logger) -> Dict:
+    """Load train, val, and test datasets.
 
     Adds a 'split' field to each subreddit object to track which dataset it came from.
     """
-    base_path = '/N/scratch/zkachwal/data-reddit-mod-collection-pipeline/data'
+    base_path = PATHS['data']
     datasets = [
         ('train_hydrated.json.zst', 'train'),
         ('val_hydrated.json.zst', 'val'),
@@ -119,17 +102,35 @@ def load_stage2_data(logger) -> Dict[str, Dict]:
     return subreddit_map
 
 
-def prepare_subreddit_texts(test_data: Dict, stage2_map: Dict[str, Dict], logger) -> Tuple[List[str], List[Dict]]:
-    """Prepare subreddit texts for embedding and metadata."""
+def prepare_subreddit_texts(all_data: Dict, stage2_map: Dict[str, Dict], logger) -> Tuple[List[str], List[Dict]]:
+    """Prepare subreddit texts for embedding and metadata.
+
+    Deduplicates by subreddit name - each unique subreddit is embedded only once.
+    Tracks which splits the subreddit appears in.
+    """
     texts = []
     metadata = []
 
-    logger.info("Preparing subreddit texts...")
+    logger.info("Preparing subreddit texts from all datasets (train/val/test)...")
 
-    for subreddit_obj in test_data.get('subreddits', []):
+    # Deduplicate by subreddit name, track splits
+    subreddit_dedup = {}
+
+    for subreddit_obj in all_data.get('subreddits', []):
         subreddit_name = subreddit_obj.get('subreddit', '')
         language = subreddit_obj.get('language', 'unknown')
+        split = subreddit_obj.get('split', 'unknown')
 
+        if subreddit_name not in subreddit_dedup:
+            subreddit_dedup[subreddit_name] = {
+                'language': language,
+                'splits': set()
+            }
+
+        subreddit_dedup[subreddit_name]['splits'].add(split)
+
+    # Convert to lists for embedding
+    for subreddit_name, info in subreddit_dedup.items():
         # Get title and description from stage2
         stage2_data = stage2_map.get(subreddit_name, {})
         title = stage2_data.get('title', subreddit_name)
@@ -141,20 +142,21 @@ def prepare_subreddit_texts(test_data: Dict, stage2_map: Dict[str, Dict], logger
         texts.append(text)
         metadata.append({
             'subreddit': subreddit_name,
-            'language': language,
+            'language': info['language'],
             'title': title,
             'description': public_description,
-            'full_text': text  # Store full embedded text for later use
+            'full_text': text,  # Store full embedded text for later use
+            'splits': ','.join(sorted(info['splits']))  # Comma-separated list of splits
         })
 
-    logger.info(f"  Prepared {len(texts)} subreddit texts")
+    logger.info(f"  Prepared {len(texts)} unique subreddit texts (deduplicated)")
     return texts, metadata
 
 
 def prepare_rule_texts(all_data: Dict, stage2_map: Dict[str, Dict], logger) -> Tuple[List[str], List[Dict]]:
     """Prepare rule texts for embedding and metadata.
 
-    Processes all rules from train/val/test datasets with non-zero violations.
+    Processes all rules from train/val/test datasets that appear in thread pairs.
     Creates cumulative distribution across splits, automatically deduplicating rules.
     """
     logger.info("Preparing rule texts from all datasets (train/val/test)...")
@@ -169,13 +171,20 @@ def prepare_rule_texts(all_data: Dict, stage2_map: Dict[str, Dict], logger) -> T
         # Build rule lookup by short_name_clean
         rule_map = {r.get('short_name_clean', ''): r for r in subreddit_obj.get('rules', []) if r.get('short_name_clean')}
 
-        # Process rules with non-zero violations
-        for rule_name, count in subreddit_obj.get('rule_distribution', {}).items():
+        # Count rule occurrences from thread pairs
+        rule_counts = {}
+        for pair in subreddit_obj.get('thread_pairs', []):
+            rule_name = pair.get('metadata', {}).get('rule', '')
+            if rule_name:
+                rule_counts[rule_name] = rule_counts.get(rule_name, 0) + 1
+
+        # Process rules that appear in thread pairs
+        for rule_name, count in rule_counts.items():
             if count > 0 and rule_name in rule_map:
                 rule = rule_map[rule_name]
 
                 # Build rule text
-                text = f"Rule Name: {rule.get('short_name_clean', '')}\nRule Description: {rule.get('description_clean', '')}\nViolation Reason: {rule.get('violation_reason', '')}"
+                text = f"Rule Name: {rule.get('short_name_clean', '')}\nRule Description: {rule.get('description_clean', '')}\nViolation Reason: {rule.get('violation_reason_clean', '')}"
 
                 # Initialize or update dedup entry
                 if text not in rule_dedup:
@@ -313,13 +322,12 @@ def main():
     start_time = time.time()
 
     try:
-        # Load data
-        test_data = load_test_data(logger)
-        all_data = load_all_datasets_for_rules(logger)
+        # Load data (single function loads all datasets for both subreddits and rules)
+        all_data = load_all_datasets(logger)
         stage2_map = load_stage2_data(logger)
 
         # Prepare texts
-        subreddit_texts, subreddit_metadata = prepare_subreddit_texts(test_data, stage2_map, logger)
+        subreddit_texts, subreddit_metadata = prepare_subreddit_texts(all_data, stage2_map, logger)
         rule_texts, rule_metadata = prepare_rule_texts(all_data, stage2_map, logger)
 
         # Set CUDA device 0 by default
@@ -353,7 +361,7 @@ def main():
         logger.info("="*80)
 
         write_tsv_files(subreddit_embeddings, subreddit_metadata, output_dir / 'test_subreddit_embeddings.tsv',
-                       output_dir / 'test_subreddit_metadata.tsv', ['subreddit', 'language', 'title', 'description', 'full_text'], logger)
+                       output_dir / 'test_subreddit_metadata.tsv', ['subreddit', 'language', 'title', 'description', 'full_text', 'splits'], logger)
 
         write_tsv_files(rule_embeddings, rule_metadata, output_dir / 'all_rule_embeddings.tsv',
                        output_dir / 'all_rule_metadata.tsv', ['subreddit', 'short_name', 'description', 'full_text', 'total_violations', 'splits', 'num_subreddits'], logger)
