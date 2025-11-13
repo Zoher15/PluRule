@@ -136,8 +136,8 @@ def prepare_subreddit_texts(all_data: Dict, stage2_map: Dict[str, Dict], logger)
         title = stage2_data.get('title', subreddit_name)
         public_description = stage2_data.get('public_description', '')
 
-        # Format: "Title: {title}\n\nDescription: {public_description}"
-        text = f"r/{subreddit_name}: {title}\n\n{public_description}"
+        # Format: "{title}: {public_description}"
+        text = f"{title}: {public_description}"
 
         texts.append(text)
         metadata.append({
@@ -183,8 +183,8 @@ def prepare_rule_texts(all_data: Dict, stage2_map: Dict[str, Dict], logger) -> T
             if count > 0 and rule_name in rule_map:
                 rule = rule_map[rule_name]
 
-                # Build rule text
-                text = f"Rule Name: {rule.get('short_name_clean', '')}\nRule Description: {rule.get('description_clean', '')}\nViolation Reason: {rule.get('violation_reason_clean', '')}"
+                # Use rule_comprehensive (same format as rule matching)
+                text = rule.get('rule_comprehensive', '')
 
                 # Initialize or update dedup entry
                 if text not in rule_dedup:

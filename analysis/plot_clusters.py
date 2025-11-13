@@ -139,7 +139,7 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     # Create plot (Nature double-column: 180mm = 7.09 inches width, ~6 inch height)
     plt.figure(figsize=(7.09, 6))
 
-    point_size = 100 if entity_type == 'subreddit' else 75
+    point_size = 100 if entity_type == 'subreddit' else 100
     # Plot noise points first (very faint)
     if n_noise > 0:
         plt.scatter(coords_2d[noise_mask, 0], coords_2d[noise_mask, 1], c='lightgray', s=point_size, alpha=0.30)
@@ -147,7 +147,7 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     # Plot cluster points on top (more prominent colors)
     if entity_type == 'subreddit':
         plt.scatter(coords_2d[non_noise_mask, 0], coords_2d[non_noise_mask, 1],
-                    c=point_colors[non_noise_mask], s=point_size, alpha=1.0, edgecolors='white', linewidths=0.2)
+                    c=point_colors[non_noise_mask], s=point_size, alpha=1.0, edgecolors='white', linewidths=0.1)
     else:
         plt.scatter(coords_2d[non_noise_mask, 0], coords_2d[non_noise_mask, 1],
                     c=point_colors[non_noise_mask], s=point_size, alpha=1.0, edgecolors='white', linewidths=0.1)

@@ -422,3 +422,53 @@ def ensure_directory(file_path: str):
     directory = os.path.dirname(file_path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+
+
+def write_compressed_json(data: Any, file_path: str, level: int = 3, logger=None) -> float:
+    """
+    Write a JSON object to a compressed file.
+
+    Args:
+        data: Data to write (will be serialized to JSON)
+        file_path: Path to output .zst file
+        level: Compression level (1-22, default 3)
+        logger: Optional logger for messages
+
+    Returns:
+        Size of compressed file in MB
+    """
+    ensure_directory(file_path)
+
+    with open(file_path, 'wb') as f:
+        cctx = zstandard.ZstdCompressor(level=level)
+        with cctx.stream_writer(f) as compressor:
+            compressor.write(json_dumps(data).encode('utf-8'))
+
+    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+
+    if logger:
+        logger.info(f"  ✅ {file_path} ({size_mb:.1f} MB)")
+
+    return size_mb
+
+
+def read_compressed_json(file_path: str, logger=None) -> Any:
+    """
+    Read a JSON object from a compressed file.
+
+    Args:
+        file_path: Path to input .zst file
+        logger: Optional logger for messages
+
+    Returns:
+        Deserialized JSON data
+    """
+    if logger:
+        logger.info(f"  Loading {file_path}...")
+
+    with open(file_path, 'rb') as f:
+        dctx = zstandard.ZstdDecompressor()
+        with dctx.stream_reader(f) as reader:
+            data = json_loads(reader.read().decode('utf-8'))
+
+    return data

@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import PATHS, PROCESSES, MIN_MATCHED_COMMENTS, MIN_TEST_THREAD_PAIRS, create_directories
+from config import PATHS, PROCESSES, MIN_MATCHED_COMMENTS, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import (read_json_file, write_json_file, process_files_parallel,
                         read_zst_lines, json_loads, ensure_directory, get_file_size_gb)
@@ -213,10 +213,13 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
     1. If ANY comment (including all ancestors) has been removed/deleted body OR author
     2. If any comment has media content
     3. If ANY comment in the thread is by a moderator (we don't want mod-user back-and-forth)
-    4. UNMODERATED only: If leaf comment has moderator responses as direct children
+
+    Mode-specific checks:
+    4. MODERATED only: If leaf comment has been edited (edited != False)
+    5. UNMODERATED only: If leaf comment has moderator responses as direct children
 
     Returns:
-        (thread, has_issue, issue_type) where issue_type is 'mod_response', 'removed_or_deleted', 'has_media', 'moderator_in_thread', or None
+        (thread, has_issue, issue_type) where issue_type is 'mod_response', 'removed_or_deleted', 'has_media', 'moderator_in_thread', 'edited_comment', or None
     """
     path = []
     current_id = comment_id
@@ -242,6 +245,12 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
         # Check if ANY comment in the thread is by a moderator
         if is_moderator_comment(comment):
             return [], True, 'moderator_in_thread'
+
+        # Check if LEAF comment has been edited (moderated mode only)
+        if position == 0 and mode == 'moderated':
+            edited = comment.get('edited', False)
+            if edited is not False:
+                return [], True, 'edited_comment'
 
         # Check if LEAF comment has moderator responses (mode-dependent)
         if position == 0 and mode == 'unmoderated':
@@ -458,6 +467,7 @@ def build_discussion_threads(mod_comments: List[Dict], submission_comments_dir: 
         'moderated_thread_has_media': 0,
         'moderated_thread_has_removed_or_deleted': 0,
         'moderated_thread_has_moderator_in_thread': 0,
+        'moderated_thread_has_edited_comment': 0,
         'no_alternative_found': 0
     }
 

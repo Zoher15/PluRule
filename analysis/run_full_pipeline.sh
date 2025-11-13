@@ -9,7 +9,7 @@
 set -e  # Exit on any error
 
 # Parse arguments
-SKIP_EMBED=true
+SKIP_EMBED=false
 SKIP_CLUSTER=false
 SKIP_LABEL=false
 SKIP_PLOT=false

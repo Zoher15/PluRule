@@ -30,18 +30,17 @@ import sys
 import os
 import time
 import pickle
-import zstandard
 import json
 import random
 import hashlib
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Tuple
 from collections import defaultdict
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (PATHS, MIN_MATCHED_COMMENTS, create_directories)
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
-from utils.files import read_json_file, write_json_file, read_zst_lines, json_loads
+from utils.files import read_json_file, write_json_file, read_zst_lines, json_loads, write_compressed_json
 from utils.stats import calculate_jsd_from_uniform, rank_by_score
 
 # ============================================================================
@@ -57,7 +56,9 @@ def stable_hash(value: str) -> int:
 # ============================================================================
 
 def load_and_filter_all_data(logger) -> Dict[str, Dict]:
-    """Load submissions + threads, filter by Stage 8 success and [removed]."""
+    """Load submissions + threads, filter by Stage 8 success, [removed], and Pushshift only."""
+
+    PUSHSHIFT_CUTOFF = 1677628800  # March 1, 2023 00:00:00 UTC
 
     # Load Stage 8 successful IDs
     success_file = os.path.join(PATHS['data'], 'stage8_successful_submission_ids.json')
@@ -98,8 +99,8 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
 
     logger.info(f"  ✅ {sum(len(d['submissions']) for d in subreddit_data.values())} submissions from {len(subreddit_data)} subreddits")
 
-    # Load and filter thread pairs from Stage 6
-    logger.info(f"🧵 Loading and filtering thread pairs from Stage 6...")
+    # Load and filter thread pairs from Stage 6 (Pushshift only)
+    logger.info(f"🧵 Loading and filtering thread pairs from Stage 6 (Pushshift only)...")
     total_original, total_filtered = 0, 0
 
     for subreddit, data in subreddit_data.items():
@@ -112,7 +113,18 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
                 threads = pickle.load(f)
 
             original = threads.get('thread_pairs', [])
-            filtered = [p for p in original if p.get('metadata', {}).get('submission_id') in data['submissions']]
+            filtered = []
+            for p in original:
+                if p.get('metadata', {}).get('submission_id') not in data['submissions']:
+                    continue
+
+                # Only include Pushshift data (before March 1, 2023)
+                created_utc = p.get('mod_comment', {}).get('created_utc', 0)
+                if isinstance(created_utc, str):
+                    created_utc = int(float(created_utc))
+
+                if created_utc < PUSHSHIFT_CUTOFF:
+                    filtered.append(p)
 
             data['thread_pairs'] = filtered
             total_original += len(original)
@@ -120,7 +132,7 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
         except Exception as e:
             logger.warning(f"  Error loading threads for r/{subreddit}: {e}")
 
-    logger.info(f"  ✅ Filtered {total_original} -> {total_filtered} pairs")
+    logger.info(f"  ✅ Filtered {total_original} -> {total_filtered} pairs (Pushshift only)")
 
     # Remove subreddits with no thread pairs
     subreddit_data = {s: d for s, d in subreddit_data.items() if d['thread_pairs']}
@@ -185,46 +197,15 @@ def analyze_thread_distribution(subreddit_data: Dict[str, Dict], logger) -> Dict
                 histogram[labels[i]] += 1
                 break
 
-    # Calculate Pushshift vs ArcticShift distribution
-    # Threshold: end of Feb 2023 (1677628799 = 2023-02-28 23:59:59 UTC)
-    pushshift_cutoff = 1677628799
-    pushshift_count = 0
-    arcticshift_count = 0
-
-    for data in subreddit_data.values():
-        for pair in data['thread_pairs']:
-            created_utc = pair.get('mod_comment', {}).get('created_utc', 0)
-            # Convert to int if it's a string
-            if isinstance(created_utc, str):
-                created_utc = int(float(created_utc))
-            if created_utc <= pushshift_cutoff:
-                pushshift_count += 1
-            else:
-                arcticshift_count += 1
-
-    total_mod_comments = pushshift_count + arcticshift_count
-    pushshift_pct = (pushshift_count / total_mod_comments * 100) if total_mod_comments > 0 else 0
-    arcticshift_pct = (arcticshift_count / total_mod_comments * 100) if total_mod_comments > 0 else 0
-
     logger.info(f"  {n} subreddits, {percentiles['total']} pairs")
     logger.info(f"  Min: {percentiles['min']}, Median: {percentiles['median']}, Max: {percentiles['max']}, Mean: {percentiles['mean']:.1f}")
     logger.info(f"  Histogram: " + ", ".join(f"{k}:{v}" for k, v in histogram.items() if v > 0))
-    logger.info(f"  Data sources: Pushshift: {pushshift_count} ({pushshift_pct:.1f}%), ArcticShift: {arcticshift_count} ({arcticshift_pct:.1f}%)")
 
     return {
         'analysis_date': time.strftime('%Y-%m-%d %H:%M:%S'),
         'total_subreddits': n,
         'percentiles': percentiles,
         'histogram': histogram,
-        'data_sources': {
-            'pushshift_cutoff_date': '2023-02-28 23:59:59 UTC',
-            'pushshift_cutoff_timestamp': pushshift_cutoff,
-            'pushshift_mod_comments': pushshift_count,
-            'arcticshift_mod_comments': arcticshift_count,
-            'total_mod_comments': total_mod_comments,
-            'pushshift_percentage': round(pushshift_pct, 2),
-            'arcticshift_percentage': round(arcticshift_pct, 2)
-        },
         'split_strategy': 'Adaptive: n=1→(1,0,0), n=2→(1,0,1), 3≤n<10→(1,1,n-2), n≥10→(10%,10%,80%)',
         'subreddit_details': sorted([
             {
@@ -427,16 +408,6 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
     return dehydrated
 
 
-def write_compressed_dataset(dataset: Dict, filepath: str, logger) -> float:
-    """Write dataset as compressed JSON."""
-    with open(filepath, 'wb') as f:
-        cctx = zstandard.ZstdCompressor(level=3)
-        with cctx.stream_writer(f) as compressor:
-            compressor.write(json.dumps(dataset).encode('utf-8'))
-
-    size_mb = os.path.getsize(filepath) / (1024 * 1024)
-    logger.info(f"  ✅ {filepath} ({size_mb:.1f} MB)")
-    return size_mb
 
 
 # ============================================================================
@@ -567,12 +538,12 @@ def main():
 
             # Hydrated
             hydrated_file = os.path.join(PATHS['data'], f'{split}_hydrated.json.zst')
-            hydrated_size = write_compressed_dataset(dataset, hydrated_file, logger)
+            hydrated_size = write_compressed_json(dataset, hydrated_file, logger=logger)
 
             # Dehydrated
             dehydrated = dehydrate_dataset(dataset)
             dehydrated_file = os.path.join(PATHS['data'], f'{split}_dehydrated.json.zst')
-            dehydrated_size = write_compressed_dataset(dehydrated, dehydrated_file, logger)
+            dehydrated_size = write_compressed_json(dehydrated, dehydrated_file, logger=logger)
 
             output_files[split] = {
                 'hydrated': {'path': hydrated_file, 'size_mb': hydrated_size},

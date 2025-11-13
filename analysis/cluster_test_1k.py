@@ -171,7 +171,6 @@ def process_umap_params(umap_params_tuple, embeddings, hdbscan_params_list, iter
     Used by grid search for parallel processing.
     """
     n_neighbors, n_components, min_dist = umap_params_tuple
-    umap_params = {'n_neighbors': n_neighbors, 'n_components': n_components, 'min_dist': min_dist}
 
     # Run UMAP once
     umap_start = time.time()
@@ -185,7 +184,6 @@ def process_umap_params(umap_params_tuple, embeddings, hdbscan_params_list, iter
 
         # Unpack HDBSCAN parameters
         min_cluster_size, min_samples, metric = hdbscan_params_tuple
-        hdbscan_params = {'min_cluster_size': min_cluster_size, 'min_samples': min_samples, 'metric': metric}
 
         # Run HDBSCAN
         hdbscan_start = time.time()
@@ -414,18 +412,18 @@ def main():
         param_grids = {
             'subreddit': {
                 'n_neighbors': [10, 25, 50, 100, 200],
-                'n_components': [25, 50, 75, 100, 150],
-                'min_dist': [0.0, 0.3, 0.5, 0.7],
-                'min_cluster_size': [5, 10, 20, 30],
-                'min_samples': [5, 10, 20, 30],
+                'n_components': [25, 50, 75, 100, 150, 200],
+                'min_dist': [0.3, 0.5, 0.7, 1.0],
+                'min_cluster_size': [10, 20, 30],
+                'min_samples': [10, 20, 30],
                 'metric': ['euclidean']
             },
             'rule': {
                 'n_neighbors': [10, 25, 50, 100, 200],
-                'n_components': [25, 50, 75, 100, 150],
-                'min_dist': [0.0, 0.3, 0.5, 0.7],
-                'min_cluster_size': [5, 10, 20, 30],
-                'min_samples': [5, 10, 20, 30],
+                'n_components': [25, 50, 75, 100, 150, 200],
+                'min_dist': [0.3, 0.5, 0.7, 1.0],
+                'min_cluster_size': [10, 20, 30],
+                'min_samples': [10, 20, 30],
                 'metric': ['euclidean']
             }
         }
