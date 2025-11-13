@@ -13,9 +13,9 @@ import multiprocessing
 # =============================================================================
 
 # Base directories
-BASE_DATA = "/data3/zkachwal/reddit-mod-collection-pipeline"
-REDDIT_DATA = "/gpfs/slate-cnets/datasets/reddit/Pushshift"
-ARCTIC_SHIFT_DATA = "/gpfs/slate-cnets/datasets/reddit/Arcticshift/Subreddits/subreddits"
+BASE_DATA = "/N/scratch/zkachwal/data-reddit-mod-collection-pipeline"
+REDDIT_DATA = "/N/project/cnets/datasets/reddit/Pushshift"
+ARCTIC_SHIFT_DATA = "/N/project/cnets/datasets/reddit/Arcticshift/Subreddits/subreddits"
 
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
