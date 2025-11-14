@@ -442,7 +442,13 @@ def write_compressed_json(data: Any, file_path: str, level: int = 3, logger=None
     with open(file_path, 'wb') as f:
         cctx = zstandard.ZstdCompressor(level=level)
         with cctx.stream_writer(f) as compressor:
-            compressor.write(json_dumps(data).encode('utf-8'))
+            try:
+                # Try orjson/ujson first (faster)
+                json_str = json_dumps(data)
+            except (TypeError, ValueError):
+                # Fall back to standard json.dumps if orjson fails (e.g., non-string dict keys)
+                json_str = json.dumps(data)
+            compressor.write(json_str.encode('utf-8'))
 
     size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
