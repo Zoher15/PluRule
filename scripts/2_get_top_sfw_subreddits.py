@@ -178,9 +178,10 @@ def extract_community_rules(reddit: object, subreddit_name: str, logger) -> List
             rule_data['violation_reason_clean'] = clean_rule_text(rule_data.get('violation_reason', ''))
 
             # Add comprehensive text for embedding (used in Stage 4)
-            rule_text = f"{rule_data['short_name_clean'].strip('.')}. {rule_data['description_clean']}"
-            if rule_data['violation_reason_clean'] and rule_data['violation_reason_clean'] != rule_data['short_name_clean']:
-                rule_text = f"{rule_data['violation_reason_clean'].strip('.')}. {rule_text}"
+            rule_text = ""
+            if rule_data['violation_reason_clean']:
+                rule_text = f"Violation: {rule_data['violation_reason_clean']}\n"
+            rule_text += f"Rule: {rule_data['short_name_clean'].rstrip('.')}. {rule_data['description_clean']}"
             rule_data['rule_comprehensive'] = rule_text.strip()
 
             # Remove PRAW internals

@@ -13,10 +13,10 @@ echo ""
 # echo "✅ Stage 4 complete"
 # echo ""
 
-# echo "Stage 5: Collecting submission comments..."
-# python scripts/5_collect_submission_comments.py
-# echo "✅ Stage 5 complete"
-# echo ""
+echo "Stage 5: Collecting submission comments..."
+python scripts/5_collect_submission_comments.py
+echo "✅ Stage 5 complete"
+echo ""
 
 echo "Stage 6: Building trees and threads..."
 python scripts/6_build_trees_and_threads.py

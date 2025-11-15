@@ -27,7 +27,7 @@ from utils.reddit import is_bot_or_automoderator, is_moderator_reply_to_comment,
 
 
 def get_all_arctic_shift_subreddits(logger):
-    """Get list of all subreddit comment files from Arctic Shift with file sizes."""
+    """Get list of all subreddit comment files from Arctic Shift."""
     subreddit_files = []
 
     for first_char in os.listdir(ARCTIC_SHIFT_DATA):
@@ -39,11 +39,9 @@ def get_all_arctic_shift_subreddits(logger):
             if filename.endswith('_comments.zst'):
                 subreddit_name = filename.replace('_comments.zst', '')
                 filepath = os.path.join(char_dir, filename)
-                file_size = os.path.getsize(filepath)
                 subreddit_files.append((
                     normalize_subreddit_name(subreddit_name),
-                    filepath,
-                    file_size
+                    filepath
                 ))
 
     logger.info(f"Found {len(subreddit_files)} subreddits in Arctic Shift")
@@ -176,11 +174,8 @@ def main():
             log_stage_end(logger, 1, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        # Sort by file size (largest first) to avoid stragglers
-        subreddit_files = sorted(subreddit_files, key=lambda f: f[2], reverse=True)
-
         # Process subreddits in parallel
-        logger.info(f"🗂️  Processing {len(subreddit_files)} subreddits with {PROCESSES} processes (largest first)")
+        logger.info(f"🗂️  Processing {len(subreddit_files)} subreddits with {PROCESSES} processes")
         processing_start = time.time()
 
         results = process_files_parallel(subreddit_files, process_subreddit, PROCESSES, logger)

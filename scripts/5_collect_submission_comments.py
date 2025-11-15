@@ -247,16 +247,9 @@ def main():
         logger.info(f"🗂️  Processing {len(subreddit_to_ids)} subreddits with {PROCESSES} processes")
         logger.info(f"⚡ Memory-optimized: <1GB per worker")
 
-        # Sort by Arctic Shift file size (largest first) to avoid stragglers
-        subreddit_with_sizes = []
-        for subreddit, target_ids in subreddit_to_ids.items():
-            arctic_file = get_arctic_shift_comment_file(subreddit)
-            file_size = os.path.getsize(arctic_file) if arctic_file and os.path.exists(arctic_file) else 0
-            subreddit_with_sizes.append((subreddit, target_ids, file_size))
-
-        sorted_subreddits = sorted(subreddit_with_sizes, key=lambda x: x[2], reverse=True)
+        # Prepare arguments for parallel processing
         subreddit_args = [(subreddit, target_ids, PATHS['organized_comments'])
-                         for subreddit, target_ids, _ in sorted_subreddits]
+                         for subreddit, target_ids in subreddit_to_ids.items()]
         results = process_files_parallel(subreddit_args, process_subreddit_comments, PROCESSES, logger)
 
         successful_results = [r for r in results if r['success']]
