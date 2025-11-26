@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Stage 9.5: Human Evaluation from Final Dataset
+Stage 11: Human Evaluation from Final Dataset
 
 Creates Google Forms for human evaluation of rule matching quality using the final
-Stage 9 dataset. Samples 4 moderator comments per subreddit and creates forms where
+Stage 10 dataset. Samples 4 moderator comments per subreddit and creates forms where
 each subreddit is a separate page with rules shown once at the top.
 
-Usage: python 9.5_human_evaluation.py
+Usage: python 11_human_evaluation.py
 """
 
 import os
@@ -371,13 +371,13 @@ def save_evaluation_metadata(all_forms_data: List[Dict], subreddit_pages: List[D
 
 def main():
     """Main execution function."""
-    logger = get_stage_logger(9.5, "human_evaluation")
-    log_stage_start(logger, 9.5, "Human Evaluation from Final Dataset")
+    logger = get_stage_logger(11, "human_evaluation")
+    log_stage_start(logger, 11, "Human Evaluation from Final Dataset")
 
     start_time = time.time()
 
     try:
-        print("🔬 Stage 9.5: Human Evaluation Setup")
+        print("🔬 Stage 11: Human Evaluation Setup")
         print(f"📊 Configuration:")
         print(f"  Comments per subreddit: {COMMENTS_PER_SUBREDDIT}")
         print(f"  Subreddits per form: {SUBREDDITS_PER_FORM}")
@@ -470,18 +470,18 @@ def main():
         print(f"  2. Collect responses from Google Forms")
         print(f"  3. Analyze agreement between embedding predictions and human labels")
 
-        print(f"\n✅ Stage 9.5 completed successfully!")
+        print(f"\n✅ Stage 11 completed successfully!")
         print(f"📁 Metadata saved to: {output_dir}")
 
         elapsed = time.time() - start_time
-        log_stage_end(logger, 9.5, success=True, elapsed_time=elapsed)
+        log_stage_end(logger, 11, success=True, elapsed_time=elapsed)
         return 0
 
     except Exception as e:
-        logger.error(f"❌ Stage 9.5 failed: {e}")
+        logger.error(f"❌ Stage 11 failed: {e}")
         import traceback
         traceback.print_exc()
-        log_stage_end(logger, 9.5, success=False, elapsed_time=time.time() - start_time)
+        log_stage_end(logger, 11, success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

@@ -36,12 +36,18 @@ import hashlib
 from typing import Dict, List, Tuple
 from collections import defaultdict
 
+# Disable vLLM's default logging configuration
+os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (PATHS, MIN_MATCHED_COMMENTS, create_directories)
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import read_json_file, write_json_file, read_zst_lines, json_loads, write_compressed_json
 from utils.stats import calculate_jsd_from_uniform, rank_by_score
+
+from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer
 
 # ============================================================================
 # Helper Functions
@@ -50,6 +56,139 @@ from utils.stats import calculate_jsd_from_uniform, rank_by_score
 def stable_hash(value: str) -> int:
     """Create deterministic integer hash from string (reproducible across runs)."""
     return int.from_bytes(hashlib.sha256(value.encode('utf-8')).digest(), 'big')
+
+
+# ============================================================================
+# LLM Judge Verification
+# ============================================================================
+
+def verify_mod_comments_with_llm(subreddit_data: Dict[str, Dict], subreddit_rules: Dict[str, List[Dict]], logger) -> Tuple[Dict[str, Dict], List[Dict]]:
+    """Use LLM judge to verify that mod comments actually cite the matched rule.
+
+    Args:
+        subreddit_data: Dict of {subreddit: {'submissions': {}, 'thread_pairs': []}}
+        subreddit_rules: Dict of {subreddit: [rule_dicts]}
+        logger: Logger instance
+
+    Returns:
+        (filtered_subreddit_data, verification_results): Filtered data and full LLM responses
+    """
+    logger.info("🤖 Initializing LLM judge for mod comment verification...")
+
+    # Initialize vLLM
+    model_name = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    llm = LLM(
+        model=model_name,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.95,
+        trust_remote_code=True,
+        max_model_len=8192  # Limit to reduce KV cache memory usage
+    )
+    sampling_params = SamplingParams(temperature=0, max_tokens=512, stop=["True", "False", "true", "false", "TRUE", "FALSE"], include_stop_str_in_output=True)
+
+    # Collect all verification tasks
+    verification_tasks = []
+    total_pairs = sum(len(d['thread_pairs']) for d in subreddit_data.values())
+    logger.info(f"  Preparing {total_pairs} mod comments for verification...")
+
+    for subreddit, data in subreddit_data.items():
+        rules = subreddit_rules.get(subreddit, [])
+        rule_map = {r.get('short_name_clean', ''): r for r in rules}
+
+        for pair_idx, pair in enumerate(data['thread_pairs']):
+            mod_comment = pair.get('mod_comment', {})
+            body_clean = mod_comment.get('body_clean', '')
+            matched_rule = pair.get('metadata', {}).get('rule', '')
+
+            # Get rule_comprehensive
+            rule_obj = rule_map.get(matched_rule)
+            rule_comprehensive = rule_obj.get('rule_comprehensive', matched_rule) if rule_obj else matched_rule
+
+            # Build prompt
+            prompt = f"""Does the following moderator comment cite or reference this rule?
+
+Moderator Comment: {body_clean}
+
+{rule_comprehensive}
+
+Answer only "True" or "False"."""
+
+            verification_tasks.append({
+                'subreddit': subreddit,
+                'pair_idx': pair_idx,
+                'mod_comment_id': pair.get('mod_comment_id'),
+                'matched_rule': matched_rule,
+                'rule_comprehensive': rule_comprehensive,
+                'body_clean': body_clean,
+                'prompt': prompt
+            })
+
+    # Batch inference
+    logger.info(f"  Running LLM inference on {len(verification_tasks)} prompts...")
+    prompts = [task['prompt'] for task in verification_tasks]
+    outputs = llm.generate(prompts, sampling_params,)
+
+    # Parse results
+    logger.info(f"  Parsing LLM responses...")
+    verification_results = []
+    pass_count = 0
+    fail_count = 0
+
+    for task, output in zip(verification_tasks, outputs):
+        response = output.outputs[0].text.strip()
+
+        # Parse True/False
+        is_valid = None
+        response_lower = response.lower()
+        if 'true' in response_lower:
+            is_valid = True
+            pass_count += 1
+        elif 'false' in response_lower:
+            is_valid = False
+            fail_count += 1
+        else:
+            # Ambiguous response, mark as fail to be conservative
+            is_valid = False
+            fail_count += 1
+            logger.warning(f"  Ambiguous response for {task['mod_comment_id']}: {response}")
+
+        verification_results.append({
+            'subreddit': task['subreddit'],
+            'mod_comment_id': task['mod_comment_id'],
+            'matched_rule': task['matched_rule'],
+            'rule_comprehensive': task['rule_comprehensive'],
+            'body_clean': task['body_clean'],
+            'llm_response': response,
+            'is_valid': is_valid,
+            'pair_idx': task['pair_idx']
+        })
+
+    logger.info(f"  ✅ Verification complete: {pass_count} passed, {fail_count} failed ({pass_count / len(verification_tasks) * 100:.1f}% pass rate)")
+
+    # Filter subreddit_data
+    logger.info(f"  Filtering thread pairs based on verification...")
+    filtered_data = {}
+
+    for subreddit, data in subreddit_data.items():
+        # Get verification results for this subreddit
+        subreddit_results = [r for r in verification_results if r['subreddit'] == subreddit]
+        valid_indices = {r['pair_idx'] for r in subreddit_results if r['is_valid']}
+
+        # Filter thread_pairs
+        original_count = len(data['thread_pairs'])
+        filtered_pairs = [pair for idx, pair in enumerate(data['thread_pairs']) if idx in valid_indices]
+
+        if filtered_pairs:
+            filtered_data[subreddit] = {
+                'submissions': data['submissions'],
+                'thread_pairs': filtered_pairs
+            }
+            logger.info(f"    r/{subreddit}: {original_count} → {len(filtered_pairs)} pairs")
+
+    logger.info(f"  Final: {len(filtered_data)} subreddits with verified data")
+
+    return filtered_data, verification_results
+
 
 # ============================================================================
 # Data Loading
@@ -90,6 +229,10 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
             # Filter [removed]/[deleted]
             if any('[removed]' in str(sub.get(f, '')) or '[deleted]' in str(sub.get(f, ''))
                    for f in ['selftext', 'title', 'author', 'selftext_html']):
+                continue
+
+            # Filter submissions from distinguished moderators
+            if sub.get('distinguished') in ['moderator', 'admin']:
                 continue
 
             submissions[sub_id] = sub
@@ -434,6 +577,44 @@ def main():
         # Load metadata
         logger.info("📚 Loading subreddit metadata...")
         subreddit_rules, subreddit_languages = load_subreddit_metadata(logger)
+
+        # LLM Judge Verification
+        logger.info("🔍 Verifying mod comments with LLM judge...")
+        subreddit_data, verification_results = verify_mod_comments_with_llm(subreddit_data, subreddit_rules, logger)
+
+        # Save verification results
+        verification_file = os.path.join(PATHS['data'], 'stage9_llm_verification_results.json')
+        verification_stats = {
+            'metadata': {
+                'stage': 9,
+                'creation_date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'model': 'Qwen/Qwen3-30B-A3B-Instruct-2507',
+                'total_verified': len(verification_results),
+                'passed': sum(1 for r in verification_results if r['is_valid']),
+                'failed': sum(1 for r in verification_results if not r['is_valid']),
+                'pass_rate': sum(1 for r in verification_results if r['is_valid']) / len(verification_results) * 100 if verification_results else 0
+            },
+            'per_subreddit_stats': {},
+            'verification_results': verification_results
+        }
+
+        # Calculate per-subreddit stats
+        for subreddit in set(r['subreddit'] for r in verification_results):
+            sub_results = [r for r in verification_results if r['subreddit'] == subreddit]
+            verification_stats['per_subreddit_stats'][subreddit] = {
+                'total': len(sub_results),
+                'passed': sum(1 for r in sub_results if r['is_valid']),
+                'failed': sum(1 for r in sub_results if not r['is_valid']),
+                'pass_rate': sum(1 for r in sub_results if r['is_valid']) / len(sub_results) * 100
+            }
+
+        write_json_file(verification_stats, verification_file, pretty=True)
+        logger.info(f"  ✅ Saved verification results to: {verification_file}")
+
+        if not subreddit_data:
+            logger.error("❌ No data remaining after LLM verification!")
+            log_stage_end(logger, 9, success=False, elapsed_time=time.time() - start_time)
+            return 1
 
         # Analyze distribution
         logger.info("📊 Analyzing distribution...")

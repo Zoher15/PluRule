@@ -11,11 +11,11 @@ Usage:
     python label_clusters.py --entity rule           # Label only rules
 
 Input:
-- output/embeddings/test_subreddit_metadata.tsv (with cluster_id column)
+- output/embeddings/all_subreddit_metadata.tsv (with cluster_id column)
 - output/embeddings/all_rule_metadata.tsv (with cluster_id column)
 
 Output:
-- output/embeddings/test_subreddit_metadata.tsv (updated with cluster_label column)
+- output/embeddings/all_subreddit_metadata.tsv (updated with cluster_label column)
 - output/embeddings/all_rule_metadata.tsv (updated with cluster_label column)
 - output/clustering/subreddit_cluster_labels.json
 - output/clustering/rule_cluster_labels.json
@@ -33,6 +33,7 @@ import argparse
 
 # Disable vLLM's default logging configuration
 os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 # os.environ['TQDM_DISABLE'] = '1'
 
 # Add parent directory to path
@@ -190,8 +191,8 @@ def label_entity_type(entity_type: str, embeddings_dir: Path, clustering_dir: Pa
     logger.info("="*80)
 
     # Load clustered metadata
-    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
-    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+    # Use 'all_rule' for rules, 'all_subreddit' for subreddits (both from train/val/test)
+    prefix = 'all_rule' if entity_type == 'rule' else 'all_subreddit'
     metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
     logger.info(f"Loading clustered metadata from {metadata_file}...")
     metadata = pd.read_csv(metadata_file, sep='\t')
@@ -309,8 +310,8 @@ def main():
         max_global_tokens = 0
 
         for entity_type in entity_types:
-            # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
-            prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+            # Use 'all_rule' for rules, 'all_subreddit' for subreddits (both from train/val/test)
+            prefix = 'all_rule' if entity_type == 'rule' else 'all_subreddit'
             metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
             if not metadata_file.exists():
                 logger.error(f"Error: {metadata_file} not found. Run cluster_test_1k.py --apply-best first.")
@@ -340,6 +341,19 @@ def main():
         # Label each entity type
         for entity_type in entity_types:
             label_entity_type(entity_type, embeddings_dir, clustering_dir, llm, tokenizer, response_budget, logger)
+
+        logger.info("\n" + "="*80)
+        logger.info("POST-PROCESSING: MERGING DUPLICATE LABELS")
+        logger.info("="*80)
+
+        # Import and run reapply_cluster_labels to merge any duplicate labels
+        from reapply_cluster_labels import reapply_entity_labels
+
+        for entity_type in entity_types:
+            try:
+                reapply_entity_labels(entity_type, embeddings_dir, clustering_dir, logger)
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to merge duplicates for {entity_type}: {e}")
 
         logger.info("\n" + "="*80)
         logger.info("COMPLETE")

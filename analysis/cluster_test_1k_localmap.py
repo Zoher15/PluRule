@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Cluster Test Communities and All Rules
+Cluster Test Communities and All Rules with LocalMAP
 
 Two modes:
-1. Grid search: Find optimal UMAP + HDBSCAN parameters
+1. Grid search: Find optimal LocalMAP + HDBSCAN parameters
 2. Apply best: Apply best parameters and save clustered metadata
 
 Usage:
-    python cluster_test_1k.py --grid-search    # Run grid search only
-    python cluster_test_1k.py --apply-best     # Apply best params and save clusters
-    python cluster_test_1k.py                  # Run both (grid search then apply)
+    python cluster_test_1k_localmap.py --grid-search    # Run grid search only
+    python cluster_test_1k_localmap.py --apply-best     # Apply best params and save clusters
+    python cluster_test_1k_localmap.py                  # Run both (grid search then apply)
 
 Output:
 - Grid search mode:
-  - output/clustering/subreddit_grid_search_results.json
-  - output/clustering/rule_grid_search_results.json
+  - output/clustering/subreddit_localmap_grid_search_results.json
+  - output/clustering/rule_localmap_grid_search_results.json
 
 - Apply best mode:
-  - output/embeddings/all_subreddit_metadata.tsv (updated with cluster columns)
-  - output/embeddings/all_rule_metadata.tsv (updated with cluster columns)
-  - output/embeddings/all_subreddit_embeddings_reduced.tsv
-  - output/embeddings/all_rule_embeddings_reduced.tsv
+  - output/embeddings/all_subreddit_metadata_localmap.tsv (updated with cluster columns)
+  - output/embeddings/all_rule_metadata_localmap.tsv (updated with cluster columns)
+  - output/embeddings/all_subreddit_embeddings_reduced_localmap.tsv
+  - output/embeddings/all_rule_embeddings_reduced_localmap.tsv
 """
 
 import sys
@@ -51,7 +51,7 @@ parent_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(parent_dir))
 
 from config import PROCESSES
-import umap
+from pacmap import LocalMAP
 import hdbscan
 from hdbscan import validity_index
 
@@ -72,36 +72,41 @@ def load_embeddings(embeddings_file: str, metadata_file: str, logger) -> Tuple[n
     return embeddings, metadata
 
 
-def run_cluster(embeddings: np.ndarray, umap_params: Dict, hdbscan_params: Dict,
-                umap_static_params: Dict = None, hdbscan_static_params: Dict = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, object]:
-    """Run UMAP dimensionality reduction followed by HDBSCAN clustering.
+def run_cluster(embeddings: np.ndarray, localmap_params: Dict, hdbscan_params: Dict,
+                localmap_static_params: Dict = None, hdbscan_static_params: Dict = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, object]:
+    """Run LocalMAP dimensionality reduction followed by HDBSCAN clustering.
 
     This is the core reusable function used by both grid search and final application.
 
     Args:
         embeddings: Original high-dimensional embeddings
-        umap_params: Dict with 'n_neighbors', 'n_components', 'min_dist'
+        localmap_params: Dict with 'n_neighbors', 'n_components', 'low_dist_thres'
         hdbscan_params: Dict with 'min_cluster_size', 'min_samples', 'metric'
-        umap_static_params: Optional static UMAP params (defaults: cosine metric, random_state=0)
+        localmap_static_params: Optional static LocalMAP params (defaults: MN_ratio=0.5, FP_ratio=2.0, apply_pca=True)
         hdbscan_static_params: Optional static HDBSCAN params (defaults: eom selection)
 
     Returns:
         Tuple of (reduced_embeddings, labels, probabilities, clusterer)
     """
     # Default static parameters
-    if umap_static_params is None:
-        umap_static_params = {'metric': 'cosine', 'random_state': 0, 'verbose': False}
+    if localmap_static_params is None:
+        localmap_static_params = {
+            'MN_ratio': 0.5,
+            'FP_ratio': 2.0,
+            'apply_pca': True,
+            'verbose': False
+        }
     if hdbscan_static_params is None:
         hdbscan_static_params = {'cluster_selection_method': 'eom'}
 
-    # UMAP reduction
-    reducer = umap.UMAP(
-        n_neighbors=umap_params['n_neighbors'],
-        n_components=umap_params['n_components'],
-        min_dist=umap_params['min_dist'],
-        **umap_static_params
+    # LocalMAP reduction
+    reducer = LocalMAP(
+        n_components=localmap_params['n_components'],
+        n_neighbors=localmap_params['n_neighbors'],
+        low_dist_thres=localmap_params['low_dist_thres'],
+        **localmap_static_params
     )
-    reduced_embeddings = reducer.fit_transform(embeddings)
+    reduced_embeddings = reducer.fit_transform(embeddings, init="pca")
 
     # HDBSCAN clustering
     clusterer = hdbscan.HDBSCAN(
@@ -164,19 +169,24 @@ def evaluate_clustering(embeddings: np.ndarray, labels: np.ndarray, clusterer) -
     }
 
 
-def process_umap_params(umap_params_tuple, embeddings, hdbscan_params_list, iteration_start,
-                       umap_static_params, hdbscan_static_params):
-    """Process a single UMAP parameter combination with all HDBSCAN combinations.
+def process_localmap_params(localmap_params_tuple, embeddings, hdbscan_params_list, iteration_start,
+                            localmap_static_params, hdbscan_static_params):
+    """Process a single LocalMAP parameter combination with all HDBSCAN combinations.
 
     Used by grid search for parallel processing.
     """
-    n_neighbors, n_components, min_dist = umap_params_tuple
+    n_neighbors, n_components, low_dist_thres = localmap_params_tuple
 
-    # Run UMAP once
-    umap_start = time.time()
-    reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=n_components, min_dist=min_dist, **umap_static_params)
-    reduced_embeddings = reducer.fit_transform(embeddings)
-    umap_time = time.time() - umap_start
+    # Run LocalMAP once
+    localmap_start = time.time()
+    reducer = LocalMAP(
+        n_components=n_components,
+        n_neighbors=n_neighbors,
+        low_dist_thres=low_dist_thres,
+        **localmap_static_params
+    )
+    reduced_embeddings = reducer.fit_transform(embeddings, init="pca")
+    localmap_time = time.time() - localmap_start
 
     results = []
     for idx, hdbscan_params_tuple in enumerate(hdbscan_params_list):
@@ -196,7 +206,7 @@ def process_umap_params(umap_params_tuple, embeddings, hdbscan_params_list, iter
 
         result = {
             'iteration': iteration,
-            'umap': {'n_neighbors': n_neighbors, 'n_components': n_components, 'min_dist': min_dist, 'time_seconds': umap_time},
+            'localmap': {'n_neighbors': n_neighbors, 'n_components': n_components, 'low_dist_thres': low_dist_thres, 'time_seconds': localmap_time},
             'hdbscan': {'min_cluster_size': min_cluster_size, 'min_samples': min_samples, 'metric': metric, 'time_seconds': hdbscan_time},
             'metrics': metrics
         }
@@ -206,38 +216,43 @@ def process_umap_params(umap_params_tuple, embeddings, hdbscan_params_list, iter
 
 
 def run_grid_search(embeddings: np.ndarray, metadata: pd.DataFrame, param_grid: Dict[str, List],
-                   data_name: str, logger, umap_static_params: Dict = None, hdbscan_static_params: Dict = None) -> List[Dict]:
-    """Run grid search over UMAP and HDBSCAN parameters in parallel."""
+                   data_name: str, logger, localmap_static_params: Dict = None, hdbscan_static_params: Dict = None) -> List[Dict]:
+    """Run grid search over LocalMAP and HDBSCAN parameters in parallel."""
     # Default static parameters if not provided
-    if umap_static_params is None:
-        umap_static_params = {'metric': 'cosine', 'random_state': 0, 'verbose': False}
+    if localmap_static_params is None:
+        localmap_static_params = {
+            'MN_ratio': 0.5,
+            'FP_ratio': 2.0,
+            'apply_pca': True,
+            'verbose': False
+        }
     if hdbscan_static_params is None:
         hdbscan_static_params = {'cluster_selection_method': 'eom'}
 
     # Generate all parameter combinations
-    umap_params_list = list(product(param_grid['n_neighbors'], param_grid['n_components'], param_grid['min_dist']))
+    localmap_params_list = list(product(param_grid['n_neighbors'], param_grid['n_components'], param_grid['low_dist_thres']))
     hdbscan_params_list = list(product(param_grid['min_cluster_size'], param_grid['min_samples'], param_grid['metric']))
 
-    total_combinations = len(umap_params_list) * len(hdbscan_params_list)
+    total_combinations = len(localmap_params_list) * len(hdbscan_params_list)
     logger.info(f"Testing {total_combinations} parameter combinations for {data_name}")
-    logger.info(f"  UMAP combinations: {len(umap_params_list)}")
+    logger.info(f"  LocalMAP combinations: {len(localmap_params_list)}")
     logger.info(f"  HDBSCAN combinations: {len(hdbscan_params_list)}")
     logger.info(f"  Using {PROCESSES} parallel processes")
-    logger.info(f"  UMAP static params: {umap_static_params}")
+    logger.info(f"  LocalMAP static params: {localmap_static_params}")
     logger.info(f"  HDBSCAN static params: {hdbscan_static_params}")
 
-    # Prepare tasks for each UMAP param set
+    # Prepare tasks for each LocalMAP param set
     tasks = []
-    for i, umap_params in enumerate(umap_params_list):
+    for i, localmap_params in enumerate(localmap_params_list):
         iteration_start = i * len(hdbscan_params_list) + 1
-        tasks.append((umap_params, embeddings, hdbscan_params_list, iteration_start, umap_static_params, hdbscan_static_params))
+        tasks.append((localmap_params, embeddings, hdbscan_params_list, iteration_start, localmap_static_params, hdbscan_static_params))
 
     # Run in parallel
     logger.info(f"Starting parallel grid search...")
     start_time = time.time()
 
     with multiprocessing.Pool(processes=PROCESSES) as pool:
-        results_nested = pool.starmap(process_umap_params, tasks)
+        results_nested = pool.starmap(process_localmap_params, tasks)
 
     # Flatten results
     results = [item for sublist in results_nested for item in sublist]
@@ -269,12 +284,12 @@ def analyze_results(results: List[Dict], logger) -> Dict:
     logger.info(f"{'='*80}")
 
     for i, result in enumerate(top_10, 1):
-        umap_params = result['umap']
+        localmap_params = result['localmap']
         hdbscan_params = result['hdbscan']
         metrics = result['metrics']
 
         logger.info(f"\n#{i} - DBCV: {metrics['dbcv']:.4f}")
-        logger.info(f"  UMAP: n_neighbors={umap_params['n_neighbors']}, n_components={umap_params['n_components']}, min_dist={umap_params['min_dist']}")
+        logger.info(f"  LocalMAP: n_neighbors={localmap_params['n_neighbors']}, n_components={localmap_params['n_components']}, low_dist_thres={localmap_params['low_dist_thres']}")
         logger.info(f"  HDBSCAN: min_cluster_size={hdbscan_params['min_cluster_size']}, min_samples={hdbscan_params['min_samples']}, metric={hdbscan_params['metric']}")
         logger.info(f"  Metrics: {metrics['n_clusters']} clusters, {metrics['noise_ratio']:.1%} noise, avg_size={metrics['avg_cluster_size']:.1f}")
 
@@ -282,7 +297,7 @@ def analyze_results(results: List[Dict], logger) -> Dict:
 
     return {
         'best_params': {
-            'umap': {k: v for k, v in best['umap'].items() if k != 'time_seconds'},
+            'localmap': {k: v for k, v in best['localmap'].items() if k != 'time_seconds'},
             'hdbscan': {k: v for k, v in best['hdbscan'].items() if k != 'time_seconds'}
         },
         'best_metrics': best['metrics'],
@@ -295,11 +310,11 @@ def apply_best_clustering(embeddings: np.ndarray, metadata: pd.DataFrame, best_p
                           entity_type: str, embeddings_dir: Path, logger) -> None:
     """Apply best clustering parameters and save results with cluster assignments."""
     logger.info(f"\nApplying best parameters for {entity_type}:")
-    logger.info(f"  UMAP: {best_params['umap']}")
+    logger.info(f"  LocalMAP: {best_params['localmap']}")
     logger.info(f"  HDBSCAN: {best_params['hdbscan']}")
 
     # Run clustering using reusable function
-    reduced_embeddings, labels, probabilities, clusterer = run_cluster(embeddings, best_params['umap'], best_params['hdbscan'])
+    reduced_embeddings, labels, probabilities, clusterer = run_cluster(embeddings, best_params['localmap'], best_params['hdbscan'])
 
     # Print cluster statistics
     n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
@@ -313,12 +328,12 @@ def apply_best_clustering(embeddings: np.ndarray, metadata: pd.DataFrame, best_p
     # Save updated metadata
     # Use 'all_rule' for rules, 'all_subreddit' for subreddits (both from train/val/test)
     prefix = 'all_rule' if entity_type == 'rule' else 'all_subreddit'
-    metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
+    metadata_file = embeddings_dir / f'{prefix}_metadata_localmap.tsv'
     metadata.to_csv(metadata_file, sep='\t', index=False)
     logger.info(f"  ✅ Saved clustered metadata to: {metadata_file}")
 
     # Save reduced embeddings
-    reduced_file = embeddings_dir / f'{prefix}_embeddings_reduced.tsv'
+    reduced_file = embeddings_dir / f'{prefix}_embeddings_reduced_localmap.tsv'
     np.savetxt(reduced_file, reduced_embeddings, delimiter='\t')
     logger.info(f"  ✅ Saved reduced embeddings to: {reduced_file}")
 
@@ -346,7 +361,7 @@ def process_entity_type(entity_type: str, param_grid: Dict, embeddings_dir: Path
         analysis = analyze_results(results, logger)
 
         # Save results
-        output_file = output_dir / f'{entity_type}_grid_search_results.json'
+        output_file = output_dir / f'{entity_type}_localmap_grid_search_results.json'
         with open(output_file, 'w') as f:
             json.dump(analysis, f, indent=2)
         logger.info(f"\n✅ {entity_type.capitalize()} grid search results saved to: {output_file}")
@@ -358,7 +373,7 @@ def process_entity_type(entity_type: str, param_grid: Dict, embeddings_dir: Path
             best_params = analysis['best_params']
         else:
             logger.info(f"\nLoading best params from previous grid search...")
-            output_file = output_dir / f'{entity_type}_grid_search_results.json'
+            output_file = output_dir / f'{entity_type}_localmap_grid_search_results.json'
             with open(output_file) as f:
                 best_params = json.load(f)['best_params']
 
@@ -368,7 +383,7 @@ def process_entity_type(entity_type: str, param_grid: Dict, embeddings_dir: Path
 def main():
     """Main execution function."""
     # Parse arguments
-    parser = argparse.ArgumentParser(description='Cluster test_1k embeddings')
+    parser = argparse.ArgumentParser(description='Cluster test_1k embeddings with LocalMAP')
     parser.add_argument('--grid-search', action='store_true', help='Run grid search only')
     parser.add_argument('--apply-best', action='store_true', help='Apply best params only')
     args = parser.parse_args()
@@ -393,7 +408,7 @@ def main():
     # Setup logging
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     mode = 'grid_search' if args.grid_search else ('apply_best' if args.apply_best else 'full')
-    log_file = logs_dir / f'cluster_{mode}_{timestamp}.log'
+    log_file = logs_dir / f'cluster_localmap_{mode}_{timestamp}.log'
 
     logging.basicConfig(
         level=logging.INFO,
@@ -408,20 +423,21 @@ def main():
 
     try:
         # Define parameter grids
-        # Note: UMAP uses cosine on original 4096D, HDBSCAN uses euclidean on reduced space
+        # Note: LocalMAP uses dynamic graph adjustment with PCA preprocessing, HDBSCAN uses euclidean on reduced space
+        # Using n_components=2 as recommended by LocalMAP authors for tested configurations
         param_grids = {
             'subreddit': {
                 'n_neighbors': [10, 25, 50, 100, 200],
-                'n_components': [25, 50, 75, 100, 150, 200],
-                'min_dist': [0.3, 0.5, 0.7, 1.0],
+                'n_components': [2],
+                'low_dist_thres': [5, 10, 20],
                 'min_cluster_size': [10, 20, 30],
                 'min_samples': [10, 20, 30],
                 'metric': ['euclidean']
             },
             'rule': {
                 'n_neighbors': [10, 25, 50, 100, 200],
-                'n_components': [25, 50, 75, 100, 150, 200],
-                'min_dist': [0.3, 0.5, 0.7, 1.0],
+                'n_components': [2],
+                'low_dist_thres': [5, 10, 20],
                 'min_cluster_size': [10, 20, 30],
                 'min_samples': [10, 20, 30],
                 'metric': ['euclidean']

@@ -8,8 +8,8 @@ Creates embeddings for:
 2. Rule embeddings: ALL rules from train/val/test with cumulative violations (deduplicated by text)
 
 Output:
-- output/embeddings/test_subreddit_embeddings.tsv - Embedding vectors (one per line, tab-separated)
-- output/embeddings/test_subreddit_metadata.tsv - Metadata (Subreddit, Language, Title, Description, FullText, Splits)
+- output/embeddings/all_subreddit_embeddings.tsv - Embedding vectors (one per line, tab-separated)
+- output/embeddings/all_subreddit_metadata.tsv - Metadata (Subreddit, Language, Title, Description, FullText, Splits)
 - output/embeddings/all_rule_embeddings.tsv - Embedding vectors (one per line, tab-separated)
 - output/embeddings/all_rule_metadata.tsv - Metadata (Subreddit, ShortName, Description, FullText, TotalViolations, Splits, NumSubreddits)
 
@@ -330,10 +330,10 @@ def main():
         subreddit_texts, subreddit_metadata = prepare_subreddit_texts(all_data, stage2_map, logger)
         rule_texts, rule_metadata = prepare_rule_texts(all_data, stage2_map, logger)
 
-        # Set CUDA device 0 by default
+        # Set CUDA device 1 by default
         if torch.cuda.is_available():
-            os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-            logger.info(f"🎯 Using CUDA device 0")
+            os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+            logger.info(f"🎯 Using CUDA device 1")
         else:
             logger.info(f"💻 Using CPU mode")
 
@@ -360,8 +360,8 @@ def main():
         logger.info("WRITING OUTPUTS")
         logger.info("="*80)
 
-        write_tsv_files(subreddit_embeddings, subreddit_metadata, output_dir / 'test_subreddit_embeddings.tsv',
-                       output_dir / 'test_subreddit_metadata.tsv', ['subreddit', 'language', 'title', 'description', 'full_text', 'splits'], logger)
+        write_tsv_files(subreddit_embeddings, subreddit_metadata, output_dir / 'all_subreddit_embeddings.tsv',
+                       output_dir / 'all_subreddit_metadata.tsv', ['subreddit', 'language', 'title', 'description', 'full_text', 'splits'], logger)
 
         write_tsv_files(rule_embeddings, rule_metadata, output_dir / 'all_rule_embeddings.tsv',
                        output_dir / 'all_rule_metadata.tsv', ['subreddit', 'short_name', 'description', 'full_text', 'total_violations', 'splits', 'num_subreddits'], logger)

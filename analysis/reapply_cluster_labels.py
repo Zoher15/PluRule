@@ -25,7 +25,7 @@ Input (source of truth for manual overrides):
 Output (updated):
 - output/clustering/subreddit_cluster_labels.json (updated with new labels)
 - output/clustering/rule_cluster_labels.json (updated with new labels)
-- output/embeddings/test_subreddit_metadata.tsv (cluster_label column + cluster_id merged)
+- output/embeddings/all_subreddit_metadata.tsv (cluster_label column + cluster_id merged)
 - output/embeddings/all_rule_metadata.tsv (cluster_label column + cluster_id merged)
 """
 
@@ -162,15 +162,7 @@ def reapply_entity_labels(entity_type: str, embeddings_dir: Path, clustering_dir
     logger.info(f"{entity_type.upper()} - Reapplying Labels")
     logger.info("="*80)
 
-    # Parse manual overrides from analysis text file (source of truth)
-    analysis_file = clustering_dir / f'{entity_type}_cluster_analysis.txt'
-    overrides = parse_label_overrides(analysis_file, logger)
-
-    if not overrides:
-        logger.info(f"No changes to apply for {entity_type}")
-        return
-
-    # Load existing JSON labels first (to detect merges with existing labels)
+    # Load existing JSON labels first
     labels_file = clustering_dir / f'{entity_type}_cluster_labels.json'
     if not labels_file.exists():
         logger.error(f"❌ Error: {labels_file} not found")
@@ -184,9 +176,19 @@ def reapply_entity_labels(entity_type: str, embeddings_dir: Path, clustering_dir
     # Build all_labels dict (existing labels for all clusters)
     all_labels = {int(cid): data['label'] for cid, data in cluster_data.items()}
 
+    # Parse manual overrides from analysis text file (source of truth)
+    analysis_file = clustering_dir / f'{entity_type}_cluster_analysis.txt'
+    overrides = parse_label_overrides(analysis_file, logger)
+
     # Detect cluster merges (clusters with identical labels)
-    logger.info("\nDetecting cluster merges...")
+    # This runs even if there are no overrides - will merge existing duplicate labels
+    logger.info("\nDetecting cluster merges from existing labels...")
     merge_mapping, label_groups = detect_cluster_merges(overrides, all_labels, logger)
+
+    # Check if we have any work to do
+    if not overrides and not merge_mapping:
+        logger.info(f"No changes to apply for {entity_type} (no overrides, no duplicate labels)")
+        return
 
     if not merge_mapping:
         logger.info("  No merges detected (all labels are unique)")
@@ -208,8 +210,8 @@ def reapply_entity_labels(entity_type: str, embeddings_dir: Path, clustering_dir
     logger.info(f"✅ Updated {labels_file}")
 
     # Update metadata TSV
-    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
-    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+    # Use 'all_rule' for rules, 'all_subreddit' for subreddits (both from train/val/test)
+    prefix = 'all_rule' if entity_type == 'rule' else 'all_subreddit'
     metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
     if not metadata_file.exists():
         logger.error(f"❌ Error: {metadata_file} not found")
@@ -238,10 +240,22 @@ def reapply_entity_labels(entity_type: str, embeddings_dir: Path, clustering_dir
             total_items = sum(original_counts.get(cid, 0) for cid in cluster_ids)
             logger.info(f"  Merged '{label}': {len(cluster_ids)} clusters → cluster {target_id} ({total_items} items)")
 
-    # Build complete label mapping from updated JSON
-    cluster_labels = {int(cid): data['label'] for cid, data in cluster_data.items()}
+    # Renumber clusters to be contiguous (1, 2, 3, ...) excluding noise (-1)
+    logger.info("\nRenumbering clusters to be contiguous...")
+    unique_ids = sorted([x for x in metadata['cluster_id'].unique() if x != -1])
+    renumber_map = {old_id: new_id for new_id, old_id in enumerate(unique_ids, start=1)}
 
-    # Apply labels (Noise for -1, use cluster_labels dict for others)
+    # Apply renumbering
+    metadata['cluster_id'] = metadata['cluster_id'].map(lambda x: renumber_map.get(x, x) if x != -1 else -1)
+    logger.info(f"  Renumbered {len(unique_ids)} clusters to 1-{len(unique_ids)}")
+
+    # Build complete label mapping from updated JSON (using old IDs)
+    old_cluster_labels = {int(cid): data['label'] for cid, data in cluster_data.items()}
+
+    # Remap labels using renumbering
+    cluster_labels = {renumber_map.get(old_id, old_id): label for old_id, label in old_cluster_labels.items()}
+
+    # Apply labels
     metadata['cluster_label'] = metadata['cluster_id'].map(
         lambda x: cluster_labels.get(x, 'Noise' if x == -1 else f'Cluster {x}')
     )

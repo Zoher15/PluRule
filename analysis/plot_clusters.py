@@ -10,8 +10,8 @@ Usage:
     python plot_clusters.py --entity rule           # Plot only rules
 
 Input:
-- output/embeddings/test_subreddit_embeddings_reduced.tsv
-- output/embeddings/test_subreddit_metadata.tsv (with cluster_id and cluster_label)
+- output/embeddings/all_subreddit_embeddings_reduced.tsv
+- output/embeddings/all_subreddit_metadata.tsv (with cluster_id and cluster_label)
 - output/embeddings/all_rule_embeddings_reduced.tsv
 - output/embeddings/all_rule_metadata.tsv (with cluster_id and cluster_label)
 - output/clustering/subreddit_grid_search_results.json (for UMAP params)
@@ -42,39 +42,78 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from config import PROCESSES
 import umap
-from scipy.spatial import ConvexHull
 
 from adjustText import adjust_text
-from coloring import color_polygons_improved
+from coloring import assign_colors_by_position
 
 
-def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, logger) -> np.ndarray:
-    """Apply UMAP reduction to 2D for visualization.
+def rotate_coordinates(coords: np.ndarray, angle_degrees: float) -> np.ndarray:
+    """Rotate 2D coordinates by specified angle (in degrees)."""
+    angle_rad = np.deg2rad(angle_degrees)
+    rotation_matrix = np.array([
+        [np.cos(angle_rad), -np.sin(angle_rad)],
+        [np.sin(angle_rad), np.cos(angle_rad)]
+    ])
+    return coords @ rotation_matrix.T
+
+
+def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, logger, cache_dir: Path) -> np.ndarray:
+    """Apply UMAP reduction to 2D for visualization with caching.
 
     Args:
         embeddings: Original embeddings to reduce
         umap_params: Dict with 'n_neighbors' and 'min_dist' from best params
         entity_type: 'subreddit' or 'rule'
         logger: Logger instance
+        cache_dir: Directory to store cached results
 
     Returns:
         2D coordinates
     """
-    # Use tighter settings for subreddit visualization
     min_dist = umap_params['min_dist']
     n_neighbors = umap_params['n_neighbors']
+
+    # Cache file based on parameters (rotation applied after UMAP, so not in cache key)
+    cache_file = cache_dir / f'{entity_type}_umap_2d_n{n_neighbors}_d{min_dist}_rs42.npy'
+
+    # Try to load from cache
+    if cache_file.exists():
+        logger.info(f"Loading cached 2D coordinates from {cache_file.name}...")
+        coords_2d = np.load(cache_file)
+        logger.info(f"  ✅ Loaded shape {coords_2d.shape}")
+        return coords_2d
+
+    # Compute UMAP
     logger.info(f"Reducing to 2D with UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, n_jobs={PROCESSES})...")
     reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=2, min_dist=min_dist,
                         metric='cosine', random_state=42, n_jobs=PROCESSES)
     coords_2d = reducer.fit_transform(embeddings)
     logger.info(f"  ✅ Reduced to shape {coords_2d.shape}")
 
+    # Save to cache
+    np.save(cache_file, coords_2d)
+    logger.info(f"  💾 Cached to {cache_file.name}")
+
     return coords_2d
 
 def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, entity_type: str,
-                                 clustering_dir: Path, logger) -> None:
-    """Create and save 2D cluster visualization with spatially-coherent colors."""
+                                 clustering_dir: Path, logger, rotation_angle: float = 0) -> None:
+    """Create and save 2D cluster visualization with spatially-coherent colors.
+
+    Args:
+        coords_2d: 2D coordinates
+        metadata: Cluster metadata
+        entity_type: 'subreddit' or 'rule'
+        clustering_dir: Output directory
+        logger: Logger instance
+        rotation_angle: Rotation angle in degrees (default: 0)
+    """
     labels = metadata['cluster_id'].values
+
+    # Rotate coordinates if specified (affects color assignment based on spatial position)
+    if rotation_angle != 0:
+        logger.info(f"Rotating coordinates by {rotation_angle}° (affects color assignment)...")
+        coords_2d = rotate_coordinates(coords_2d, rotation_angle)
 
     # Get cluster labels if available
     if 'cluster_label' in metadata.columns:
@@ -96,42 +135,53 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     # Get unique cluster IDs (excluding noise)
     unique_clusters = sorted([c for c in set(labels) if c != -1])
 
-    # Compute convex hulls for each cluster
-    logger.info(f"Computing convex hulls for {n_clusters} clusters...")
-    cluster_polygons = []
-    cluster_id_to_index = {}
-
+    # Calculate median centroids for all clusters (for color assignment and labels)
+    logger.info("Calculating median centroids...")
+    median_centroids = {}
     for cluster_id in unique_clusters:
         cluster_mask = labels == cluster_id
         cluster_points = coords_2d[cluster_mask]
+        if len(cluster_points) > 0:
+            median_centroid = np.median(cluster_points, axis=0)
+            median_centroids[cluster_id] = tuple(median_centroid)
 
-        # Need at least 3 points for a convex hull
-        if len(cluster_points) >= 3:
-            try:
-                hull = ConvexHull(cluster_points)
-                hull_vertices = cluster_points[hull.vertices].tolist()
-                cluster_polygons.append(hull_vertices)
-                cluster_id_to_index[cluster_id] = len(cluster_polygons) - 1
-            except Exception as e:
-                logger.warning(f"Could not compute hull for cluster {cluster_id}: {e}")
-                # Fallback: use all points as polygon
-                cluster_polygons.append(cluster_points.tolist())
-                cluster_id_to_index[cluster_id] = len(cluster_polygons) - 1
-        else:
-            # For small clusters, use points directly
-            cluster_polygons.append(cluster_points.tolist())
-            cluster_id_to_index[cluster_id] = len(cluster_polygons) - 1
+    # Prepare data for color assignment (use median centroids)
+    color_assignment_data = []
+    cluster_id_list = []
+    for cluster_id in unique_clusters:
+        if cluster_id in median_centroids:
+            color_assignment_data.append(median_centroids[cluster_id])
+            cluster_id_list.append(cluster_id)
 
     # Get spatially-coherent colors using Paul Tol palette
     logger.info("Assigning spatially-coherent colors...")
-    hex_colors = color_polygons_improved(cluster_polygons)
+    hex_colors = assign_colors_by_position(color_assignment_data)
 
     # Create cluster_id -> color mapping
     cluster_colors = {}
-    for cluster_id in unique_clusters:
-        if cluster_id in cluster_id_to_index:
-            idx = cluster_id_to_index[cluster_id]
-            cluster_colors[cluster_id] = hex_colors[idx]
+    for i, cluster_id in enumerate(cluster_id_list):
+        cluster_colors[cluster_id] = hex_colors[i]
+
+    # Save cluster colors to JSON for reuse (with cluster names)
+    color_file = clustering_dir / f'{entity_type}_cluster_colors.json'
+    clusters_with_names = {}
+    for cluster_id, color in cluster_colors.items():
+        cluster_name = cluster_label_map.get(cluster_id, f'Cluster {cluster_id}')
+        clusters_with_names[int(cluster_id)] = {
+            'color': color,
+            'name': cluster_name
+        }
+
+    color_data = {
+        'entity_type': entity_type,
+        'rotation_angle': rotation_angle,
+        'clusters': clusters_with_names,
+        'color_palette': 'rainbow_PuBr',
+        'assignment_method': 'median_centroid_x_position'
+    }
+    with open(color_file, 'w') as f:
+        json.dump(color_data, f, indent=2)
+    logger.info(f"  💾 Saved cluster colors to {color_file.name}")
 
     # Map each point to its cluster color
     point_colors = np.array([cluster_colors.get(label, '#DDDDDD') for label in labels])
@@ -139,15 +189,15 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     # Create plot (Nature double-column: 180mm = 7.09 inches width, ~6 inch height)
     plt.figure(figsize=(7.09, 6))
 
-    point_size = 100 if entity_type == 'subreddit' else 100
+    point_size = 300 if entity_type == 'subreddit' else 150
     # Plot noise points first (very faint)
     if n_noise > 0:
-        plt.scatter(coords_2d[noise_mask, 0], coords_2d[noise_mask, 1], c='lightgray', s=point_size, alpha=0.30)
+        plt.scatter(coords_2d[noise_mask, 0], coords_2d[noise_mask, 1], c='lightgray', s=point_size, alpha=0.10)
 
     # Plot cluster points on top (more prominent colors)
     if entity_type == 'subreddit':
         plt.scatter(coords_2d[non_noise_mask, 0], coords_2d[non_noise_mask, 1],
-                    c=point_colors[non_noise_mask], s=point_size, alpha=1.0, edgecolors='white', linewidths=0.1)
+                    c=point_colors[non_noise_mask], s=point_size, alpha=1.0, edgecolors='white', linewidths=0.15)
     else:
         plt.scatter(coords_2d[non_noise_mask, 0], coords_2d[non_noise_mask, 1],
                     c=point_colors[non_noise_mask], s=point_size, alpha=1.0, edgecolors='white', linewidths=0.1)
@@ -158,21 +208,28 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     plt.box(False)  # Remove box/border
 
     # Add cluster labels as text annotations (all clusters)
+    # Use median centroids (same as color assignment)
     texts = []
     for cluster_id in sorted([c for c in set(labels) if c != -1]):
-        cluster_mask = labels == cluster_id
-        if cluster_mask.sum() > 0:
-            centroid = coords_2d[cluster_mask].mean(axis=0)
+        if cluster_id in median_centroids:
+            centroid = median_centroids[cluster_id]
             label_text = cluster_label_map.get(cluster_id, f'Cluster {cluster_id}')
-            text = plt.text(centroid[0], centroid[1], f'{cluster_id}: {label_text}',
-                          fontsize=5, ha='center', va='center',
+            # Display cluster ID starting from 1 instead of 0
+            display_id = cluster_id + 1
+            text = plt.text(centroid[0], centroid[1], f'{display_id}: {label_text}',
+                          fontsize=6, ha='center', va='center',
                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.6, edgecolor='black', linewidth=0.1))
             texts.append(text)
 
-    # Adjust text positions to avoid overlap (no arrows)
+    # Adjust text positions to avoid overlap (very gentle adjustment)
+    # Only prevent text-text conflicts, don't move labels unnecessarily
     adjust_text(texts,
-                expand_text=(1.2, 1.2),
-                expand_points=(1.2, 1.2))
+                expand_text=(0.95, 0.95),  # Allow slight overlap
+                lim=50,  # Very few iterations
+                force_text=(0.005, 0.005),  # Extremely weak text-text repulsion
+                autoalign=False,  # Don't auto-align non-overlapping labels
+                only_move={'text': 'xy'},  # Only move text if needed
+                avoid_self=False)  # Don't move to avoid own anchor point
 
     # Save plot as PDF (editable in Illustrator)
     output_file_pdf = clustering_dir / f'{entity_type}_clusters_2d.pdf'
@@ -186,15 +243,23 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     logger.info(f"  ✅ Saved PNG plot to: {output_file_png}")
 
 
-def plot_entity_type(entity_type: str, embeddings_dir: Path, clustering_dir: Path, logger) -> None:
-    """Plot clusters for a single entity type (subreddit or rule)."""
+def plot_entity_type(entity_type: str, embeddings_dir: Path, clustering_dir: Path, logger, rotation_angle: float = 0) -> None:
+    """Plot clusters for a single entity type (subreddit or rule).
+
+    Args:
+        entity_type: 'subreddit' or 'rule'
+        embeddings_dir: Path to embeddings directory
+        clustering_dir: Path to clustering output directory
+        logger: Logger instance
+        rotation_angle: Rotation angle in degrees (default: 0)
+    """
     logger.info("\n" + "="*80)
     logger.info(f"{entity_type.upper()} CLUSTERS")
     logger.info("="*80)
 
     # Load metadata
-    # Use 'all_rule' for rules (train/val/test), 'test_subreddit' for subreddits (test only)
-    prefix = 'all_rule' if entity_type == 'rule' else 'test_subreddit'
+    # Use 'all_rule' for rules, 'all_subreddit' for subreddits (both from train/val/test)
+    prefix = 'all_rule' if entity_type == 'rule' else 'all_subreddit'
     metadata_file = embeddings_dir / f'{prefix}_metadata.tsv'
     logger.info(f"Loading metadata from {metadata_file}...")
     metadata = pd.read_csv(metadata_file, sep='\t')
@@ -211,11 +276,11 @@ def plot_entity_type(entity_type: str, embeddings_dir: Path, clustering_dir: Pat
         best_params = json.load(f)['best_params']['umap']
     umap_params = {'n_neighbors': best_params['n_neighbors'], 'min_dist': best_params['min_dist']}
 
-    # Reduce to 2D from reduced embeddings
-    coords_2d = apply_umap_2d(embeddings, umap_params, entity_type, logger)
+    # Reduce to 2D from reduced embeddings (with caching)
+    coords_2d = apply_umap_2d(embeddings, umap_params, entity_type, logger, clustering_dir)
 
     # Create visualization
-    create_cluster_visualization(coords_2d, metadata, entity_type, clustering_dir, logger)
+    create_cluster_visualization(coords_2d, metadata, entity_type, clustering_dir, logger, rotation_angle)
 
 
 def main():
@@ -223,6 +288,7 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Plot cluster visualizations')
     parser.add_argument('--entity', choices=['subreddit', 'rule'], help='Plot only one entity type')
+    parser.add_argument('--rotate', type=float, default=0, help='Rotation angle in degrees (affects color assignment, default: 0)')
     args = parser.parse_args()
 
     # Create directories
@@ -252,7 +318,7 @@ def main():
 
         # Plot each entity type
         for entity_type in entity_types:
-            plot_entity_type(entity_type, embeddings_dir, clustering_dir, logger)
+            plot_entity_type(entity_type, embeddings_dir, clustering_dir, logger, args.rotate)
 
         logger.info("\n" + "="*80)
         logger.info("COMPLETE")
