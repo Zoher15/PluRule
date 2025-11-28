@@ -44,7 +44,8 @@ from config import PROCESSES
 import umap
 
 from adjustText import adjust_text
-from coloring import assign_colors_by_position
+from coloring import assign_colors_with_conflicts
+from scipy.spatial import ConvexHull
 
 
 def rotate_coordinates(coords: np.ndarray, angle_degrees: float) -> np.ndarray:
@@ -145,17 +146,35 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
             median_centroid = np.median(cluster_points, axis=0)
             median_centroids[cluster_id] = tuple(median_centroid)
 
-    # Prepare data for color assignment (use median centroids)
-    color_assignment_data = []
+    # Compute convex hulls for conflict detection
+    logger.info("Computing convex hulls for conflict detection...")
+    cluster_polygons = []
     cluster_id_list = []
     for cluster_id in unique_clusters:
         if cluster_id in median_centroids:
-            color_assignment_data.append(median_centroids[cluster_id])
-            cluster_id_list.append(cluster_id)
+            cluster_mask = labels == cluster_id
+            cluster_points = coords_2d[cluster_mask]
 
-    # Get spatially-coherent colors using Paul Tol palette
-    logger.info("Assigning spatially-coherent colors...")
-    hex_colors = assign_colors_by_position(color_assignment_data)
+            if len(cluster_points) >= 3:
+                try:
+                    hull = ConvexHull(cluster_points)
+                    hull_vertices = cluster_points[hull.vertices].tolist()
+                    cluster_polygons.append(hull_vertices)
+                    cluster_id_list.append(cluster_id)
+                except Exception as e:
+                    logger.warning(f"Could not compute hull for cluster {cluster_id}: {e}")
+                    cluster_polygons.append(cluster_points.tolist())
+                    cluster_id_list.append(cluster_id)
+            else:
+                cluster_polygons.append(cluster_points.tolist())
+                cluster_id_list.append(cluster_id)
+
+    # Prepare centroid data for color assignment
+    color_assignment_data = [median_centroids[cid] for cid in cluster_id_list]
+
+    # Get spatially-coherent colors with conflict resolution
+    logger.info("Assigning spatially-coherent colors with conflict resolution...")
+    hex_colors = assign_colors_with_conflicts(color_assignment_data, cluster_polygons)
 
     # Create cluster_id -> color mapping
     cluster_colors = {}
@@ -189,7 +208,7 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     # Create plot (Nature double-column: 180mm = 7.09 inches width, ~6 inch height)
     plt.figure(figsize=(7.09, 6))
 
-    point_size = 300 if entity_type == 'subreddit' else 150
+    point_size = 450 if entity_type == 'subreddit' else 150
     # Plot noise points first (very faint)
     if n_noise > 0:
         plt.scatter(coords_2d[noise_mask, 0], coords_2d[noise_mask, 1], c='lightgray', s=point_size, alpha=0.10)

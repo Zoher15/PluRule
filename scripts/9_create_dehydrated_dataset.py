@@ -78,6 +78,7 @@ def verify_mod_comments_with_llm(subreddit_data: Dict[str, Dict], subreddit_rule
     # Initialize vLLM
     model_name = "Qwen/Qwen3-30B-A3B-Instruct-2507"
     llm = LLM(
+        seed=0,
         model=model_name,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.95,
@@ -105,7 +106,7 @@ def verify_mod_comments_with_llm(subreddit_data: Dict[str, Dict], subreddit_rule
             rule_comprehensive = rule_obj.get('rule_comprehensive', matched_rule) if rule_obj else matched_rule
 
             # Build prompt
-            prompt = f"""Does the following moderator comment cite or reference this rule?
+            prompt = f"""Is the following moderator comment saying that this rule was violated?
 
 Moderator Comment: {body_clean}
 
@@ -284,16 +285,18 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
     return subreddit_data
 
 
-def load_subreddit_metadata(logger) -> Tuple[Dict[str, List[Dict]], Dict[str, str]]:
-    """Load rules and languages from Stage 2."""
+def load_subreddit_metadata(logger) -> Tuple[Dict[str, List[Dict]], Dict[str, str], Dict[str, str], Dict[str, str]]:
+    """Load rules, languages, titles, and descriptions from Stage 2."""
     rules_file = os.path.join(PATHS['data'], f'stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json')
     if not os.path.exists(rules_file):
         logger.error(f"Stage 2 rules file not found: {rules_file}")
-        return {}, {}
+        return {}, {}, {}, {}
 
     data = read_json_file(rules_file)
     subreddit_rules = {}
     subreddit_languages = {}
+    subreddit_titles = {}
+    subreddit_descriptions = {}
 
     for entry in data.get('subreddits', []):
         sub_data = entry.get('subreddit', {})
@@ -301,9 +304,11 @@ def load_subreddit_metadata(logger) -> Tuple[Dict[str, List[Dict]], Dict[str, st
         if sub_name:
             subreddit_rules[sub_name] = entry.get('rules', [])
             subreddit_languages[sub_name] = sub_data.get('lang', 'unknown')
+            subreddit_titles[sub_name] = sub_data.get('title', '')
+            subreddit_descriptions[sub_name] = sub_data.get('public_description', '')
 
     logger.info(f"Loaded metadata for {len(subreddit_rules)} subreddits")
-    return subreddit_rules, subreddit_languages
+    return subreddit_rules, subreddit_languages, subreddit_titles, subreddit_descriptions
 
 
 # ============================================================================
@@ -417,7 +422,8 @@ def split_pairs(thread_pairs: List[Dict], subreddit: str) -> Tuple[List[Dict], L
 
 
 def process_subreddit_split(subreddit: str, data: Dict, split_pairs: List[Dict],
-                            rules: List[Dict], language: str, trees_data: Dict, logger) -> Dict:
+                            rules: List[Dict], language: str, title: str, description: str,
+                            trees_data: Dict, logger) -> Dict:
     """Process one split (test/val/train) for a subreddit."""
     if not split_pairs:
         return None
@@ -495,6 +501,8 @@ def process_subreddit_split(subreddit: str, data: Dict, split_pairs: List[Dict],
 
     return {
         'subreddit': subreddit,
+        'title': title,
+        'description': description,
         'language': language,
         'data_version': '1.0',
         'last_updated': time.strftime('%Y-%m-%d'),
@@ -537,6 +545,8 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
 
         dehydrated['subreddits'].append({
             'subreddit': sub_data['subreddit'],
+            'title': sub_data['title'],
+            'description': sub_data['description'],
             'language': sub_data['language'],
             'data_version': sub_data['data_version'],
             'last_updated': sub_data['last_updated'],
@@ -576,7 +586,7 @@ def main():
 
         # Load metadata
         logger.info("📚 Loading subreddit metadata...")
-        subreddit_rules, subreddit_languages = load_subreddit_metadata(logger)
+        subreddit_rules, subreddit_languages, subreddit_titles, subreddit_descriptions = load_subreddit_metadata(logger)
 
         # LLM Judge Verification
         logger.info("🔍 Verifying mod comments with LLM judge...")
@@ -630,6 +640,8 @@ def main():
         for subreddit, data in subreddit_data.items():
             rules = subreddit_rules.get(subreddit, [])
             language = subreddit_languages.get(subreddit, 'unknown')
+            title = subreddit_titles.get(subreddit, '')
+            description = subreddit_descriptions.get(subreddit, '')
 
             # Load trees once per subreddit
             trees_file = os.path.join(PATHS['comment_trees'], f"{subreddit}_comment_trees.pkl")
@@ -643,17 +655,17 @@ def main():
             test_pairs, val_pairs, train_pairs = split_pairs(data['thread_pairs'], subreddit)
 
             if test_pairs:
-                test_data = process_subreddit_split(subreddit, data, test_pairs, rules, language, trees_data, logger)
+                test_data = process_subreddit_split(subreddit, data, test_pairs, rules, language, title, description, trees_data, logger)
                 if test_data:
                     test_subreddits.append(test_data)
 
             if val_pairs:
-                val_data = process_subreddit_split(subreddit, data, val_pairs, rules, language, trees_data, logger)
+                val_data = process_subreddit_split(subreddit, data, val_pairs, rules, language, title, description, trees_data, logger)
                 if val_data:
                     val_subreddits.append(val_data)
 
             if train_pairs:
-                train_data = process_subreddit_split(subreddit, data, train_pairs, rules, language, trees_data, logger)
+                train_data = process_subreddit_split(subreddit, data, train_pairs, rules, language, title, description, trees_data, logger)
                 if train_data:
                     train_subreddits.append(train_data)
 
