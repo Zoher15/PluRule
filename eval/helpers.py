@@ -602,15 +602,14 @@ def apply_chat_template(thread_pairs: List[Dict[str, Any]],
     max_token_length = 0
 
     for pair in thread_pairs:
-        # Count images in this pair
-        submission = pair.get('submission', {})
-        media_files = submission.get('media_files', [])
-        num_images = len(media_files)
-        max_images_per_prompt = max(max_images_per_prompt, num_images)
-
         # Apply template to both moderated and unmoderated threads
         for thread_type in ['moderated', 'unmoderated']:
             messages = pair[f'{thread_type}_prompt']['messages']
+
+            # Count images actually in the content (not just in media_files)
+            content = messages[0]['content']
+            num_images = sum(1 for item in content if isinstance(item, dict) and item.get('type') == 'image')
+            max_images_per_prompt = max(max_images_per_prompt, num_images)
 
             # Generate prompt text (for vLLM)
             prompt_text = processor.apply_chat_template(
@@ -659,6 +658,7 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
                              num_gpus: int,
                              resource_stats: Dict[str, Any],
                              max_response_tokens: int,
+                             context: str,
                              logger: logging.Logger) -> List[Dict[str, Any]]:
     """
     Two-stage evaluation using vLLM.
@@ -670,6 +670,7 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
         num_gpus: Number of GPUs to use for tensor parallelism
         resource_stats: Resource statistics from chat template application
         max_response_tokens: Maximum tokens for response generation
+        context: Context string (e.g., "submission-media")
         logger: Logger instance
 
     Returns:
@@ -711,12 +712,12 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
 
     # Stage 1: Generate reasoning for all threads (moderated + unmoderated)
     logger.info("📝 Stage 1: Generating reasoning responses...")
-    stage1_responses = _generate_stage1_vllm(thread_pairs, llm_engine, max_response_tokens, logger)
+    stage1_responses = _generate_stage1_vllm(thread_pairs, llm_engine, max_response_tokens, context, logger)
     logger.info(f"✅ Generated {len(stage1_responses)} × 2 Stage 1 reasoning responses")
 
     # Stage 2: Extract clean answers
     logger.info("🎯 Stage 2: Extracting clean answers...")
-    results = _generate_stage2_vllm(thread_pairs, stage1_responses, llm_engine, max_response_tokens, logger)
+    results = _generate_stage2_vllm(thread_pairs, stage1_responses, llm_engine, max_response_tokens, context, logger)
 
     logger.info(f"✅ Completed two-stage evaluation for {len(results)} thread pairs")
     return results
@@ -724,6 +725,7 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
 def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
                          llm_engine,
                          max_response_tokens: int,
+                         context: str,
                          logger: logging.Logger,
                          moderated_prompts: List[str] = None,
                          unmoderated_prompts: List[str] = None,
@@ -736,6 +738,7 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
         thread_pairs: Thread pairs with prompts
         llm_engine: vLLM engine
         max_response_tokens: Maximum tokens for response generation
+        context: Context string (e.g., "submission-media")
         logger: Logger instance
         moderated_prompts: Optional custom prompts for moderated threads (defaults to pair['moderated_prompt_text'])
         unmoderated_prompts: Optional custom prompts for unmoderated threads (defaults to pair['unmoderated_prompt_text'])
@@ -757,25 +760,29 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
     if sampling_params is None:
         sampling_params = SamplingParams(temperature=0.0, max_tokens=max_response_tokens, stop=None)
 
+    # Check if media should be included based on context flags
+    include_media = 'media' in context.split('-')
+
     # Prepare inputs (flatten moderated + unmoderated)
     inputs = []
     for pair in thread_pairs:
-        # Get submission media
-        submission = pair.get('submission', {})
-        media_files = submission.get('media_files', [])
-
         # Build inputs for both moderated and unmoderated threads
         for thread_type, prompts in [('mod', moderated_prompts), ('unmod', unmoderated_prompts)]:
             idx = thread_pairs.index(pair)
 
-            # Load images separately for each thread to avoid sharing image objects
+            # Only load and pass images if media flag is set in context
             images = []
-            for media_path in media_files:
-                try:
-                    img = Image.open(media_path).convert('RGB')
-                    images.append(img)
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to load image {media_path}: {e}")
+            if include_media:
+                submission = pair.get('submission', {})
+                media_files = submission.get('media_files', [])
+
+                # Load images separately for each thread to avoid sharing image objects
+                for media_path in media_files:
+                    try:
+                        img = Image.open(media_path).convert('RGB')
+                        images.append(img)
+                    except Exception as e:
+                        logger.warning(f"⚠️  Failed to load image {media_path}: {e}")
 
             input_dict = {
                 "prompt": prompts[idx],
@@ -805,6 +812,7 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
                          stage1_responses: List[Dict[str, str]],
                          llm_engine,
                          max_response_tokens: int,
+                         context: str,
                          logger: logging.Logger) -> List[Dict[str, Any]]:
     """
     Generate Stage 2 clean answer extraction by calling Stage 1 internally.
@@ -814,6 +822,7 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
         stage1_responses: Stage 1 reasoning responses
         llm_engine: vLLM engine
         max_response_tokens: Maximum tokens for response generation (not used in Stage 2, uses fixed 10 tokens)
+        context: Context string (e.g., "submission-media")
         logger: Logger instance
 
     Returns:
@@ -841,6 +850,7 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
         thread_pairs=thread_pairs,
         llm_engine=llm_engine,
         max_response_tokens=max_response_tokens,
+        context=context,
         logger=logger,
         moderated_prompts=moderated_prompts,
         unmoderated_prompts=unmoderated_prompts,

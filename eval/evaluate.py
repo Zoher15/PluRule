@@ -263,7 +263,7 @@ def main():
             num_gpus = len(args.cuda.split(','))
             results = helpers.evaluate_two_stage_vllm(
                 thread_pairs, args.model, model_config, num_gpus,
-                resource_stats, args.max_response_tokens, logger
+                resource_stats, args.max_response_tokens, args.context, logger
             )
         else:  # API models
             results = helpers.evaluate_two_stage_api(thread_pairs, model_config, logger)

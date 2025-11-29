@@ -45,6 +45,10 @@ def get_dataset_path(split: str) -> Path:
 
 # vLLM Model Configurations
 VLLM_MODELS = {
+    'qwen3-vl-4b': {
+        'hf_path': 'Qwen/Qwen3-VL-4B-Instruct',
+        'gpu_memory_utilization': 0.95
+    },
     'qwen3-vl-8b': {
         'hf_path': 'Qwen/Qwen3-VL-8B-Instruct',
         'gpu_memory_utilization': 0.95

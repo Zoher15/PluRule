@@ -71,7 +71,7 @@ def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, l
     Returns:
         2D coordinates
     """
-    min_dist = umap_params['min_dist']
+    min_dist = 1
     n_neighbors = umap_params['n_neighbors']
 
     # Cache file based on parameters (rotation applied after UMAP, so not in cache key)
@@ -208,7 +208,7 @@ def create_cluster_visualization(coords_2d: np.ndarray, metadata: pd.DataFrame, 
     # Create plot (Nature double-column: 180mm = 7.09 inches width, ~6 inch height)
     plt.figure(figsize=(7.09, 6))
 
-    point_size = 450 if entity_type == 'subreddit' else 150
+    point_size = 100 if entity_type == 'subreddit' else 100
     # Plot noise points first (very faint)
     if n_noise > 0:
         plt.scatter(coords_2d[noise_mask, 0], coords_2d[noise_mask, 1], c='lightgray', s=point_size, alpha=0.10)

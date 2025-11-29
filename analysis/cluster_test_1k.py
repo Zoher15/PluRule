@@ -119,8 +119,9 @@ def run_cluster(embeddings: np.ndarray, umap_params: Dict, hdbscan_params: Dict,
 def evaluate_clustering(embeddings: np.ndarray, labels: np.ndarray, clusterer) -> Dict:
     """Evaluate clustering quality with multiple metrics.
 
-    Note: Evaluates DBCV on original high-dimensional embeddings to validate
-    how well the clusters (found in reduced space) partition the original data.
+    Note: Evaluates DBCV on UMAP-reduced embeddings to avoid curse of dimensionality
+    issues. The reduced space is where clustering was performed and where density-based
+    metrics are most meaningful.
     """
     # Count clusters and noise
     unique_labels = set(labels)
@@ -128,10 +129,10 @@ def evaluate_clustering(embeddings: np.ndarray, labels: np.ndarray, clusterer) -
     n_noise = (labels == -1).sum()
     noise_ratio = n_noise / len(labels)
 
-    # DBCV score on original embeddings (only if we have clusters)
+    # DBCV score on reduced embeddings (only if we have clusters)
     if n_clusters > 0:
         try:
-            dbcv = validity_index(embeddings.astype(np.float64), labels, metric='cosine')
+            dbcv = validity_index(embeddings.astype(np.float64), labels, metric='euclidean')
         except Exception as e:
             # Can't use logger in worker process, print to stderr which is captured
             print(f"Warning: Failed to compute DBCV: {e}", file=sys.stderr)
@@ -191,8 +192,8 @@ def process_umap_params(umap_params_tuple, embeddings, hdbscan_params_list, iter
         labels = clusterer.fit_predict(reduced_embeddings)
         hdbscan_time = time.time() - hdbscan_start
 
-        # Evaluate
-        metrics = evaluate_clustering(embeddings, labels, clusterer)
+        # Evaluate (pass reduced embeddings for DBCV)
+        metrics = evaluate_clustering(reduced_embeddings, labels, clusterer)
 
         result = {
             'iteration': iteration,
@@ -411,21 +412,21 @@ def main():
         # Note: UMAP uses cosine on original 4096D, HDBSCAN uses euclidean on reduced space
         param_grids = {
             'subreddit': {
-                'n_neighbors': [10, 25, 50, 100, 200],
-                'n_components': [25, 50, 75, 100, 150, 200],
-                'min_dist': [0.3, 0.5, 0.7, 1.0],
-                'min_cluster_size': [10, 20, 30],
-                'min_samples': [10, 20, 30],
+                'n_neighbors': [10, 15, 20, 30, 40, 50],
+                'n_components': [5, 10, 15, 20, 25, 30],
+                'min_dist': [0.0],
+                'min_cluster_size': [10, 20],
+                'min_samples': [10, 20],
                 'metric': ['euclidean']
             },
             'rule': {
-                'n_neighbors': [10, 25, 50, 100, 200],
-                'n_components': [25, 50, 75, 100, 150, 200],
-                'min_dist': [0.3, 0.5, 0.7, 1.0],
-                'min_cluster_size': [10, 20, 30],
-                'min_samples': [10, 20, 30],
+                'n_neighbors': [10, 15, 20, 30, 40, 50],
+                'n_components': [5, 10, 15, 20, 25, 30],
+                'min_dist': [0.0],
+                'min_cluster_size': [10, 20],
+                'min_samples': [10, 20],
                 'metric': ['euclidean']
-            }
+            },
         }
 
         # Process both entity types
