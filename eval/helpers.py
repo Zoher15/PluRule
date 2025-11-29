@@ -695,9 +695,9 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
         max_model_len = model_config.get('max_model_len', 8192)
         logger.info(f"📊 Using configured max_model_len: {max_model_len}")
     else:
-        # Add buffer for generation (response tokens)
-        max_model_len = max_model_len + max_response_tokens
-        logger.info(f"📊 Using calculated max_model_len: {max_model_len} (including {max_response_tokens} token buffer)")
+        # Add buffer for generation (response tokens) plus safety margin
+        max_model_len = max_model_len + max_response_tokens + 50
+        logger.info(f"📊 Using calculated max_model_len: {max_model_len} (including {max_response_tokens} token buffer + 50 token safety margin)")
 
     llm_engine = LLM(
         model=model_config['hf_path'],
