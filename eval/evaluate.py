@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 import os
 from pathlib import Path
@@ -227,11 +228,27 @@ def main():
         existing_performance_files = list(output_dir.glob("performance_*.json"))
 
         if existing_performance_files and not args.override:
-            logger.warning(f"⚠️  Results already exist in {output_dir}")
-            logger.warning(f"   Found {len(existing_performance_files)} existing performance file(s)")
-            logger.warning(f"   Use --override flag to overwrite existing results")
-            logger.info("❌ Evaluation skipped")
-            return
+            # Check if existing results are from debug mode (5 pairs)
+            latest_perf_file = sorted(existing_performance_files)[-1]
+            with open(latest_perf_file, 'r') as f:
+                perf_data = json.load(f)
+                total_pairs = perf_data.get('metrics', {}).get('overall', {}).get('total_pairs', 0)
+
+            if total_pairs == 5:
+                logger.warning(f"⚠️  Found debug results (5 pairs) in {output_dir}")
+                logger.warning(f"   Current run will {'use debug mode' if args.debug else 'use full dataset'}")
+                if not args.debug:
+                    logger.info(f"♻️  Automatically overriding debug results with full evaluation")
+                else:
+                    logger.warning(f"   Use --override flag to overwrite existing debug results")
+                    logger.info("❌ Evaluation skipped")
+                    return
+            else:
+                logger.warning(f"⚠️  Results already exist in {output_dir}")
+                logger.warning(f"   Found {len(existing_performance_files)} existing performance file(s) with {total_pairs} pairs")
+                logger.warning(f"   Use --override flag to overwrite existing results")
+                logger.info("❌ Evaluation skipped")
+                return
 
         elif existing_performance_files and args.override:
             logger.info(f"♻️  Override mode: Will overwrite existing results in {output_dir}")
@@ -251,22 +268,42 @@ def main():
             logger
         )
 
-        # 3. Apply chat templates
-        _log_section(logger, "STEP 3: APPLYING CHAT TEMPLATES")
-        thread_pairs, resource_stats = helpers.apply_chat_template(thread_pairs, args.model, logger)
+        # 3. Process in batches for memory efficiency
+        batch_size = 550
+        num_batches = (len(thread_pairs) + batch_size - 1) // batch_size
+        logger.info(f"\nProcessing {len(thread_pairs)} pairs in {num_batches} batch(es) of {batch_size}")
+        logger.info("="*80)
 
-        # 4. Two-stage evaluation
-        _log_section(logger, "STEP 4: TWO-STAGE EVALUATION")
         model_config = config.get_model_config(args.model)
-        if model_config['type'] == 'vllm':
-            # Calculate number of GPUs from --cuda argument
-            num_gpus = len(args.cuda.split(','))
-            results = helpers.evaluate_two_stage_vllm(
-                thread_pairs, args.model, model_config, num_gpus,
-                resource_stats, args.max_response_tokens, args.context, logger
-            )
-        else:  # API models
-            results = helpers.evaluate_two_stage_api(thread_pairs, model_config, logger)
+        results = []
+
+        for i in range(num_batches):
+            start, end = i * batch_size, min((i + 1) * batch_size, len(thread_pairs))
+            batch = thread_pairs[start:end]
+
+            logger.info(f"\nBatch {i+1}/{num_batches}: pairs {start}-{end-1} ({len(batch)} pairs)")
+
+            # Apply chat templates
+            _log_section(logger, f"STEP 3.{i+1}: APPLYING CHAT TEMPLATES")
+            batch, resource_stats = helpers.apply_chat_template(batch, args.model, logger)
+
+            # Two-stage evaluation
+            _log_section(logger, f"STEP 4.{i+1}: TWO-STAGE EVALUATION")
+            if model_config['type'] == 'vllm':
+                num_gpus = len(args.cuda.split(','))
+                batch_results = helpers.evaluate_two_stage_vllm(
+                    batch, args.model, model_config, num_gpus,
+                    resource_stats, args.max_response_tokens, args.context, logger
+                )
+            else:
+                batch_results = helpers.evaluate_two_stage_api(batch, model_config, logger)
+
+            results.extend(batch_results)
+            logger.info(f"✓ Batch {i+1}/{num_batches} complete ({len(results)}/{len(thread_pairs)} pairs)")
+
+        logger.info("\n" + "="*80)
+        logger.info(f"✓ All batches complete! Total results: {len(results)}")
+        logger.info("="*80)
 
         # 5. Calculate metrics
         _log_section(logger, "STEP 5: CALCULATING METRICS")

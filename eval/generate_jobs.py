@@ -23,8 +23,8 @@ INTERPRETER = "python"
 # Priority: 0 is highest, higher numbers are lower priority
 MODELS = {
     'qwen3-vl-4b': {'ncudas': 1, 'priority': 0},
-    'qwen3-vl-8b': {'ncudas': 1, 'priority': 1},
-    'qwen3-vl-30b': {'ncudas': 1, 'priority': 2},
+    # 'qwen3-vl-8b': {'ncudas': 1, 'priority': 1},
+    # 'qwen3-vl-30b': {'ncudas': 1, 'priority': 2},
 }
 
 SPLITS = [
@@ -52,7 +52,7 @@ MODES = [
 # Optional flags
 MAX_RESPONSE_TOKENS = 2048
 DEBUG = False
-OVERRIDE = True
+OVERRIDE = False
 
 
 def generate_job_lines(

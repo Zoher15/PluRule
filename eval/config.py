@@ -55,7 +55,7 @@ VLLM_MODELS = {
     },
     'qwen3-vl-30b': {
         'hf_path': 'Qwen/Qwen3-VL-30B-A3B-Instruct',
-        'gpu_memory_utilization': 0.95
+        'gpu_memory_utilization': 0.90
     }
 }
 

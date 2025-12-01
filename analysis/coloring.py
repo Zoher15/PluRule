@@ -127,7 +127,7 @@ def assign_colors_with_conflicts(centroids: List[Tuple[float, float]],
     - Build conflict graph from overlapping convex hulls
     - Greedy coloring: assign colors left-to-right
     - Overlapping clusters: distance ≥ 2 in palette
-    - All clusters: unique colors (no reuse)
+    - All clusters: unique colors when possible (allows reuse if >26 clusters)
 
     Args:
         centroids: List of (x, y) median centroid tuples
@@ -207,16 +207,28 @@ def assign_colors_with_conflicts(centroids: List[Tuple[float, float]],
             # Emergency fallback: just avoid used colors
             valid_colors = [c for c in range(26) if c not in used_colors]
 
+        if not valid_colors:
+            # Final fallback: allow color reuse, just avoid neighbors
+            valid_colors = [c for c in range(26) if c not in neighbor_colors]
+
+        if not valid_colors:
+            # Ultimate fallback: use any color (shouldn't happen, but prevents crash)
+            valid_colors = list(range(26))
+
         # Prefer color closest to ideal X-position
         ideal_color = int((x_rank_map[cluster_idx] / max(n - 1, 1)) * 25)
         best_color = min(valid_colors, key=lambda c: abs(c - ideal_color))
 
         # Log color assignment
+        is_reused = best_color in used_colors
         if neighbor_colors:
             if best_color != ideal_color:
-                log(f"  Cluster {cluster_idx}: SHIFTED from ideal {ideal_color} to {best_color} (neighbors using {sorted(neighbor_colors)})")
+                reuse_note = " [REUSED]" if is_reused else ""
+                log(f"  Cluster {cluster_idx}: SHIFTED from ideal {ideal_color} to {best_color} (neighbors using {sorted(neighbor_colors)}){reuse_note}")
             else:
                 log(f"  Cluster {cluster_idx}: kept ideal color {ideal_color} (neighbors using {sorted(neighbor_colors)}, no conflict)")
+        elif is_reused:
+            log(f"  Cluster {cluster_idx}: REUSED color {best_color} (no overlapping neighbors)")
 
         color_assignments[cluster_idx] = best_color
         used_colors.add(best_color)
