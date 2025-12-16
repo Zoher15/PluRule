@@ -14,7 +14,7 @@ from pathlib import Path
 from itertools import product
 
 # Configuration
-SCRIPT_PATH = Path(__file__).parent / "evaluate.py"
+SCRIPT_PATH = "/data3/zkachwal/reddit-mod-collection-pipeline/eval/evaluate.py"
 CONDA_ENV = "reddit-mod-pipeline"
 INTERPRETER = "python"
 
@@ -22,9 +22,12 @@ INTERPRETER = "python"
 # Model configurations: name -> {ncudas, priority}
 # Priority: 0 is highest, higher numbers are lower priority
 MODELS = {
-    'qwen3-vl-4b': {'ncudas': 1, 'priority': 0},
-    # 'qwen3-vl-8b': {'ncudas': 1, 'priority': 1},
-    # 'qwen3-vl-30b': {'ncudas': 1, 'priority': 2},
+    'qwen3-vl-4b-instruct': {'ncudas': 1, 'priority': 0},
+    'qwen3-vl-8b-instruct': {'ncudas': 1, 'priority': 1},
+    'qwen3-vl-30b-instruct': {'ncudas': 1, 'priority': 2},
+    'qwen3-vl-4b-thinking': {'ncudas': 1, 'priority': 0},
+    'qwen3-vl-8b-thinking': {'ncudas': 1, 'priority': 1},
+    'qwen3-vl-30b-thinking': {'ncudas': 1, 'priority': 2},
 }
 
 SPLITS = [
@@ -32,17 +35,15 @@ SPLITS = [
 ]
 
 CONTEXTS = [
-    'subreddit-submission-media-discussion-user',
-    'subreddit-submission-discussion-user',
     'submission-media-discussion-user',
-    'subreddit-submission-media-discussion',
-    'subreddit-submission-media-user',
-    'subreddit-discussion-user'
+    'submission-discussion-user',
+    'submission-discussion',
+    'discussion',
+    'none'
 ]
 
 PHRASES = [
-    'baseline',
-    'cot'
+    'baseline'
 ]
 
 MODES = [
@@ -52,7 +53,7 @@ MODES = [
 # Optional flags
 MAX_RESPONSE_TOKENS = 2048
 DEBUG = False
-OVERRIDE = False
+OVERRIDE = True
 
 
 def generate_job_lines(

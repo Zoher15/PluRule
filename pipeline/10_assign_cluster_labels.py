@@ -15,10 +15,6 @@ Output:
 - data/{split}_dehydrated_clustered.json.zst (dehydrated versions)
 - data/test_hydrated_clustered.json (uncompressed test set)
 - data/stage10_cluster_assignment_stats.json
-- data/stage10_rule_cluster_distribution.png (visualization of rule cluster distribution)
-- data/stage10_rule_cluster_distribution.pdf (publication-quality version)
-- data/stage10_subreddit_cluster_distribution.png (visualization of subreddit cluster distribution)
-- data/stage10_subreddit_cluster_distribution.pdf (publication-quality version)
 
 The script adds cluster labels to:
 1. Thread pairs (rule clusters):
@@ -37,7 +33,6 @@ import os
 import time
 import json
 import pandas as pd
-import matplotlib.pyplot as plt
 from typing import Dict, Tuple
 from collections import Counter
 
@@ -46,6 +41,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import PATHS, create_directories
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import write_json_file, read_compressed_json, write_compressed_json
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def normalize_language(lang_code: str) -> str:
+    """Normalize language code by taking root (e.g., en-au → en, pt_BR → pt)."""
+    return lang_code.replace('_', '-').split('-')[0]
+
 
 # ============================================================================
 # Data Loading
@@ -184,8 +189,13 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
     stats = {
         'total_subreddits': 0,
         'total_thread_pairs': 0,
+        'total_comments': 0,  # Total comments across all threads
         'pairs_with_rule_clusters': 0,
         'subreddits_with_clusters': 0,
+        'unique_rules': set(),  # Track unique (subreddit, rule) pairs
+        'unique_rule_clusters': set(),  # Track unique rule cluster IDs
+        'unique_subreddit_clusters': set(),  # Track unique subreddit cluster IDs
+        'unique_languages': set(),  # Track unique languages
         'rule_cluster_distribution': Counter(),
         'subreddit_cluster_distribution': Counter(),
         'subreddit_cluster_pair_distribution': Counter()  # Track pairs by subreddit cluster
@@ -195,6 +205,11 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
         subreddit = sub_data['subreddit'].lower()
         stats['total_subreddits'] += 1
 
+        # Track language (normalized)
+        language = sub_data.get('language', 'unknown')
+        normalized_lang = normalize_language(language)
+        stats['unique_languages'].add(normalized_lang)
+
         # Assign subreddit cluster
         subreddit_cluster_info = subreddit_mapping[subreddit]
         sub_data['subreddit_cluster_id'] = subreddit_cluster_info['cluster_id']
@@ -202,13 +217,21 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
         sub_data['subreddit_cluster_probability'] = subreddit_cluster_info['cluster_probability']
         stats['subreddits_with_clusters'] += 1
         stats['subreddit_cluster_distribution'][subreddit_cluster_info['cluster_label']] += 1
+        stats['unique_subreddit_clusters'].add(subreddit_cluster_info['cluster_id'])
 
         # Assign rule clusters to each thread pair
         for pair in sub_data['thread_pairs']:
             stats['total_thread_pairs'] += 1
 
+            # Count comments in both threads
+            num_comments = len(pair['moderated_thread']) + len(pair['unmoderated_thread'])
+            stats['total_comments'] += num_comments
+
             # Get the matched rule from metadata
             matched_rule = pair['metadata']['rule']
+
+            # Track unique rules
+            stats['unique_rules'].add((subreddit, matched_rule))
 
             # Look up cluster info
             key = (subreddit, matched_rule)
@@ -220,6 +243,7 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
             pair['metadata']['rule_cluster_probability'] = cluster_info['cluster_probability']
             stats['pairs_with_rule_clusters'] += 1
             stats['rule_cluster_distribution'][cluster_info['cluster_label']] += 1
+            stats['unique_rule_clusters'].add(cluster_info['cluster_id'])
 
             # Track thread pairs by subreddit cluster label
             stats['subreddit_cluster_pair_distribution'][subreddit_cluster_info['cluster_label']] += 1
@@ -273,92 +297,6 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
 
     dehydrated['metadata']['instructions'] = 'Use hydration script. All text fields contain [NEEDS_HYDRATION].'
     return dehydrated
-
-
-# ============================================================================
-# Visualization
-# ============================================================================
-
-def create_cluster_distribution_plot(all_stats: Dict, cluster_type: str, logger):
-    """Create a bar plot showing the percentage distribution of thread pairs across clusters.
-
-    Args:
-        all_stats: Dictionary containing statistics for each split
-        cluster_type: Either 'rule' or 'subreddit'
-        logger: Logger instance
-    """
-    # Aggregate cluster counts across all splits
-    total_cluster_counts = Counter()
-    total_pairs = 0
-
-    cluster_key = f'{cluster_type}_clusters'
-
-    for split, stats in all_stats.items():
-        # Get cluster distribution from all_clusters
-        if cluster_key in stats:
-            for cluster_label, count in stats[cluster_key].items():
-                total_cluster_counts[cluster_label] += count
-        if cluster_type == 'rule':
-            total_pairs += stats.get('pairs_with_rule_clusters', 0)
-        else:
-            total_pairs += stats.get('total_thread_pairs', 0)
-
-    # Exclude 'Other' cluster (cluster_id -1)
-    filtered_counts = {label: count for label, count in total_cluster_counts.items()
-                      if label.lower().strip() != 'other'}
-
-    if not filtered_counts:
-        logger.warning(f"  ⚠️  No {cluster_type} cluster data available for plotting")
-        return
-
-    # Calculate percentages
-    cluster_labels = list(filtered_counts.keys())
-    cluster_counts = list(filtered_counts.values())
-    cluster_percentages = [100 * count / total_pairs for count in cluster_counts]
-
-    # Sort by percentage (descending)
-    sorted_data = sorted(zip(cluster_labels, cluster_percentages), key=lambda x: x[1], reverse=True)
-    sorted_labels, sorted_percentages = zip(*sorted_data)
-
-    # Create the plot
-    plt.figure(figsize=(14, 8))
-    bars = plt.bar(range(len(sorted_labels)), sorted_percentages, color='steelblue', edgecolor='black', linewidth=0.5)
-
-    # Customize the plot
-    plt.xlabel('Cluster Label', fontsize=12, fontweight='bold')
-    plt.ylabel('Percentage of Thread Pairs (%)', fontsize=12, fontweight='bold')
-    title = f'Distribution of Thread Pairs Across {cluster_type.title()} Clusters'
-    plt.title(title, fontsize=14, fontweight='bold', pad=20)
-    plt.xticks(range(len(sorted_labels)), sorted_labels, rotation=45, ha='right')
-    plt.grid(axis='y', alpha=0.3, linestyle='--')
-
-    # Add percentage labels on top of bars
-    for i, (bar, pct) in enumerate(zip(bars, sorted_percentages)):
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height,
-                f'{pct:.1f}%',
-                ha='center', va='bottom', fontsize=9)
-
-    plt.tight_layout()
-
-    # Save the plot
-    plot_file = os.path.join(PATHS['data'], f'stage10_{cluster_type}_cluster_distribution.png')
-    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    logger.info(f"  ✅ Saved {cluster_type} cluster distribution plot to: {plot_file}")
-
-    # Also save as PDF for publication quality
-    pdf_file = os.path.join(PATHS['data'], f'stage10_{cluster_type}_cluster_distribution.pdf')
-    plt.savefig(pdf_file, bbox_inches='tight')
-    logger.info(f"  ✅ Saved PDF version to: {pdf_file}")
-
-    plt.close()
-
-    # Log summary
-    logger.info(f"  📊 Plotted {len(sorted_labels)} {cluster_type} clusters")
-    logger.info(f"  📊 Total pairs: {sum(cluster_counts):,}")
-    logger.info(f"  📊 Top 5 {cluster_type} clusters:")
-    for i, (label, pct) in enumerate(zip(sorted_labels[:5], sorted_percentages[:5])):
-        logger.info(f"      {i+1}. {label}: {pct:.2f}%")
 
 
 # ============================================================================
@@ -421,12 +359,17 @@ def main():
             logger.info(f"  📊 Statistics:")
             logger.info(f"    Total subreddits: {stats['total_subreddits']}")
             logger.info(f"    Total thread pairs: {stats['total_thread_pairs']}")
+            logger.info(f"    Total comments: {stats['total_comments']}")
+            logger.info(f"    Unique rules: {len(stats['unique_rules'])}")
+            logger.info(f"    Unique languages: {len(stats['unique_languages'])} ({', '.join(sorted(stats['unique_languages']))})")
             logger.info(f"    ")
             logger.info(f"    Rule Clusters:")
-            logger.info(f"      Total pairs with rule clusters: {stats['pairs_with_rule_clusters']}")
+            logger.info(f"      Pairs with rule clusters: {stats['pairs_with_rule_clusters']}")
+            logger.info(f"      Unique rule clusters: {len(stats['unique_rule_clusters'])}")
             logger.info(f"    ")
             logger.info(f"    Subreddit Clusters:")
-            logger.info(f"      Total subreddits with clusters: {stats['subreddits_with_clusters']}")
+            logger.info(f"      Subreddits with clusters: {stats['subreddits_with_clusters']}")
+            logger.info(f"      Unique subreddit clusters: {len(stats['unique_subreddit_clusters'])}")
 
             # Save hydrated version
             hydrated_output = os.path.join(PATHS['data'], f'{split}_hydrated_clustered.json.zst')
@@ -459,6 +402,12 @@ def main():
             all_stats[split] = {
                 'total_subreddits': stats['total_subreddits'],
                 'total_thread_pairs': stats['total_thread_pairs'],
+                'total_comments': stats['total_comments'],
+                'unique_rules': len(stats['unique_rules']),  # Convert set to count
+                'unique_rule_clusters': len(stats['unique_rule_clusters']),  # Convert set to count
+                'unique_subreddit_clusters': len(stats['unique_subreddit_clusters']),  # Convert set to count
+                'unique_languages': len(stats['unique_languages']),  # Convert set to count
+                'languages': sorted(list(stats['unique_languages'])),  # List of languages
                 'pairs_with_rule_clusters': stats['pairs_with_rule_clusters'],
                 'subreddits_with_clusters': stats['subreddits_with_clusters'],
                 'top_10_rule_clusters': dict(stats['rule_cluster_distribution'].most_common(10)),
@@ -472,6 +421,34 @@ def main():
         logger.info("SAVING STATISTICS")
         logger.info("="*80)
 
+        # Compute overall totals across all splits
+        overall_totals = {
+            'total_thread_pairs': sum(s.get('total_thread_pairs', 0) for s in all_stats.values()),
+            'total_comments': sum(s.get('total_comments', 0) for s in all_stats.values()),
+            'total_subreddits': len(subreddit_mapping),  # Unique subreddits across all splits
+            'total_unique_rules': len(rule_mapping),  # Unique rules across all splits
+            'total_rule_clusters': len(set(
+                cluster_id for s in all_stats.values()
+                for cluster_id in range(s.get('unique_rule_clusters', 0))
+            )) if all_stats else 0,
+            'total_subreddit_clusters': len(set(
+                cluster_id for s in all_stats.values()
+                for cluster_id in range(s.get('unique_subreddit_clusters', 0))
+            )) if all_stats else 0,
+        }
+        # Get actual cluster counts from the distributions (more accurate)
+        all_rule_clusters = set()
+        all_subreddit_clusters = set()
+        all_languages = set()
+        for s in all_stats.values():
+            all_rule_clusters.update(s.get('rule_clusters', {}).keys())
+            all_subreddit_clusters.update(s.get('subreddit_clusters', {}).keys())
+            all_languages.update(s.get('languages', []))
+        overall_totals['total_rule_clusters'] = len(all_rule_clusters)
+        overall_totals['total_subreddit_clusters'] = len(all_subreddit_clusters)
+        overall_totals['total_languages'] = len(all_languages)
+        overall_totals['languages'] = sorted(list(all_languages))
+
         summary_stats = {
             'metadata': {
                 'stage': 10,
@@ -479,6 +456,7 @@ def main():
                 'creation_date': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'processing_time_seconds': time.time() - start_time
             },
+            'overall_totals': overall_totals,
             'cluster_assignment_statistics': all_stats,
             'output_files': output_files,
             'total_unique_rules_mapped': len(rule_mapping),
@@ -488,17 +466,6 @@ def main():
         stats_file = os.path.join(PATHS['data'], 'stage10_cluster_assignment_stats.json')
         write_json_file(summary_stats, stats_file, pretty=True)
         logger.info(f"  ✅ Saved statistics to: {stats_file}")
-
-        # Create cluster distribution plots
-        logger.info("\n" + "="*80)
-        logger.info("CREATING CLUSTER DISTRIBUTION PLOTS")
-        logger.info("="*80)
-
-        logger.info("\n📊 Creating rule cluster distribution plot...")
-        create_cluster_distribution_plot(all_stats, 'rule', logger)
-
-        logger.info("\n📊 Creating subreddit cluster distribution plot...")
-        create_cluster_distribution_plot(all_stats, 'subreddit', logger)
 
         elapsed = time.time() - start_time
         logger.info("\n" + "="*80)

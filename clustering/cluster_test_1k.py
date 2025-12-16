@@ -211,7 +211,7 @@ def run_grid_search(embeddings: np.ndarray, metadata: pd.DataFrame, param_grid: 
     """Run grid search over UMAP and HDBSCAN parameters in parallel."""
     # Default static parameters if not provided
     if umap_static_params is None:
-        umap_static_params = {'metric': 'cosine', 'random_state': 0, 'verbose': False}
+        umap_static_params = {'metric': 'cosine', 'random_state': 15, 'verbose': False}
     if hdbscan_static_params is None:
         hdbscan_static_params = {'cluster_selection_method': 'eom'}
 
@@ -415,16 +415,16 @@ def main():
                 'n_neighbors': [10, 15, 20, 30, 40, 50],
                 'n_components': [5, 10, 15, 20, 25, 30],
                 'min_dist': [0.0],
-                'min_cluster_size': [10, 20],
-                'min_samples': [10, 20],
+                'min_cluster_size': [20, 25, 30],
+                'min_samples': [5, 10, 15, 20],
                 'metric': ['euclidean']
             },
             'rule': {
                 'n_neighbors': [10, 15, 20, 30, 40, 50],
                 'n_components': [5, 10, 15, 20, 25, 30],
                 'min_dist': [0.0],
-                'min_cluster_size': [10, 20],
-                'min_samples': [10, 20],
+                'min_cluster_size': [20, 25, 30],
+                'min_samples': [5, 10, 15, 20],
                 'metric': ['euclidean']
             },
         }

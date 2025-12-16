@@ -45,17 +45,29 @@ def get_dataset_path(split: str) -> Path:
 
 # vLLM Model Configurations
 VLLM_MODELS = {
-    'qwen3-vl-4b': {
+    'qwen3-vl-4b-instruct': {
         'hf_path': 'Qwen/Qwen3-VL-4B-Instruct',
         'gpu_memory_utilization': 0.95
     },
-    'qwen3-vl-8b': {
+    'qwen3-vl-8b-instruct': {
         'hf_path': 'Qwen/Qwen3-VL-8B-Instruct',
         'gpu_memory_utilization': 0.95
     },
-    'qwen3-vl-30b': {
+    'qwen3-vl-30b-instruct': {
         'hf_path': 'Qwen/Qwen3-VL-30B-A3B-Instruct',
-        'gpu_memory_utilization': 0.90
+        'gpu_memory_utilization': 0.95
+    },
+    'qwen3-vl-4b-thinking': {
+        'hf_path': 'Qwen/Qwen3-VL-4B-Thinking',
+        'gpu_memory_utilization': 0.95
+    },
+    'qwen3-vl-8b-thinking': {
+        'hf_path': 'Qwen/Qwen3-VL-8B-Thinking',
+        'gpu_memory_utilization': 0.95
+    },
+    'qwen3-vl-30b-thinking': {
+        'hf_path': 'Qwen/Qwen3-VL-30B-A3B-Thinking',
+        'gpu_memory_utilization': 0.95
     }
 }
 
@@ -104,22 +116,23 @@ def is_api_model(model_name: str) -> bool:
 # Format: "flag1-flag2-flag3" e.g., "submission-media-discussion-user"
 #
 # Available flags:
-# - none: Just rules + leaf comment (baseline)
-# - subreddit: Include subreddit title and description
+# - none: Just subreddit + rules + leaf comment (baseline)
 # - submission: Include full submission (with media placeholder)
 # - media: Include actual media (requires 'submission' flag)
 # - discussion: Show all comments in thread (not just leaf)
 # - user: Show anonymized author labels (USER1, USER2, etc.) for submissions and comments
 #
+# Note: Subreddit information is always included in prompts
+#
 # Examples:
-# - "none" → rules + leaf comment only
-# - "submission" → rules + leaf + submission (with placeholder)
-# - "submission-media" → rules + leaf + submission with images
-# - "submission-discussion" → rules + leaf + submission + all comments
-# - "subreddit-submission-media-discussion-user" → everything
+# - "none" → subreddit + rules + leaf comment only
+# - "submission" → subreddit + rules + leaf + submission (with placeholder)
+# - "submission-media" → subreddit + rules + leaf + submission with images
+# - "submission-discussion" → subreddit + rules + leaf + submission + all comments
+# - "submission-media-discussion-user" → everything
 
 VALID_CONTEXT_FLAGS = {
-    'none', 'subreddit', 'submission', 'media', 'discussion', 'user'
+    'none', 'submission', 'media', 'discussion', 'user'
 }
 
 def parse_context_flags(context_string: str) -> Dict[str, bool]:
@@ -138,7 +151,6 @@ def parse_context_flags(context_string: str) -> Dict[str, bool]:
     # Handle special case of "none"
     if context_string == 'none':
         return {
-            'include_subreddit': False,
             'include_submission': False,
             'include_media': False,
             'include_discussion': False,
@@ -159,7 +171,6 @@ def parse_context_flags(context_string: str) -> Dict[str, bool]:
 
     # Build config dictionary
     return {
-        'include_subreddit': 'subreddit' in flags,
         'include_submission': 'submission' in flags,
         'include_media': 'media' in flags,
         'include_discussion': 'discussion' in flags,
@@ -174,7 +185,7 @@ def get_supported_contexts() -> List[str]:
         'submission-media',
         'submission-discussion',
         'submission-discussion-user',
-        'subreddit-submission-media-discussion-user'
+        'submission-media-discussion-user'
     ]
 
 # =============================================================================

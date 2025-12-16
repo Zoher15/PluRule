@@ -32,31 +32,6 @@ def _format_timestamp(created_utc) -> str:
     dt = datetime.fromtimestamp(created_utc)
     return dt.strftime("%a, %b %d, %Y, %I:%M%p").replace(" 0", " ")
 
-def _clean_markdown_urls(text: str) -> str:
-    """
-    Remove markdown-style URLs and images from text.
-    Used for submission bodies when media is shown.
-
-    Removes patterns like:
-    - [text](url)
-    - ![alt](url)
-    - Bare URLs
-
-    Keeps the link text but removes the URL.
-    """
-    import re
-
-    # Remove markdown images: ![alt](url) -> ""
-    text = re.sub(r'!\[([^\]]*)\]\([^\)]+\)', '', text)
-
-    # Remove markdown links: [text](url) -> "text"
-    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-
-    # Remove bare URLs (http/https)
-    text = re.sub(r'https?://[^\s]+', '', text)
-
-    return text
-
 def _clean_user_mentions(text: str) -> str:
     """
     Remove user mentions from text.
@@ -274,21 +249,20 @@ def _build_question_text(pair: Dict[str, Any],
     # Build context parts in order: subreddit, rules, submission, discussion, question
     context_parts = []
 
-    # 1. Subreddit (only show if flag is set)
-    if context_config.get('include_subreddit', False):
-        subreddit_name = pair['subreddit']
-        subreddit_parts = [f"Subreddit: r/{subreddit_name}"]
+    # 1. Subreddit (always shown)
+    subreddit_name = pair['subreddit']
+    subreddit_parts = [f"Subreddit: r/{subreddit_name}"]
 
-        # Add title and description
-        subreddit_title = pair.get('subreddit_title', '')
-        if subreddit_title:
-            subreddit_parts.append(f"Title: {subreddit_title}")
+    # Add title and description if available
+    subreddit_title = pair.get('subreddit_title', '')
+    if subreddit_title:
+        subreddit_parts.append(f"Title: {subreddit_title}")
 
-        subreddit_description = pair.get('subreddit_description', '')
-        if subreddit_description:
-            subreddit_parts.append(f"Description: {subreddit_description}")
+    subreddit_description = pair.get('subreddit_description', '')
+    if subreddit_description:
+        subreddit_parts.append(f"Description: {subreddit_description}")
 
-        context_parts.append("\n".join(subreddit_parts))
+    context_parts.append("\n".join(subreddit_parts))
 
     # 2. Rules (always shown)
     rules_text = _format_rules(pair['rules'])
@@ -356,6 +330,7 @@ def _format_submission(submission: Dict[str, Any],
     """Format submission content."""
     title = submission.get('title', '[No title]')
     selftext = submission.get('selftext', '').strip()
+    url = submission.get('url', '').strip()
     link_flair = submission.get('link_flair_text')
     created_utc = submission.get('created_utc', 0)
 
@@ -379,20 +354,19 @@ def _format_submission(submission: Dict[str, Any],
     # Build body content
     body_parts = []
 
+    # Add URL if present
+    if url:
+        body_parts.append(url)
+
     # Add media placeholder if media exists but not included
     if has_media and not show_media:
         body_parts.append("[Image present but not shown]")
 
-    # Add text content (always clean user mentions; clean URLs when media is shown)
+    # Add text content (always clean user mentions)
     if selftext:
-        cleaned_text = selftext
-        if show_media:
-            # Clean markdown URLs when showing actual images
-            cleaned_text = _clean_markdown_urls(cleaned_text)
-        # Always clean user mentions
-        cleaned_text = _clean_user_mentions(cleaned_text)
+        cleaned_text = _clean_user_mentions(selftext)
         body_parts.append(cleaned_text)
-    elif not has_media:  # Only show [No text] if there's also no media
+    elif not has_media and not url:  # Only show [No text] if there's no media and no URL
         body_parts.append("[No text]")
 
     body_text = "\n".join(body_parts)
@@ -699,15 +673,24 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
         max_model_len = max_model_len + max_response_tokens + 50
         logger.info(f"📊 Using calculated max_model_len: {max_model_len} (including {max_response_tokens} token buffer + 50 token safety margin)")
 
-    llm_engine = LLM(
-        model=model_config['hf_path'],
-        tensor_parallel_size=num_gpus,
-        gpu_memory_utilization=model_config.get('gpu_memory_utilization', 0.9),
-        trust_remote_code=model_config.get('trust_remote_code', True),
-        max_model_len=max_model_len,
-        limit_mm_per_prompt=limit_mm_per_prompt,
-        seed=0
-    )
+    # Set max_num_seqs conservatively if media is included (images cause memory pressure)
+    llm_kwargs = {
+        'model': model_config['hf_path'],
+        'tensor_parallel_size': num_gpus,
+        'gpu_memory_utilization': model_config.get('gpu_memory_utilization', 0.9),
+        'trust_remote_code': model_config.get('trust_remote_code', True),
+        'max_model_len': max_model_len,
+        'limit_mm_per_prompt': limit_mm_per_prompt,
+        'seed': 0
+    }
+
+    if 'media' in context.split('-'):
+        llm_kwargs['max_num_seqs'] = 32
+        logger.info(f"📊 Setting max_num_seqs=32 due to media in context")
+    else:
+        logger.info(f"📊 Using vLLM auto max_num_seqs (no media in context)")
+
+    llm_engine = LLM(**llm_kwargs)
     logger.info(f"✅ LLM engine initialized with tensor_parallel_size={num_gpus}")
 
     # Stage 1: Generate reasoning for all threads (moderated + unmoderated)

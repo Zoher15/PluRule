@@ -2,10 +2,11 @@
 """
 Stage 9: Create Final Datasets with Train/Val/Test Splits
 
-Creates train/val/test splits from subreddits with ≥25 thread pairs:
-- Test: First 25 pairs from each subreddit
-- Val: 10% of remaining pairs (after test) from each subreddit
-- Train: 90% of remaining pairs (after test) from each subreddit
+Creates train/val/test splits using an adaptive strategy per subreddit:
+- n=1: 1 test, 0 val, 0 train
+- n=2: 1 test, 0 val, 1 train
+- 3≤n<10: 1 test, 1 val, (n-2) train
+- n≥10: 10% test, 10% val, 80% train (rounded, min 1 each)
 
 All three datasets are combined across subreddits (not per-subreddit splits).
 
@@ -47,7 +48,6 @@ from utils.files import read_json_file, write_json_file, read_zst_lines, json_lo
 from utils.stats import calculate_jsd_from_uniform, rank_by_score
 
 from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
 
 # ============================================================================
 # Helper Functions
@@ -85,7 +85,12 @@ def verify_mod_comments_with_llm(subreddit_data: Dict[str, Dict], subreddit_rule
         trust_remote_code=True,
         max_model_len=8192  # Limit to reduce KV cache memory usage
     )
-    sampling_params = SamplingParams(temperature=0, max_tokens=512, stop=["True", "False", "true", "false", "TRUE", "FALSE"], include_stop_str_in_output=True)
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=10,
+        stop=["(a)", "(b)", "(c)", "a)", "b)", "c)", "a", "b", "c", "A", "B", "C"],
+        include_stop_str_in_output=True
+    )
 
     # Collect all verification tasks
     verification_tasks = []
@@ -106,13 +111,16 @@ def verify_mod_comments_with_llm(subreddit_data: Dict[str, Dict], subreddit_rule
             rule_comprehensive = rule_obj.get('rule_comprehensive', matched_rule) if rule_obj else matched_rule
 
             # Build prompt
-            prompt = f"""Is the following moderator comment saying that this rule was violated?
+            prompt = f"""Moderator's Comment: {body_clean}
 
-Moderator Comment: {body_clean}
+Target Rule: {rule_comprehensive}
 
-{rule_comprehensive}
+Is the moderator's comment:
+(a) Stating a violation of the target rule
+(b) Discussing the target rule
+(c) Unrelated to the target rule
 
-Answer only "True" or "False"."""
+Final Choice:"""
 
             verification_tasks.append({
                 'subreddit': subreddit,
@@ -127,7 +135,7 @@ Answer only "True" or "False"."""
     # Batch inference
     logger.info(f"  Running LLM inference on {len(verification_tasks)} prompts...")
     prompts = [task['prompt'] for task in verification_tasks]
-    outputs = llm.generate(prompts, sampling_params,)
+    outputs = llm.generate(prompts, sampling_params)
 
     # Parse results
     logger.info(f"  Parsing LLM responses...")
@@ -138,13 +146,13 @@ Answer only "True" or "False"."""
     for task, output in zip(verification_tasks, outputs):
         response = output.outputs[0].text.strip()
 
-        # Parse True/False
+        # Parse (a)/(b)/(c) response - only (a) is valid
         is_valid = None
         response_lower = response.lower()
-        if 'true' in response_lower:
+        if 'a' in response_lower and 'b' not in response_lower and 'c' not in response_lower:
             is_valid = True
             pass_count += 1
-        elif 'false' in response_lower:
+        elif 'b' in response_lower or 'c' in response_lower:
             is_valid = False
             fail_count += 1
         else:
@@ -159,6 +167,7 @@ Answer only "True" or "False"."""
             'matched_rule': task['matched_rule'],
             'rule_comprehensive': task['rule_comprehensive'],
             'body_clean': task['body_clean'],
+            'prompt': task['prompt'],
             'llm_response': response,
             'is_valid': is_valid,
             'pair_idx': task['pair_idx']
@@ -421,11 +430,11 @@ def split_pairs(thread_pairs: List[Dict], subreddit: str) -> Tuple[List[Dict], L
         return test_pairs, val_pairs, train_pairs
 
 
-def process_subreddit_split(subreddit: str, data: Dict, split_pairs: List[Dict],
+def process_subreddit_split(subreddit: str, data: Dict, pairs_to_process: List[Dict],
                             rules: List[Dict], language: str, title: str, description: str,
-                            trees_data: Dict, logger) -> Dict:
+                            trees_data: Dict) -> Dict:
     """Process one split (test/val/train) for a subreddit."""
-    if not split_pairs:
+    if not pairs_to_process:
         return None
 
     # Extract rule short names for answer options
@@ -436,30 +445,33 @@ def process_subreddit_split(subreddit: str, data: Dict, split_pairs: List[Dict],
     split_submission_ids = set()
     split_tree_ids = set()
 
-    for pair in split_pairs:
+    for pair in pairs_to_process:
         submission_id = pair.get('metadata', {}).get('submission_id')
         if not submission_id or submission_id not in data['submissions']:
             continue
 
+        # Make a copy to avoid mutating the original data
+        pair_copy = pair.copy()
+
         # Add answer options for both threads
-        mod_comment_id = pair['mod_comment_id']
-        matched_rule = pair['metadata'].get('rule', '')
+        mod_comment_id = pair_copy['mod_comment_id']
+        matched_rule = pair_copy['metadata'].get('rule', '')
 
         # Moderated thread: correct answer is the matched rule
         mod_options = create_shuffled_answer_options(rule_short_names, mod_comment_id, '_mod')
-        pair['moderated_answer_options'] = mod_options
-        pair['moderated_correct_answer'] = next(
+        pair_copy['moderated_answer_options'] = mod_options
+        pair_copy['moderated_correct_answer'] = next(
             (opt['label'] for opt in mod_options if opt['rule'] == matched_rule), None
         )
 
         # Unmoderated thread: correct answer is "No rules broken"
         unmod_options = create_shuffled_answer_options(rule_short_names, mod_comment_id, '_unmod')
-        pair['unmoderated_answer_options'] = unmod_options
-        pair['unmoderated_correct_answer'] = next(
+        pair_copy['unmoderated_answer_options'] = unmod_options
+        pair_copy['unmoderated_correct_answer'] = next(
             (opt['label'] for opt in unmod_options if opt['rule'] == 'No rules broken'), None
         )
 
-        processed_pairs.append(pair)
+        processed_pairs.append(pair_copy)
         split_submission_ids.add(submission_id)
         split_tree_ids.add(submission_id)
 
@@ -488,9 +500,10 @@ def process_subreddit_split(subreddit: str, data: Dict, split_pairs: List[Dict],
 
     # Collect trees for submissions in this split
     split_trees = {}
+    trees = trees_data.get('trees', {})
     for submission_id in split_tree_ids:
-        if submission_id in trees_data['trees']:
-            split_trees[submission_id] = trees_data['trees'][submission_id]
+        if submission_id in trees:
+            split_trees[submission_id] = trees[submission_id]
 
     # Calculate rule distribution
     rule_counts = defaultdict(int)
@@ -520,7 +533,7 @@ def process_subreddit_split(subreddit: str, data: Dict, split_pairs: List[Dict],
 # ============================================================================
 
 def dehydrate_dataset(hydrated: Dict) -> Dict:
-    """Strip to IDs only."""
+    """Strip to IDs only, preserving answer options and metadata."""
     dehydrated = {'metadata': hydrated['metadata'].copy(), 'subreddits': []}
 
     for sub_data in hydrated['subreddits']:
@@ -533,6 +546,11 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
                 'media_files': ['[NEEDS_HYDRATION]'] * sub.get('num_media', 0)
             }
 
+        # Dehydrate trees (replace tree content with placeholder)
+        dehydrated_trees = {}
+        for tree_id in sub_data.get('trees', {}):
+            dehydrated_trees[tree_id] = '[NEEDS_HYDRATION]'
+
         dehydrated_pairs = []
         for pair in sub_data['thread_pairs']:
             dehydrated_pairs.append({
@@ -540,7 +558,12 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
                 'mod_comment': '[NEEDS_HYDRATION]',
                 'moderated_thread': ['[NEEDS_HYDRATION]'] * len(pair['moderated_thread']),
                 'unmoderated_thread': ['[NEEDS_HYDRATION]'] * len(pair['unmoderated_thread']),
-                'metadata': pair['metadata']
+                'metadata': pair['metadata'],
+                # Preserve answer options (they're deterministically generated, but useful to keep)
+                'moderated_answer_options': pair.get('moderated_answer_options', []),
+                'moderated_correct_answer': pair.get('moderated_correct_answer'),
+                'unmoderated_answer_options': pair.get('unmoderated_answer_options', []),
+                'unmoderated_correct_answer': pair.get('unmoderated_correct_answer')
             })
 
         dehydrated['subreddits'].append({
@@ -554,6 +577,7 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
             'jsd_from_uniform': sub_data['jsd_from_uniform'],
             'rules': sub_data['rules'],
             'submissions': dehydrated_subs,
+            'trees': dehydrated_trees,
             'thread_pairs': dehydrated_pairs
         })
 
@@ -649,23 +673,27 @@ def main():
                 logger.warning(f"  Trees file not found for r/{subreddit}")
                 continue
 
-            with open(trees_file, 'rb') as f:
-                trees_data = pickle.load(f)
+            try:
+                with open(trees_file, 'rb') as f:
+                    trees_data = pickle.load(f)
+            except Exception as e:
+                logger.warning(f"  Error loading trees for r/{subreddit}: {e}")
+                continue
 
             test_pairs, val_pairs, train_pairs = split_pairs(data['thread_pairs'], subreddit)
 
             if test_pairs:
-                test_data = process_subreddit_split(subreddit, data, test_pairs, rules, language, title, description, trees_data, logger)
+                test_data = process_subreddit_split(subreddit, data, test_pairs, rules, language, title, description, trees_data)
                 if test_data:
                     test_subreddits.append(test_data)
 
             if val_pairs:
-                val_data = process_subreddit_split(subreddit, data, val_pairs, rules, language, title, description, trees_data, logger)
+                val_data = process_subreddit_split(subreddit, data, val_pairs, rules, language, title, description, trees_data)
                 if val_data:
                     val_subreddits.append(val_data)
 
             if train_pairs:
-                train_data = process_subreddit_split(subreddit, data, train_pairs, rules, language, title, description, trees_data, logger)
+                train_data = process_subreddit_split(subreddit, data, train_pairs, rules, language, title, description, trees_data)
                 if train_data:
                     train_subreddits.append(train_data)
 

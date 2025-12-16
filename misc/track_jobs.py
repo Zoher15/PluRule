@@ -23,6 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Track job status across evaluations')
     parser.add_argument('--json', action='store_true', help='Output results as JSON')
     parser.add_argument('--csv', action='store_true', help='Output results as CSV')
+    parser.add_argument('--latex', action='store_true', help='Output publication-ready LaTeX table')
     parser.add_argument('--output-dir', type=str,
                        default='/data3/zkachwal/reddit-mod-collection-pipeline/output/eval',
                        help='Path to output directory')
@@ -185,8 +186,27 @@ def is_debug_log(log_file):
     return False
 
 
+def has_completion_marker(log_file):
+    """Check if a log file contains completion markers ('EVALUATION COMPLETE', 'completed successfully', or 'finished')."""
+    try:
+        with open(log_file, 'r') as f:
+            # Read file looking for completion markers
+            content = f.read()
+            # Look for completion indicators
+            if 'EVALUATION COMPLETE' in content or 'completed successfully' in content.lower() or 'finished' in content.lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def scan_in_progress_jobs(logs_dir, completed_jobs):
-    """Scan logs directory for in-progress jobs (evaluation_*.log without performance file)."""
+    """Scan logs directory for in-progress jobs (evaluation_*.log files).
+
+    Note: Scans ALL log files, regardless of completion status. The merge_results()
+    function will determine if a job is IN_PROGRESS by comparing log timestamp
+    with performance file timestamp (for rerun detection).
+    """
     in_progress = {}
 
     for log_file in Path(logs_dir).rglob('evaluation_*.log'):
@@ -196,10 +216,6 @@ def scan_in_progress_jobs(logs_dir, completed_jobs):
 
         model, split, context, phrase, mode = parsed
         key = (model, split, context, phrase, mode)
-
-        # Skip if already completed
-        if key in completed_jobs:
-            continue
 
         # Skip if this is a debug log
         if is_debug_log(log_file):
@@ -245,14 +261,40 @@ def get_all_combinations(output_dir, logs_dir):
 
 
 def merge_results(completed, in_progress, all_combinations):
-    """Merge completed and in-progress jobs, mark remaining as pending."""
+    """Merge completed and in-progress jobs, mark remaining as pending.
+
+    Detects reruns by checking for completion markers in log files:
+    - If log file contains 'completed successfully' or 'finished': COMPLETED
+    - If log file exists but no completion marker: IN_PROGRESS (still running)
+    - If only performance file exists: COMPLETED
+    - If only log file exists: Check for completion marker
+    """
     results = {}
 
     for key in all_combinations:
-        if key in completed:
+        if key in completed and key in in_progress:
+            # Both exist - check log file for completion markers
+            log_file = in_progress[key]['file']
+
+            if has_completion_marker(log_file):
+                # Log has completion message - job is completed
+                results[key] = completed[key]
+            else:
+                # Log has no completion message - job is still running (rerun)
+                results[key] = in_progress[key]
+        elif key in completed:
             results[key] = completed[key]
         elif key in in_progress:
-            results[key] = in_progress[key]
+            # Only log exists - check if it has completion marker
+            log_file = in_progress[key]['file']
+
+            if has_completion_marker(log_file):
+                # Log has completion message but no performance file yet
+                # Mark as IN_PROGRESS since results aren't generated yet
+                results[key] = in_progress[key]
+            else:
+                # Log has no completion marker - job is still running
+                results[key] = in_progress[key]
         else:
             results[key] = {
                 'status': 'PENDING',
@@ -472,6 +514,143 @@ def output_csv(results, output_file):
     print(f"📄 CSV output saved to: {output_file}")
 
 
+def output_latex(results, output_file):
+    """Output publication-ready LaTeX table."""
+    # Filter for test split and completed jobs only
+    test_results = {
+        k: v for k, v in results.items()
+        if k[1] == 'test' and v['status'] == 'COMPLETED' and v['overall_accuracy'] is not None
+    }
+
+    if not test_results:
+        print("❌ No completed test results found for LaTeX table")
+        return
+
+    # Extract unique contexts and models
+    contexts = sorted(set(k[2] for k in test_results.keys()))
+    models_set = set(k[0] for k in test_results.keys())
+
+    # Sort models by size (extract number from model name)
+    def extract_model_size(model_name):
+        """Extract size number from model name for sorting."""
+        import re
+        match = re.search(r'(\d+)b', model_name)
+        return int(match.group(1)) if match else 999
+
+    models = sorted(models_set, key=extract_model_size)
+
+    # Get all phrase/mode combinations
+    phrase_modes = sorted(set((k[3], k[4]) for k in test_results.keys()))
+
+    # Find best score per model
+    best_per_model = {}
+    for model in models:
+        model_results = {
+            k: v for k, v in test_results.items()
+            if k[0] == model
+        }
+        if model_results:
+            best_key = max(model_results.items(), key=lambda x: x[1]['overall_accuracy'])[0]
+            best_per_model[model] = best_key
+
+    # Start building LaTeX table
+    latex_lines = []
+    latex_lines.append("% Publication-ready results table")
+    latex_lines.append("% Requires \\usepackage{booktabs}")
+    latex_lines.append("\\begin{table}[htbp]")
+    latex_lines.append("\\centering")
+    latex_lines.append("\\caption{Model Performance Across Context Configurations}")
+    latex_lines.append("\\label{tab:results}")
+
+    # Create column specification
+    num_cols = len(contexts)
+    col_spec = "l" + "c" * num_cols
+    latex_lines.append(f"\\begin{{tabular}}{{{col_spec}}}")
+    latex_lines.append("\\toprule")
+
+    # Create header row with context abbreviations
+    word_abbrev = {
+        'subreddit': 'SR',
+        'submission': 'Sub',
+        'media': 'Med',
+        'discussion': 'Disc',
+        'user': 'User'
+    }
+
+    context_abbrevs = []
+    for ctx in contexts:
+        parts = ctx.split('-')
+        abbrev_parts = [word_abbrev.get(p, p.capitalize()[:4]) for p in parts]
+        abbrev = '-'.join(abbrev_parts)
+        context_abbrevs.append(abbrev)
+
+    header = "Model & " + " & ".join(context_abbrevs) + " \\\\"
+    latex_lines.append(header)
+    latex_lines.append("\\midrule")
+
+    # Create rows for each model and phrase/mode combination
+    for i, model in enumerate(models):
+        # Extract parameter size for model label
+        import re
+        match = re.search(r'(\d+)b', model)
+        model_size = match.group(1) + "B" if match else model
+
+        # Get phrase/mode combinations for this model
+        model_phrase_modes = sorted(set(
+            (k[3], k[4]) for k in test_results.keys() if k[0] == model
+        ))
+
+        for j, (phrase, mode) in enumerate(model_phrase_modes):
+            # Create row label
+            if phrase == 'baseline':
+                phrase_label = "Baseline"
+            else:
+                phrase_label = f"{phrase.upper()}-{mode.capitalize()}"
+
+            if j == 0:
+                # First row for this model - include model size with rowspan effect
+                row_label = f"{model_size} & {phrase_label}"
+            else:
+                # Subsequent rows - indent phrase label
+                row_label = f"& {phrase_label}"
+
+            row_values = []
+            for ctx in contexts:
+                key = (model, 'test', ctx, phrase, mode)
+
+                if key in test_results:
+                    acc = test_results[key]['overall_accuracy'] * 100
+                    acc_str = f"{acc:.1f}"
+
+                    # Check if this is the best for this model
+                    if key == best_per_model.get(model):
+                        acc_str = f"\\textbf{{{acc_str}}}"
+
+                    row_values.append(acc_str)
+                else:
+                    row_values.append("--")
+
+            row = row_label + " & " + " & ".join(row_values) + " \\\\"
+            latex_lines.append(row)
+
+        # Add midrule between models (but not after the last one)
+        if i < len(models) - 1:
+            latex_lines.append("\\midrule")
+
+    latex_lines.append("\\bottomrule")
+    latex_lines.append("\\end{tabular}")
+    latex_lines.append("\\end{table}")
+
+    # Write to file
+    with open(output_file, 'w') as f:
+        f.write('\n'.join(latex_lines))
+
+    print(f"📄 LaTeX table saved to: {output_file}")
+    print(f"   Models included: {', '.join(models)}")
+    print(f"   Contexts: {len(contexts)}")
+    print(f"   Phrase/mode combinations: {len(phrase_modes)}")
+
+
 def main():
     args = parse_args()
 
@@ -500,6 +679,9 @@ def main():
     elif args.csv:
         output_file = args.output.replace('.txt', '.csv')
         output_csv(results, output_file)
+    elif args.latex:
+        output_file = args.output.replace('.txt', '.tex')
+        output_latex(results, output_file)
     else:
         display_table(results, args.output)
 

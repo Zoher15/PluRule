@@ -269,7 +269,7 @@ def main():
         )
 
         # 3. Process in batches for memory efficiency
-        batch_size = 550
+        batch_size = 275
         num_batches = (len(thread_pairs) + batch_size - 1) // batch_size
         logger.info(f"\nProcessing {len(thread_pairs)} pairs in {num_batches} batch(es) of {batch_size}")
         logger.info("="*80)
