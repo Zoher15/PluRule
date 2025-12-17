@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 # Data files and outputs
+*.tex
 *.zst
 *.pkl
 *.csv
@@ -15,6 +16,7 @@ archive_new.tar.gz
 archive_final.tar.gz
 output/
 trash/
+misc/
 
 # Credentials - exclude everything except template
 credentials/*

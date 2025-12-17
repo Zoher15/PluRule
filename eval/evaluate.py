@@ -296,7 +296,12 @@ def main():
                     resource_stats, args.max_response_tokens, args.context, logger
                 )
             else:
-                batch_results = helpers.evaluate_two_stage_api(batch, model_config, logger)
+                # API models: use batch-specific output directory to avoid state collision
+                batch_output_dir = output_dir / f"batch_{i}"
+                batch_results = helpers.evaluate_two_stage_api(
+                    batch, model_config, batch_output_dir,
+                    args.context, args.max_response_tokens, logger
+                )
 
             results.extend(batch_results)
             logger.info(f"✓ Batch {i+1}/{num_batches} complete ({len(results)}/{len(thread_pairs)} pairs)")

@@ -84,7 +84,24 @@ API_MODELS = {
         'model_id': 'gpt-4o',
         'max_tokens': 4096,
         'use_batch_api': True
+    },
+    'gpt-5.2': {
+        'api_type': 'openai',
+        'model_id': 'gpt-5.2-2025-12-11',
+        'max_tokens': 4096,
+        'use_batch_api': True,
+        'stage2_model': 'qwen3-vl-30b-instruct'  # Local model for answer extraction
     }
+}
+
+# OpenAI Batch API Configuration
+OPENAI_BATCH_CONFIG = {
+    'poll_interval_seconds': 60,      # How often to check batch status
+    'max_poll_attempts': 1440,        # Max ~24 hours of polling
+    'completion_window': '24h',       # Batch completion window
+    'state_filename': 'batch_state.json',  # State file for recovery
+    'max_requests_per_batch': 50000,  # OpenAI limit: 50K requests per batch
+    'max_file_size_bytes': 190 * 1024 * 1024,  # 190 MB (leave buffer under 200 MB limit)
 }
 
 def get_model_config(model_name: str) -> Dict[str, Any]:
