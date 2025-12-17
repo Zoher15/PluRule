@@ -26,48 +26,61 @@ from config import PATHS
 from plotting_config import create_two_column_figure, save_figure, PUBLICATION_DPI
 
 
-def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels, rule_values, ylabel, bar_values=None, show_baseline=False, log_scale=False):
-    """Standardized two-column bar plot."""
-    x_sub = np.arange(len(sub_labels))
-    x_rule = np.arange(len(rule_labels))
+def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels, rule_values, xlabel, bar_values=None, show_baseline=False, log_scale=False):
+    """Standardized two-column horizontal bar plot."""
+    y_sub = np.arange(len(sub_labels))
+    y_rule = np.arange(len(rule_labels))
 
-    # LEFT: Subreddit (Orange)
-    ax_left.bar(x_sub, sub_values, color='#EE7733', alpha=0.85, edgecolor='black', linewidth=0.5)
-    ax_left.set_ylabel(ylabel, fontsize=5)
-    ax_left.set_xticks(x_sub)
-    ax_left.set_xticklabels(sub_labels, rotation=45, ha='right', fontsize=3.5)
-    ax_left.tick_params(axis='y', labelsize=3.5, pad=0.5, length=3)
-    ax_left.tick_params(axis='x', pad=0.5, length=3)
-    ax_left.grid(axis='y', alpha=0.2, linestyle='--', linewidth=0.5)
-    ax_left.set_xlim(-0.8, len(sub_labels) - 0.2)
+    # LEFT: Subreddit (Orange) - horizontal bars
+    ax_left.barh(y_sub, sub_values, height=0.8, color='#EE7733', alpha=0.85, edgecolor='black', linewidth=0.2)
+    ax_left.set_xlabel(xlabel, fontsize=6)
+    ax_left.set_yticks(y_sub)
+    ax_left.set_yticklabels(sub_labels, fontsize=5)
+    ax_left.tick_params(axis='x', labelsize=5, pad=0.5, length=3, width=0.25)
+    ax_left.tick_params(axis='y', pad=0.5, length=3, width=0.25)
+    ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+    ax_left.set_ylim(-0.45, len(sub_labels) - 0.2)
+    ax_left.invert_yaxis()  # Highest values at top
+    ax_left.set_xlim(left=10)
+    ax_left.spines['top'].set_visible(False)
+    ax_left.spines['right'].set_visible(False)
+    ax_left.spines['left'].set_linewidth(0.25)
+    ax_left.spines['bottom'].set_linewidth(0.25)
     if log_scale:
-        ax_left.set_yscale('log')
-        ax_left.set_ylim(bottom=1, top=10000)
+        ax_left.set_xscale('log')
+        ax_left.set_xlim(left=10, right=10000)
 
-    # RIGHT: Rule (Teal)
-    ax_right.bar(x_rule, rule_values, color='#0077BB', alpha=0.85, edgecolor='black', linewidth=0.5)
-    ax_right.set_xticks(x_rule)
-    ax_right.set_xticklabels(rule_labels, rotation=45, ha='right', fontsize=3.5)
-    ax_right.tick_params(axis='y', labelsize=3.5, pad=0.5, length=3)
-    ax_right.tick_params(axis='x', pad=0.5, length=3)
-    ax_right.grid(axis='y', alpha=0.2, linestyle='--', linewidth=0.5)
-    ax_right.set_xlim(-0.8, len(rule_labels) - 0.2)
+    # RIGHT: Rule (Teal) - horizontal bars
+    ax_right.barh(y_rule, rule_values, height=0.8, color='#0077BB', alpha=0.85, edgecolor='black', linewidth=0.2)
+    ax_right.set_xlabel(xlabel, fontsize=6)
+    ax_right.set_yticks(y_rule)
+    ax_right.set_yticklabels(rule_labels, fontsize=5)
+    ax_right.tick_params(axis='x', labelsize=5, pad=0.5, length=3, width=0.25)
+    ax_right.tick_params(axis='y', pad=0.5, length=3, width=0.25)
+    ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+    ax_right.set_ylim(-0.45, len(rule_labels) - 0.2)
+    ax_right.invert_yaxis()  # Highest values at top
+    ax_right.set_xlim(left=10)
+    ax_right.spines['top'].set_visible(False)
+    ax_right.spines['right'].set_visible(False)
+    ax_right.spines['left'].set_linewidth(0.25)
+    ax_right.spines['bottom'].set_linewidth(0.25)
     if log_scale:
-        ax_right.set_yscale('log')
-        ax_right.set_ylim(bottom=1, top=10000)
+        ax_right.set_xscale('log')
+        ax_right.set_xlim(left=10, right=10000)
 
     # Add baseline if needed
     if show_baseline:
         for ax in [ax_left, ax_right]:
-            ax.axhline(y=50, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
+            ax.axvline(x=50, color='gray', linestyle='--', alpha=0.5, linewidth=0.8)
 
     # Add value labels on bars
     if bar_values:
         sub_bar_values, rule_bar_values = bar_values
         for ax, values in [(ax_left, sub_bar_values), (ax_right, rule_bar_values)]:
             for bar, val in zip(ax.patches, values):
-                ax.text(bar.get_x() + bar.get_width()/2., bar.get_height(),
-                       f'{val:.0f}', ha='center', va='bottom', fontsize=3)
+                ax.text(bar.get_width(), bar.get_y() + bar.get_height()/2.,
+                       f'{val:.0f}', ha='left', va='center', fontsize=3)
 
     # Labels in top right corner (no bold)
     for ax, label in zip([ax_left, ax_right], ['a', 'b']):
@@ -103,7 +116,7 @@ def plot_distribution():
         else:
             rule_labels, rule_counts = zip(*sorted_data)
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.07})
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.4})
     plot_two_column_bars(ax_left, ax_right, sub_labels, sub_counts, rule_labels, rule_counts,
                          'Number of Thread Pairs', log_scale=True)
 
@@ -143,7 +156,7 @@ def plot_cluster_analysis(model, split, context, metric, phrase='baseline', mode
         print(f"❌ No cluster metrics found")
         return 1
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.05})
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.4})
     plot_two_column_bars(ax_left, ax_right, sub_labels, sub_accs, rule_labels, rule_accs,
                          'Accuracy (%)', bar_values=(sub_accs, rule_accs), show_baseline=True)
 

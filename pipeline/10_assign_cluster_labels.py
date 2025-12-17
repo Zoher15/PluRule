@@ -15,6 +15,7 @@ Output:
 - data/{split}_dehydrated_clustered.json.zst (dehydrated versions)
 - data/test_hydrated_clustered.json (uncompressed test set)
 - data/stage10_cluster_assignment_stats.json
+- data/stage10_dataset_stats_table.tex (LaTeX table for paper)
 
 The script adds cluster labels to:
 1. Thread pairs (rule clusters):
@@ -190,6 +191,7 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
         'total_subreddits': 0,
         'total_thread_pairs': 0,
         'total_comments': 0,  # Total comments across all threads
+        'total_images': 0,  # Total images across all submissions
         'pairs_with_rule_clusters': 0,
         'subreddits_with_clusters': 0,
         'unique_rules': set(),  # Track unique (subreddit, rule) pairs
@@ -209,6 +211,10 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
         language = sub_data.get('language', 'unknown')
         normalized_lang = normalize_language(language)
         stats['unique_languages'].add(normalized_lang)
+
+        # Count images from submissions
+        for sub_id, submission in sub_data.get('submissions', {}).items():
+            stats['total_images'] += submission.get('num_media', 0)
 
         # Assign subreddit cluster
         subreddit_cluster_info = subreddit_mapping[subreddit]
@@ -300,6 +306,76 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
 
 
 # ============================================================================
+# LaTeX Table Generation
+# ============================================================================
+
+def generate_latex_table(all_stats: Dict, overall_totals: Dict) -> str:
+    """Generate LaTeX table for dataset statistics.
+
+    Args:
+        all_stats: Per-split statistics
+        overall_totals: Overall totals across all splits
+
+    Returns:
+        LaTeX table string
+    """
+    # Format numbers with commas
+    def fmt(n):
+        return f"{n:,}"
+
+    lines = [
+        r"\begin{table*}[t]",
+        r"  \centering",
+        r"  \setlength{\tabcolsep}{4pt}",
+        r"  \begin{tabular}{lrrrrrr}",
+        r"  \toprule",
+        r"  \textbf{Split} & \textbf{Thread Pairs} & \textbf{Comments} & \textbf{Images} & \textbf{Subreddits / Clusters} & \textbf{Rules / Clusters} & \textbf{Languages} \\",
+        r"  \midrule",
+    ]
+
+    # Add rows for each split in order
+    for split in ['train', 'val', 'test']:
+        if split not in all_stats:
+            continue
+        s = all_stats[split]
+        split_name = split.capitalize()
+        thread_pairs = fmt(s['total_thread_pairs'])
+        comments = fmt(s['total_comments'])
+        images = fmt(s['total_images'])
+        subs_clusters = f"{fmt(s['total_subreddits'])} / {s['unique_subreddit_clusters']}"
+        rules_clusters = f"{fmt(s['unique_rules'])} / {s['unique_rule_clusters']}"
+        languages = str(s['unique_languages'])
+        lines.append(f"  {split_name} & {thread_pairs} & {comments} & {images} & {subs_clusters} & {rules_clusters} & {languages} \\\\")
+
+    # Add totals row
+    lines.append(r"  \midrule")
+    total_pairs = fmt(overall_totals['total_thread_pairs'])
+    total_comments = fmt(overall_totals['total_comments'])
+    total_images = fmt(overall_totals['total_images'])
+    total_subs = fmt(overall_totals['total_subreddits'])
+    total_sub_clusters = overall_totals['total_subreddit_clusters']
+    total_rules = fmt(overall_totals['total_unique_rules'])
+    total_rule_clusters = overall_totals['total_rule_clusters']
+    total_langs = overall_totals['total_languages']
+
+    lines.append(
+        f"  \\textbf{{Total}} & \\textbf{{{total_pairs}}} & \\textbf{{{total_comments}}} & "
+        f"\\textbf{{{total_images}}} & \\textbf{{{total_subs} / {total_sub_clusters}}} & "
+        f"\\textbf{{{total_rules} / {total_rule_clusters}}} & \\textbf{{{total_langs}}} \\\\"
+    )
+
+    lines.extend([
+        r"  \bottomrule",
+        r"  \end{tabular}",
+        r"  \caption{Dataset statistics. Each thread pair contains one rule-violating and one compliant thread from the same submission.}",
+        r"  \label{tab:dataset-stats}",
+        r"\end{table*}",
+    ])
+
+    return "\n".join(lines)
+
+
+# ============================================================================
 # Main Execution
 # ============================================================================
 
@@ -360,6 +436,7 @@ def main():
             logger.info(f"    Total subreddits: {stats['total_subreddits']}")
             logger.info(f"    Total thread pairs: {stats['total_thread_pairs']}")
             logger.info(f"    Total comments: {stats['total_comments']}")
+            logger.info(f"    Total images: {stats['total_images']}")
             logger.info(f"    Unique rules: {len(stats['unique_rules'])}")
             logger.info(f"    Unique languages: {len(stats['unique_languages'])} ({', '.join(sorted(stats['unique_languages']))})")
             logger.info(f"    ")
@@ -403,6 +480,7 @@ def main():
                 'total_subreddits': stats['total_subreddits'],
                 'total_thread_pairs': stats['total_thread_pairs'],
                 'total_comments': stats['total_comments'],
+                'total_images': stats['total_images'],
                 'unique_rules': len(stats['unique_rules']),  # Convert set to count
                 'unique_rule_clusters': len(stats['unique_rule_clusters']),  # Convert set to count
                 'unique_subreddit_clusters': len(stats['unique_subreddit_clusters']),  # Convert set to count
@@ -425,6 +503,7 @@ def main():
         overall_totals = {
             'total_thread_pairs': sum(s.get('total_thread_pairs', 0) for s in all_stats.values()),
             'total_comments': sum(s.get('total_comments', 0) for s in all_stats.values()),
+            'total_images': sum(s.get('total_images', 0) for s in all_stats.values()),
             'total_subreddits': len(subreddit_mapping),  # Unique subreddits across all splits
             'total_unique_rules': len(rule_mapping),  # Unique rules across all splits
             'total_rule_clusters': len(set(
@@ -466,6 +545,13 @@ def main():
         stats_file = os.path.join(PATHS['data'], 'stage10_cluster_assignment_stats.json')
         write_json_file(summary_stats, stats_file, pretty=True)
         logger.info(f"  ✅ Saved statistics to: {stats_file}")
+
+        # Generate and save LaTeX table
+        latex_table = generate_latex_table(all_stats, overall_totals)
+        latex_file = os.path.join(PATHS['data'], 'stage10_dataset_stats_table.tex')
+        with open(latex_file, 'w') as f:
+            f.write(latex_table)
+        logger.info(f"  ✅ Saved LaTeX table to: {latex_file}")
 
         elapsed = time.time() - start_time
         logger.info("\n" + "="*80)
