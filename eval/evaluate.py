@@ -300,7 +300,8 @@ def main():
                 batch_output_dir = output_dir / f"batch_{i}"
                 batch_results = helpers.evaluate_two_stage_api(
                     batch, model_config, batch_output_dir,
-                    args.context, args.max_response_tokens, logger
+                    args.context, args.max_response_tokens, logger,
+                    override=args.override
                 )
 
             results.extend(batch_results)

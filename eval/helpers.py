@@ -170,6 +170,9 @@ def _create_batch_jsonl_files(thread_pairs: List[Dict[str, Any]],
     max_requests = config.OPENAI_BATCH_CONFIG['max_requests_per_batch']
     max_file_size = config.OPENAI_BATCH_CONFIG['max_file_size_bytes']
 
+    # Ensure output directory exists
+    output_path.mkdir(parents=True, exist_ok=True)
+
     jsonl_files = []
     current_batch_idx = 0
     current_file = None
@@ -1332,7 +1335,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                            output_dir: Path,
                            context: str,
                            max_response_tokens: int,
-                           logger: logging.Logger) -> List[Dict[str, Any]]:
+                           logger: logging.Logger,
+                           override: bool = False) -> List[Dict[str, Any]]:
     """
     Two-stage evaluation using OpenAI Batch API (Stage 1) + local vLLM (Stage 2).
 
@@ -1347,10 +1351,30 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
         context: Context string (e.g., "submission-media")
         max_response_tokens: Max tokens for Stage 1 response
         logger: Logger instance
+        override: If True, re-run Stage 2 even if results exist
 
     Returns:
         Evaluation results list
     """
+    # =========================================================================
+    # CHECK FOR EXISTING RESULTS (skip if reasoning_*.json exists and not override)
+    # =========================================================================
+    existing_reasoning_files = list(output_dir.glob("reasoning_*.json")) if output_dir.exists() else []
+
+    if existing_reasoning_files and not override:
+        latest_reasoning_file = sorted(existing_reasoning_files)[-1]
+        logger.info(f"✅ Found existing results: {latest_reasoning_file}")
+        logger.info(f"   Skipping Stage 1 and Stage 2 (use --override to re-run)")
+
+        with open(latest_reasoning_file, 'r') as f:
+            results = json.load(f)
+
+        logger.info(f"✅ Loaded {len(results)} existing results")
+        return results
+
+    if existing_reasoning_files and override:
+        logger.info(f"♻️  Override mode: Will re-run Stage 2 (found {len(existing_reasoning_files)} existing result file(s))")
+
     # =========================================================================
     # STAGE 1: OpenAI Batch API for Reasoning (supports multiple batches)
     # =========================================================================
@@ -1593,6 +1617,14 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
             }
         }
         results.append(result)
+
+    # Save results to batch output directory for caching
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    reasoning_path = output_dir / f"reasoning_{timestamp}.json"
+    with open(reasoning_path, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2)
+    logger.info(f"💾 Batch reasoning saved to: {reasoning_path}")
 
     logger.info(f"✅ Completed hybrid two-stage evaluation for {len(results)} thread pairs")
     return results
