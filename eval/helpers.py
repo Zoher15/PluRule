@@ -319,41 +319,64 @@ def _load_multi_batch_state(output_dir: Path, logger: logging.Logger) -> Optiona
 # =============================================================================
 
 def _submit_openai_batch(jsonl_path: Path,
-                         logger: logging.Logger) -> Tuple[str, str]:
+                         logger: logging.Logger,
+                         max_retries: int = 5,
+                         base_delay: float = 30.0) -> Tuple[str, str]:
     """
-    Upload JSONL and create OpenAI batch job.
+    Upload JSONL and create OpenAI batch job with retry logic for transient errors.
 
     Args:
         jsonl_path: Path to batch requests JSONL
         logger: Logger instance
+        max_retries: Maximum number of retry attempts for transient errors
+        base_delay: Base delay in seconds between retries (exponential backoff)
 
     Returns:
         Tuple of (batch_id, input_file_id)
     """
-    from openai import OpenAI
+    from openai import OpenAI, APIError, APIConnectionError, RateLimitError
 
     client = OpenAI()  # Uses OPENAI_API_KEY env var
 
-    # Upload input file
-    logger.info(f"Uploading batch input file: {jsonl_path}")
-    with open(jsonl_path, 'rb') as f:
-        file_response = client.files.create(file=f, purpose='batch')
+    # Upload input file with retry logic
+    input_file_id = None
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Uploading batch input file: {jsonl_path}" + (f" (attempt {attempt + 1}/{max_retries})" if attempt > 0 else ""))
+            with open(jsonl_path, 'rb') as f:
+                file_response = client.files.create(file=f, purpose='batch')
+            input_file_id = file_response.id
+            logger.info(f"Uploaded file with ID: {input_file_id}")
+            break
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(f"⚠️  Upload failed: {e}. Retrying in {delay:.0f}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"❌ Upload failed after {max_retries} attempts")
+                raise
 
-    input_file_id = file_response.id
-    logger.info(f"Uploaded file with ID: {input_file_id}")
-
-    # Create batch
-    logger.info("Creating batch job...")
-    batch_response = client.batches.create(
-        input_file_id=input_file_id,
-        endpoint="/v1/chat/completions",
-        completion_window=config.OPENAI_BATCH_CONFIG['completion_window']
-    )
-
-    batch_id = batch_response.id
-    logger.info(f"Created batch job with ID: {batch_id}")
-
-    return batch_id, input_file_id
+    # Create batch with retry logic
+    for attempt in range(max_retries):
+        try:
+            logger.info("Creating batch job..." + (f" (attempt {attempt + 1}/{max_retries})" if attempt > 0 else ""))
+            batch_response = client.batches.create(
+                input_file_id=input_file_id,
+                endpoint="/v1/chat/completions",
+                completion_window=config.OPENAI_BATCH_CONFIG['completion_window']
+            )
+            batch_id = batch_response.id
+            logger.info(f"Created batch job with ID: {batch_id}")
+            return batch_id, input_file_id
+        except (APIError, APIConnectionError, RateLimitError) as e:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"⚠️  Batch creation failed: {e}. Retrying in {delay:.0f}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"❌ Batch creation failed after {max_retries} attempts")
+                raise
 
 
 def _poll_batch_status(batch_id: str,
@@ -1336,13 +1359,15 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                            context: str,
                            max_response_tokens: int,
                            logger: logging.Logger,
-                           override: bool = False) -> List[Dict[str, Any]]:
+                           override: bool = False,
+                           stage2_batch_size: int = 275) -> List[Dict[str, Any]]:
     """
     Two-stage evaluation using OpenAI Batch API (Stage 1) + local vLLM (Stage 2).
 
     Stage 1: OpenAI Batch API generates reasoning responses (async, cost-effective)
-             Supports multiple batches if data exceeds OpenAI limits (50K requests, 200MB)
+             Sends all data at once (OpenAI handles 190MB/50K request limits internally)
     Stage 2: Local Qwen3-VL-30B via vLLM extracts clean answers (fast, free)
+             Processes in batches to manage GPU memory
 
     Args:
         thread_pairs: Thread pairs with prompts
@@ -1352,6 +1377,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
         max_response_tokens: Max tokens for Stage 1 response
         logger: Logger instance
         override: If True, re-run Stage 2 even if results exist
+        stage2_batch_size: Batch size for Stage 2 local vLLM processing (default: 275)
 
     Returns:
         Evaluation results list
@@ -1398,8 +1424,9 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                 batch_responses = _download_batch_results(batch_state, output_dir, logger)
                 stage1_responses.update(batch_responses)
 
-            elif batch_state.status in ['validating', 'in_progress', 'finalizing']:
-                logger.info(f"[Batch {batch_idx + 1}] Resuming polling...")
+            elif batch_state.status in ['created', 'validating', 'in_progress', 'finalizing']:
+                # 'created' means batch was submitted but not yet started - poll until complete
+                logger.info(f"[Batch {batch_idx + 1}] Status '{batch_state.status}' - polling for completion...")
                 final_state = _poll_batch_status(batch_state.batch_id, batch_idx, logger)
 
                 # Update state
@@ -1416,8 +1443,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                 raise RuntimeError(f"Batch {batch_idx + 1} previously failed with status: {batch_state.status}")
 
             else:
-                # Status is 'created' or unknown - need to submit
-                logger.warning(f"[Batch {batch_idx + 1}] Status '{batch_state.status}' - may need manual intervention")
+                # Unknown status - raise error
+                raise RuntimeError(f"Batch {batch_idx + 1} has unknown status: {batch_state.status}")
 
     else:
         # Create and submit new batches
@@ -1548,23 +1575,40 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     )
     logger.info(f"✅ Stage 2 LLM engine initialized with {num_gpus} GPU(s)")
 
-    # Generate Stage 2 answers (no images needed - just text extraction)
+    # Generate Stage 2 answers in batches (to manage GPU memory)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
 
     # Use text-only context for Stage 2 (no media needed)
     stage2_context = context.replace('-media', '') if 'media' in context else context
 
-    stage2_responses = _generate_stage1_vllm(
-        thread_pairs=thread_pairs,
-        llm_engine=llm_engine,
-        max_response_tokens=10,
-        context=stage2_context,  # No media for answer extraction
-        logger=logger,
-        moderated_prompts=moderated_prompts,
-        unmoderated_prompts=unmoderated_prompts,
-        sampling_params=sampling_params,
-        uuid_suffix='_s2_api'
-    )
+    # Process Stage 2 in batches for GPU memory efficiency
+    num_stage2_batches = (len(thread_pairs) + stage2_batch_size - 1) // stage2_batch_size
+    logger.info(f"📊 Processing Stage 2 in {num_stage2_batches} batch(es) of {stage2_batch_size}")
+
+    stage2_responses = []
+    for batch_idx in range(num_stage2_batches):
+        start = batch_idx * stage2_batch_size
+        end = min((batch_idx + 1) * stage2_batch_size, len(thread_pairs))
+
+        batch_pairs = thread_pairs[start:end]
+        batch_mod_prompts = moderated_prompts[start:end]
+        batch_unmod_prompts = unmoderated_prompts[start:end]
+
+        logger.info(f"Stage 2 Batch {batch_idx + 1}/{num_stage2_batches}: pairs {start}-{end-1} ({len(batch_pairs)} pairs)")
+
+        batch_responses = _generate_stage1_vllm(
+            thread_pairs=batch_pairs,
+            llm_engine=llm_engine,
+            max_response_tokens=10,
+            context=stage2_context,  # No media for answer extraction
+            logger=logger,
+            moderated_prompts=batch_mod_prompts,
+            unmoderated_prompts=batch_unmod_prompts,
+            sampling_params=sampling_params,
+            uuid_suffix=f'_s2_api_b{batch_idx}'
+        )
+        stage2_responses.extend(batch_responses)
+        logger.info(f"✓ Stage 2 Batch {batch_idx + 1}/{num_stage2_batches} complete")
 
     # =========================================================================
     # BUILD FINAL RESULTS

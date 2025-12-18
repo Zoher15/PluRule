@@ -87,7 +87,7 @@ API_MODELS = {
     },
     'gpt-5.2': {
         'api_type': 'openai',
-        'model_id': 'gpt-5.2-2025-12-11',
+        'model_id': 'gpt-5.2',
         'max_tokens': 4096,
         'use_batch_api': True,
         'stage2_model': 'qwen3-vl-30b-instruct'  # Local model for answer extraction

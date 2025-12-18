@@ -268,44 +268,53 @@ def main():
             logger
         )
 
-        # 3. Process in batches for memory efficiency
-        batch_size = 275
-        num_batches = (len(thread_pairs) + batch_size - 1) // batch_size
-        logger.info(f"\nProcessing {len(thread_pairs)} pairs in {num_batches} batch(es) of {batch_size}")
-        logger.info("="*80)
-
+        # 3. Process evaluation
         model_config = config.get_model_config(args.model)
+        batch_size = 275  # Batch size for local vLLM processing
         results = []
 
-        for i in range(num_batches):
-            start, end = i * batch_size, min((i + 1) * batch_size, len(thread_pairs))
-            batch = thread_pairs[start:end]
+        if model_config['type'] == 'vllm':
+            # vLLM models: Process in batches for GPU memory efficiency
+            num_batches = (len(thread_pairs) + batch_size - 1) // batch_size
+            logger.info(f"\nProcessing {len(thread_pairs)} pairs in {num_batches} batch(es) of {batch_size}")
+            logger.info("="*80)
 
-            logger.info(f"\nBatch {i+1}/{num_batches}: pairs {start}-{end-1} ({len(batch)} pairs)")
+            for i in range(num_batches):
+                start, end = i * batch_size, min((i + 1) * batch_size, len(thread_pairs))
+                batch = thread_pairs[start:end]
 
-            # Apply chat templates
-            _log_section(logger, f"STEP 3.{i+1}: APPLYING CHAT TEMPLATES")
-            batch, resource_stats = helpers.apply_chat_template(batch, args.model, logger)
+                logger.info(f"\nBatch {i+1}/{num_batches}: pairs {start}-{end-1} ({len(batch)} pairs)")
 
-            # Two-stage evaluation
-            _log_section(logger, f"STEP 4.{i+1}: TWO-STAGE EVALUATION")
-            if model_config['type'] == 'vllm':
+                # Apply chat templates
+                _log_section(logger, f"STEP 3.{i+1}: APPLYING CHAT TEMPLATES")
+                batch, resource_stats = helpers.apply_chat_template(batch, args.model, logger)
+
+                # Two-stage evaluation
+                _log_section(logger, f"STEP 4.{i+1}: TWO-STAGE EVALUATION")
                 num_gpus = len(args.cuda.split(','))
                 batch_results = helpers.evaluate_two_stage_vllm(
                     batch, args.model, model_config, num_gpus,
                     resource_stats, args.max_response_tokens, args.context, logger
                 )
-            else:
-                # API models: use batch-specific output directory to avoid state collision
-                batch_output_dir = output_dir / f"batch_{i}"
-                batch_results = helpers.evaluate_two_stage_api(
-                    batch, model_config, batch_output_dir,
-                    args.context, args.max_response_tokens, logger,
-                    override=args.override
-                )
 
-            results.extend(batch_results)
-            logger.info(f"✓ Batch {i+1}/{num_batches} complete ({len(results)}/{len(thread_pairs)} pairs)")
+                results.extend(batch_results)
+                logger.info(f"✓ Batch {i+1}/{num_batches} complete ({len(results)}/{len(thread_pairs)} pairs)")
+        else:
+            # API models: Send all data at once for Stage 1 (OpenAI handles 190MB/50K limits)
+            # Stage 2 uses batch_size for local vLLM processing
+            logger.info(f"\nProcessing {len(thread_pairs)} pairs via API (Stage 2 batch_size={batch_size})")
+            logger.info("="*80)
+
+            _log_section(logger, "STEP 3: BUILDING PROMPTS FOR API")
+            # Note: Chat templates for API models are applied inside evaluate_two_stage_api
+
+            _log_section(logger, "STEP 4: TWO-STAGE EVALUATION (API)")
+            results = helpers.evaluate_two_stage_api(
+                thread_pairs, model_config, output_dir,
+                args.context, args.max_response_tokens, logger,
+                override=args.override,
+                stage2_batch_size=batch_size
+            )
 
         logger.info("\n" + "="*80)
         logger.info(f"✓ All batches complete! Total results: {len(results)}")

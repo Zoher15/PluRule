@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
 """
-Reapply Cluster Labels from Analysis Text Files
+Reapply Cluster Labels from Override Files
 
-After manually adding "NEW LABEL:" overrides in cluster analysis text files,
-this script propagates those changes to JSON and metadata TSV files.
+Applies manual label overrides from simple override files to JSON and metadata.
 
-CLUSTER MERGING: If multiple clusters are given the same NEW LABEL, they will
-be merged into a single logical cluster (keeping lowest cluster_id).
+OVERRIDE FILE FORMAT (e.g., rule_label_overrides.txt):
+    # Comments start with #
+    # Format: CLUSTER_ID: NEW_LABEL
+    5: Image Context
+    10: Text Context
+    3: Spam/Self-Promotion
+
+CLUSTER MERGING: If multiple clusters are given the same label in the override
+file, they will be merged into a single cluster (keeping lowest cluster_id).
 
 Workflow:
-1. Review output/clustering/{entity}_cluster_analysis.txt
-2. After any "LABEL: <original>" line, add "NEW LABEL: <your override>"
-3. Run this script to propagate changes to JSON and metadata TSV
+1. Run label_clusters.py to generate auto-labels
+2. Review output/clustering/{entity}_cluster_analysis.txt (shows LABEL: xxx, ID: N)
+3. Create/edit output/clustering/{entity}_label_overrides.txt with corrections
+4. Run this script to apply overrides to JSON and metadata TSV
 
 Usage:
     python reapply_cluster_labels.py                    # Reapply both subreddits and rules
     python reapply_cluster_labels.py --entity subreddit # Reapply only subreddits
     python reapply_cluster_labels.py --entity rule      # Reapply only rules
 
-Input (source of truth for manual overrides):
-- output/clustering/subreddit_cluster_analysis.txt (look for "NEW LABEL:" lines)
-- output/clustering/rule_cluster_analysis.txt (look for "NEW LABEL:" lines)
+Input (override files - you create these):
+- output/clustering/subreddit_label_overrides.txt
+- output/clustering/rule_label_overrides.txt
 
 Output (updated):
 - output/clustering/subreddit_cluster_labels.json (updated with new labels)
@@ -39,72 +46,72 @@ from typing import Dict, Tuple
 from collections import defaultdict
 
 
-def parse_label_overrides(analysis_file: Path, logger) -> Dict[int, str]:
-    """Parse cluster analysis text file for manual label overrides.
+def parse_label_overrides(override_file: Path, logger) -> Dict[int, str]:
+    """Parse label overrides from simple override file.
 
-    Looks for patterns like:
-        CLUSTER 5
-        ...
-        LABEL: original label
-        NEW LABEL: my override
+    Format of override file:
+        # Comments start with #
+        # Format: CLUSTER_ID: NEW_LABEL
+        5: Image Context
+        10: Text Context
+        3: Spam/Self-Promotion
 
     Args:
-        analysis_file: Path to cluster analysis text file
+        override_file: Path to override file (e.g., rule_label_overrides.txt)
         logger: Logger instance
 
     Returns:
         Dict mapping cluster_id -> new_label (only for overridden clusters)
     """
-    if not analysis_file.exists():
-        logger.error(f"❌ Error: {analysis_file} not found")
+    if not override_file.exists():
+        logger.info(f"No override file found at {override_file}")
+        logger.info(f"  To create overrides, create this file with format:")
+        logger.info(f"  CLUSTER_ID: NEW_LABEL")
+        logger.info(f"  Example: 5: Image Context")
         return {}
 
-    logger.info(f"Parsing label overrides from {analysis_file}...")
+    logger.info(f"Parsing label overrides from {override_file}...")
 
     overrides = {}
-    current_cluster_id = None
-    last_line_was_label = False
 
-    with open(analysis_file, 'r') as f:
-        for line in f:
-            line = line.rstrip('\n')
+    with open(override_file, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
 
-            # Track current cluster
-            if line.startswith('CLUSTER '):
+            # Skip empty lines and comments
+            if not line or line.startswith('#'):
+                continue
+
+            # Parse "CLUSTER_ID: NEW_LABEL" format
+            if ':' in line:
                 try:
-                    current_cluster_id = int(line.replace('CLUSTER ', '').strip())
+                    cluster_id_str, new_label = line.split(':', 1)
+                    cluster_id = int(cluster_id_str.strip())
+                    new_label = new_label.strip()
+
+                    if new_label:
+                        overrides[cluster_id] = new_label
+                        logger.info(f"  Cluster {cluster_id}: {new_label}")
+                    else:
+                        logger.warning(f"  Line {line_num}: Empty label for cluster {cluster_id}, skipping")
                 except ValueError:
-                    current_cluster_id = None
-
-            # Track when we see a LABEL: line
-            elif line.startswith('LABEL: '):
-                last_line_was_label = True
-
-            # Check for NEW LABEL: override
-            elif line.startswith('NEW LABEL: '):
-                if current_cluster_id is not None and last_line_was_label:
-                    new_label = line.replace('NEW LABEL: ', '').strip()
-                    overrides[current_cluster_id] = new_label
-                    logger.info(f"  Found override for cluster {current_cluster_id}: {new_label}")
-                last_line_was_label = False
-
+                    logger.warning(f"  Line {line_num}: Invalid format '{line}', skipping")
             else:
-                last_line_was_label = False
+                logger.warning(f"  Line {line_num}: Missing ':' separator in '{line}', skipping")
 
     if not overrides:
-        logger.info(f"  No label overrides found (no 'NEW LABEL:' lines)")
+        logger.info(f"  No valid overrides found in {override_file}")
     else:
-        logger.info(f"  Found {len(overrides)} label overrides")
+        logger.info(f"  Loaded {len(overrides)} label overrides")
 
     return overrides
 
 
 def detect_cluster_merges(overrides: Dict[int, str], all_labels: Dict[int, str], logger) -> Tuple[Dict[int, int], Dict[str, list]]:
-    """Detect clusters that should be merged based on identical labels.
+    """Detect clusters that should be merged based on identical NEW LABELs.
 
-    This includes:
-    1. Multiple overridden clusters with the same NEW LABEL
-    2. Overridden clusters matching existing (non-overridden) cluster labels
+    ONLY merges clusters when the user explicitly assigns the same NEW LABEL
+    to multiple clusters. Does NOT auto-merge existing duplicate labels.
 
     Args:
         overrides: Dict mapping cluster_id -> new_label (only overridden clusters)
@@ -116,35 +123,31 @@ def detect_cluster_merges(overrides: Dict[int, str], all_labels: Dict[int, str],
             - merge_mapping: Dict mapping old_cluster_id -> new_cluster_id (lowest in group)
             - label_groups: Dict mapping label -> list of cluster_ids with that label
     """
-    # Build complete label mapping (overrides take precedence)
-    complete_labels = dict(all_labels)  # Start with all existing labels
-    complete_labels.update(overrides)   # Apply overrides
+    # Only consider clusters that have explicit NEW LABEL overrides
+    # Group overridden clusters by their new label
+    override_label_to_clusters = defaultdict(list)
+    for cluster_id, new_label in overrides.items():
+        override_label_to_clusters[new_label].append(cluster_id)
 
-    # Group clusters by their label
-    label_to_clusters = defaultdict(list)
-    for cluster_id, label in complete_labels.items():
-        label_to_clusters[label].append(cluster_id)
-
-    # Build merge mapping (map to lowest cluster_id in each group)
+    # Build merge mapping only for clusters with duplicate NEW LABELs
     merge_mapping = {}
     label_groups = {}
 
-    for label, cluster_ids in label_to_clusters.items():
+    for label, cluster_ids in override_label_to_clusters.items():
         if len(cluster_ids) > 1:
-            # Multiple clusters with same label - merge to lowest ID
+            # Multiple clusters explicitly given the same NEW LABEL - merge them
             sorted_ids = sorted(cluster_ids)
             target_id = sorted_ids[0]
             label_groups[label] = sorted_ids
 
-            # Only map clusters that were overridden or that need to merge
             for cid in sorted_ids:
                 if cid != target_id:
                     merge_mapping[cid] = target_id
 
-            # Check if this involves any overridden clusters
-            overridden_ids = [cid for cid in sorted_ids if cid in overrides]
-            if overridden_ids:
-                logger.info(f"  Merging clusters {sorted_ids} → {target_id} (label: '{label}')")
+            logger.info(f"  Merging clusters {sorted_ids} → {target_id} (NEW LABEL: '{label}')")
+
+    if not merge_mapping:
+        logger.info("  No merges detected (no duplicate NEW LABELs)")
 
     return merge_mapping, label_groups
 
@@ -176,13 +179,12 @@ def reapply_entity_labels(entity_type: str, embeddings_dir: Path, clustering_dir
     # Build all_labels dict (existing labels for all clusters)
     all_labels = {int(cid): data['label'] for cid, data in cluster_data.items()}
 
-    # Parse manual overrides from analysis text file (source of truth)
-    analysis_file = clustering_dir / f'{entity_type}_cluster_analysis.txt'
-    overrides = parse_label_overrides(analysis_file, logger)
+    # Parse manual overrides from override file (source of truth for manual corrections)
+    override_file = clustering_dir / f'{entity_type}_label_overrides.txt'
+    overrides = parse_label_overrides(override_file, logger)
 
-    # Detect cluster merges (clusters with identical labels)
-    # This runs even if there are no overrides - will merge existing duplicate labels
-    logger.info("\nDetecting cluster merges from existing labels...")
+    # Detect cluster merges (only when user explicitly assigns same NEW LABEL to multiple clusters)
+    logger.info("\nDetecting cluster merges from NEW LABELs...")
     merge_mapping, label_groups = detect_cluster_merges(overrides, all_labels, logger)
 
     # Check if we have any work to do
@@ -208,6 +210,23 @@ def reapply_entity_labels(entity_type: str, embeddings_dir: Path, clustering_dir
     with open(labels_file, 'w') as f:
         json.dump(cluster_data, f, indent=2, ensure_ascii=False)
     logger.info(f"✅ Updated {labels_file}")
+
+    # Check for duplicate labels (warn but don't merge - only explicit overrides cause merges)
+    final_labels = {int(cid): data['label'] for cid, data in cluster_data.items()}
+    label_to_clusters = defaultdict(list)
+    for cid, label in final_labels.items():
+        label_to_clusters[label].append(cid)
+
+    duplicates = {label: cids for label, cids in label_to_clusters.items() if len(cids) > 1}
+    if duplicates:
+        logger.warning("\n⚠️  Duplicate labels detected (NOT merging - only explicit overrides merge):")
+        for label, cids in duplicates.items():
+            # Check if these are from explicit override (would have been merged) or from auto-labeling
+            override_cids = [c for c in cids if c in overrides]
+            if len(override_cids) < 2:
+                # At least one is from auto-labeling, warn user
+                logger.warning(f"  '{label}': clusters {sorted(cids)}")
+                logger.warning(f"    To merge, add ALL these IDs to override file with same label")
 
     # Update metadata TSV
     # Use 'all_rule' for rules, 'all_subreddit' for subreddits (both from train/val/test)
@@ -293,16 +312,18 @@ def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()]
+        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()],
+        force=True  # Override any existing logging config
     )
     logger = logging.getLogger(__name__)
     logger.info(f"Log file: {log_file}")
     logger.info("\nManual Override Workflow:")
-    logger.info("  1. Edit output/clustering/{entity}_cluster_analysis.txt")
-    logger.info("  2. Add 'NEW LABEL: <your label>' after any 'LABEL:' line")
-    logger.info("  3. Run this script to apply changes")
+    logger.info("  1. Review output/clustering/{entity}_cluster_analysis.txt")
+    logger.info("  2. Create/edit output/clustering/{entity}_label_overrides.txt")
+    logger.info("  3. Format: CLUSTER_ID: NEW_LABEL (e.g., '5: Image Context')")
+    logger.info("  4. Run this script to apply changes")
     logger.info("\nCluster Merging:")
-    logger.info("  - If multiple clusters get the same NEW LABEL, they will be merged")
+    logger.info("  - Give multiple clusters the same label to merge them")
     logger.info("  - Merged clusters keep the lowest cluster_id\n")
 
     try:

@@ -250,7 +250,7 @@ def label_entity_type(entity_type: str, embeddings_dir: Path, clustering_dir: Pa
                 f.write(thinking)
                 f.write(f"\n{'-'*80}\n\n")
 
-            f.write(f"LABEL: {cluster_labels.get(cluster_id, 'Unknown')}\n\n")
+            f.write(f"LABEL: {cluster_labels.get(cluster_id, 'Unknown')}, ID: {cluster_id}\n\n")
 
             # Add voting details
             details = cluster_details.get(cluster_id, {})
@@ -290,7 +290,8 @@ def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()]
+        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()],
+        force=True  # Override any existing logging config from vLLM/transformers
     )
     logger = logging.getLogger(__name__)
     logger.info(f"Log file: {log_file}")

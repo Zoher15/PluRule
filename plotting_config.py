@@ -23,7 +23,7 @@ SINGLE_COLUMN_WIDTH = 3.15  # inches (one column in 2-column layout)
 TWO_COLUMN_WIDTH = 6.3      # inches (full text width)
 
 # Figure heights by plot type
-FIGURE_HEIGHT_BARPLOT = 2.5           # inches (bar and distribution charts)
+FIGURE_HEIGHT_BARPLOT = 2.6           # inches (bar and distribution charts)
 FIGURE_HEIGHT_DISTRIBUTION = 2.0      # inches (same as bar plots)
 FIGURE_HEIGHT_SCATTER = 3.15          # inches (scatter/2D plots - square-ish subplots)
 

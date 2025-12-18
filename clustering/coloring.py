@@ -62,7 +62,7 @@ def expand_polygon(poly: List[Tuple[float, float]], buffer: float) -> List[Tuple
 
 def polygons_overlap_sat(poly1: List[Tuple[float, float]],
                          poly2: List[Tuple[float, float]],
-                         buffer: float = 0.4) -> bool:
+                         buffer: float = 0.0) -> bool:
     """Check if two convex polygons overlap using Separating Axis Theorem.
 
     Args:
@@ -185,38 +185,34 @@ def assign_colors_with_conflicts(centroids: List[Tuple[float, float]],
         # Get colors used by overlapping neighbors
         neighbor_colors = {color_assignments[n] for n in overlaps[cluster_idx] if n in color_assignments}
 
-        # Find valid colors: not used AND distance ≥ 3 from overlapping neighbors
+        # Find valid colors: not used AND distance ≥ 2 from overlapping neighbors
+        num_colors = len(rainbow_pubr_colors)  # 26 colors
         valid_colors = []
-        for c in range(26):
+        for c in range(num_colors):
             if c in used_colors:
                 continue  # Color already used by another cluster
-            if all(abs(c - nc) >= 3 for nc in neighbor_colors):
+            if all(abs(c - nc) >= 2 for nc in neighbor_colors):
                 valid_colors.append(c)
 
         if not valid_colors:
-            # Fallback: relax distance constraint to 2
-            valid_colors = [c for c in range(26)
-                           if c not in used_colors and all(abs(c - nc) >= 2 for nc in neighbor_colors)]
-
-        if not valid_colors:
             # Fallback: relax distance constraint to 1
-            valid_colors = [c for c in range(26)
+            valid_colors = [c for c in range(num_colors)
                            if c not in used_colors and c not in neighbor_colors]
 
         if not valid_colors:
             # Emergency fallback: just avoid used colors
-            valid_colors = [c for c in range(26) if c not in used_colors]
+            valid_colors = [c for c in range(num_colors) if c not in used_colors]
 
         if not valid_colors:
             # Final fallback: allow color reuse, just avoid neighbors
-            valid_colors = [c for c in range(26) if c not in neighbor_colors]
+            valid_colors = [c for c in range(num_colors) if c not in neighbor_colors]
 
         if not valid_colors:
             # Ultimate fallback: use any color (shouldn't happen, but prevents crash)
-            valid_colors = list(range(26))
+            valid_colors = list(range(num_colors))
 
         # Prefer color closest to ideal X-position
-        ideal_color = int((x_rank_map[cluster_idx] / max(n - 1, 1)) * 25)
+        ideal_color = int((x_rank_map[cluster_idx] / max(n - 1, 1)) * (num_colors - 1))
         best_color = min(valid_colors, key=lambda c: abs(c - ideal_color))
 
         # Log color assignment
@@ -238,31 +234,3 @@ def assign_colors_with_conflicts(centroids: List[Tuple[float, float]],
     return result
 
 
-def assign_colors_by_position(centroids: List[Tuple[float, float]]) -> List[str]:
-    """
-    Simple color assignment by X position (no conflict resolution).
-    Legacy function for backward compatibility.
-    """
-    n = len(centroids)
-    if n == 0:
-        return []
-
-    rainbow_pubr_colors = [
-        '#6F4C9B', '#6059A9', '#5568B8', '#4E79C5', '#4D8AC6',
-        '#4E96BC', '#549EB3', '#59A5A9', '#60AB9E', '#69B190',
-        '#77B77D', '#8CBC68', '#A6BE54', '#BEBC48', '#D1B541',
-        '#DDAA3C', '#E49C39', '#E78C35', '#E67932', '#E4632D',
-        '#DF4828', '#DA2222', '#B8221E', '#95211B', '#721E17',
-        '#521A13'
-    ]
-
-    x_sorted = sorted(range(n), key=lambda i: centroids[i][0])
-    x_rank_map = {idx: rank for rank, idx in enumerate(x_sorted)}
-
-    result = [''] * n
-    for idx in range(n):
-        x_rank = x_rank_map[idx]
-        color_index = int((x_rank / max(n - 1, 1)) * 25)
-        result[idx] = rainbow_pubr_colors[color_index]
-
-    return result

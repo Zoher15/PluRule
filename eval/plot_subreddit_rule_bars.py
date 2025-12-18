@@ -31,8 +31,8 @@ def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels,
     y_sub = np.arange(len(sub_labels))
     y_rule = np.arange(len(rule_labels))
 
-    # LEFT: Subreddit (Orange) - horizontal bars
-    ax_left.barh(y_sub, sub_values, height=0.8, color='#EE7733', alpha=0.85, edgecolor='black', linewidth=0.2)
+    # LEFT: Subreddit (Reddit Lapis Lazuli) - horizontal bars
+    ax_left.barh(y_sub, sub_values, height=0.8, color='#336699', edgecolor='black', linewidth=0.2)
     ax_left.set_xlabel(xlabel, fontsize=6)
     ax_left.set_yticks(y_sub)
     ax_left.set_yticklabels(sub_labels, fontsize=5)
@@ -50,8 +50,8 @@ def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels,
         ax_left.set_xscale('log')
         ax_left.set_xlim(left=10, right=10000)
 
-    # RIGHT: Rule (Teal) - horizontal bars
-    ax_right.barh(y_rule, rule_values, height=0.8, color='#0077BB', alpha=0.85, edgecolor='black', linewidth=0.2)
+    # RIGHT: Rule (Orange Red) - horizontal bars
+    ax_right.barh(y_rule, rule_values, height=0.8, color='#FF4500', edgecolor='black', linewidth=0.2)
     ax_right.set_xlabel(xlabel, fontsize=6)
     ax_right.set_yticks(y_rule)
     ax_right.set_yticklabels(rule_labels, fontsize=5)
@@ -108,19 +108,19 @@ def plot_distribution():
                 for label, count in stats[key].items():
                     total_counts[label] += count
 
-        filtered = {l: c for l, c in total_counts.items() if l.lower().strip() != 'other'}
-        sorted_data = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
+        sorted_data = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
+        sorted_data = [(l.lower() if l.lower() == 'other' else l, c) for l, c in sorted_data]
 
         if cluster_type == 'subreddit':
             sub_labels, sub_counts = zip(*sorted_data)
         else:
             rule_labels, rule_counts = zip(*sorted_data)
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.4})
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.3})
     plot_two_column_bars(ax_left, ax_right, sub_labels, sub_counts, rule_labels, rule_counts,
                          'Number of Thread Pairs', log_scale=True)
 
-    fig.tight_layout(pad=0.3, w_pad=0.75)
+    fig.tight_layout(pad=0, w_pad=0)
     save_figure(fig, Path(PATHS['data']) / 'stage10_cluster_distribution', dpi=PUBLICATION_DPI)
     plt.close(fig)
     print("✅ Distribution plot saved")
@@ -156,11 +156,11 @@ def plot_cluster_analysis(model, split, context, metric, phrase='baseline', mode
         print(f"❌ No cluster metrics found")
         return 1
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.4})
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot', gridspec_kw={'wspace': 0.3})
     plot_two_column_bars(ax_left, ax_right, sub_labels, sub_accs, rule_labels, rule_accs,
                          'Accuracy (%)', bar_values=(sub_accs, rule_accs), show_baseline=True)
 
-    fig.tight_layout(pad=0.3, w_pad=0.75)
+    fig.tight_layout(pad=0, w_pad=0)
     filename = f"cluster_analysis_{model}_{split}_{context}_{phrase if phrase=='baseline' else f'{phrase}_{mode}'}_{metric}"
     plots_dir = eval_dir / 'plots'
     plots_dir.mkdir(parents=True, exist_ok=True)
