@@ -184,6 +184,70 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
                fontsize=10, verticalalignment='bottom', horizontalalignment='right')
 
 
+def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall, sub_unmod,
+                            rule_labels, rule_mod, rule_overall, rule_unmod, xlabel):
+    """Overlapping bar plot showing moderated, overall, and unmoderated accuracy.
+
+    Bars are drawn back to front: unmoderated (lightest) -> overall -> moderated (darkest).
+    Annotations in black at end of each bar.
+    """
+    y_sub = np.arange(len(sub_labels))
+    y_rule = np.arange(len(rule_labels))
+
+    # LEFT: Subreddit clusters
+    # Draw bars back to front
+    ax_left.barh(y_sub, sub_unmod, height=0.8, color='#336699', alpha=0.2, edgecolor='none', zorder=2)
+    ax_left.barh(y_sub, sub_overall, height=0.8, color='#336699', alpha=0.55, edgecolor='none', zorder=3)
+    ax_left.barh(y_sub, sub_mod, height=0.8, color='#336699', alpha=1.0, edgecolor='none', zorder=4)
+    # Annotate only overall accuracy (white, inside bar at end)
+    for i, ovr in enumerate(sub_overall):
+        ax_left.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4, color='white', fontweight='bold', va='center', ha='right', zorder=5)
+
+    ax_left.set_xlabel(xlabel, fontsize=8)
+    ax_left.set_yticks(y_sub)
+    ax_left.set_yticklabels(sub_labels, fontsize=6)
+    ax_left.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_left.tick_params(axis='y', pad=0.5, length=3, width=0.25)
+    ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+    ax_left.set_ylim(-0.5, len(sub_labels) - 0.5)
+    ax_left.set_xlim(0, 105)
+    ax_left.invert_yaxis()
+    ax_left.axvline(x=50, color='gray', linestyle='--', linewidth=1.5, alpha=0.8, zorder=1)
+    ax_left.spines['top'].set_visible(False)
+    ax_left.spines['right'].set_visible(False)
+    ax_left.spines['left'].set_linewidth(0.25)
+    ax_left.spines['bottom'].set_linewidth(0.25)
+
+    # RIGHT: Rule clusters
+    # Draw bars back to front
+    ax_right.barh(y_rule, rule_unmod, height=0.8, color='#FF4500', alpha=0.2, edgecolor='none', zorder=2)
+    ax_right.barh(y_rule, rule_overall, height=0.8, color='#FF4500', alpha=0.55, edgecolor='none', zorder=3)
+    ax_right.barh(y_rule, rule_mod, height=0.8, color='#FF4500', alpha=1.0, edgecolor='none', zorder=4)
+    # Annotate only overall accuracy (white, inside bar at end)
+    for i, ovr in enumerate(rule_overall):
+        ax_right.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4, color='white', fontweight='bold', va='center', ha='right', zorder=5)
+
+    ax_right.set_xlabel(xlabel, fontsize=8)
+    ax_right.set_yticks(y_rule)
+    ax_right.set_yticklabels(rule_labels, fontsize=6)
+    ax_right.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_right.tick_params(axis='y', pad=0.5, length=3, width=0.25)
+    ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+    ax_right.set_ylim(-0.5, len(rule_labels) - 0.5)
+    ax_right.set_xlim(0, 105)
+    ax_right.invert_yaxis()
+    ax_right.axvline(x=50, color='gray', linestyle='--', linewidth=1.5, alpha=0.8, zorder=1)
+    ax_right.spines['top'].set_visible(False)
+    ax_right.spines['right'].set_visible(False)
+    ax_right.spines['left'].set_linewidth(0.25)
+    ax_right.spines['bottom'].set_linewidth(0.25)
+
+    # Labels in bottom right corner
+    for ax, label in zip([ax_left, ax_right], ['a', 'b']):
+        ax.text(0.98, 0.02, f'({label})', transform=ax.transAxes,
+               fontsize=10, verticalalignment='bottom', horizontalalignment='right')
+
+
 def plot_distribution():
     """Plot cluster distribution from stage10 stats."""
     stats_file = Path(PATHS['data']) / 'stage10_cluster_assignment_stats.json'
@@ -344,9 +408,76 @@ def plot_cluster_forest(model, split, context, metric, phrase='baseline', mode='
     return 0
 
 
+def plot_cluster_stacked(model, split, context, phrase='baseline', mode='prefill'):
+    """Stacked bar plot showing moderated, overall, and unmoderated accuracy by cluster."""
+    eval_dir = Path(PATHS['data']).parent / 'output' / 'eval'
+    perf_dir = eval_dir / model / split / context / ('baseline' if phrase == 'baseline' else f'{phrase}_{mode}')
+
+    perf_files = sorted(perf_dir.glob('performance_*.json'))
+    if not perf_files:
+        print(f"No performance files in {perf_dir}")
+        return 1
+
+    with open(perf_files[-1]) as f:
+        data = json.load(f)
+
+    # Extract all three metrics per cluster
+    for cluster_type in ['subreddit', 'rule']:
+        clusters = data['metrics'][f'per_{cluster_type}_cluster']
+        cluster_data = []
+        for name, info in clusters.items():
+            if 'overall_accuracy' in info:
+                mod = info.get('moderated_accuracy', 0) * 100
+                overall = info['overall_accuracy'] * 100
+                unmod = info.get('unmoderated_accuracy', 0) * 100
+                cluster_data.append((name, mod, overall, unmod))
+
+        # Sort by overall accuracy descending
+        sorted_data = sorted(cluster_data, key=lambda x: x[2], reverse=True)
+        sorted_data = [('other' if n.lower() == 'other' else n, m, o, u) for n, m, o, u in sorted_data]
+
+        if cluster_type == 'subreddit':
+            if sorted_data:
+                sub_labels, sub_mod, sub_overall, sub_unmod = zip(*sorted_data)
+            else:
+                sub_labels, sub_mod, sub_overall, sub_unmod = [], [], [], []
+        else:
+            if sorted_data:
+                rule_labels, rule_mod, rule_overall, rule_unmod = zip(*sorted_data)
+            else:
+                rule_labels, rule_mod, rule_overall, rule_unmod = [], [], [], []
+
+    if not (sub_labels and rule_labels):
+        print("No cluster metrics found")
+        return 1
+
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='scatter')
+    plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall, sub_unmod,
+                            rule_labels, rule_mod, rule_overall, rule_unmod, 'Accuracy (%)')
+
+    # Add legend with gray swatches showing alpha levels
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='gray', alpha=1.0, label='moderated'),
+        Patch(facecolor='gray', alpha=0.55, label='overall'),
+        Patch(facecolor='gray', alpha=0.2, label='unmoderated'),
+    ]
+    fig.legend(handles=legend_elements, loc='upper center', ncol=3, fontsize=6,
+               frameon=False, bbox_to_anchor=(0.5, 1.0))
+
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.94, bottom=0.11, wspace=0.25)
+    filename = f"cluster_stacked_{model}_{split}_{context}_{phrase if phrase=='baseline' else f'{phrase}_{mode}'}"
+    plots_dir = eval_dir / 'plots'
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    save_figure(fig, plots_dir / filename, dpi=PUBLICATION_DPI, bbox_inches=None)
+    plt.close(fig)
+    print("✅ Cluster stacked plot saved")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate paper figures (subreddit vs rule bars)')
-    parser.add_argument('type', choices=['distribution', 'cluster-analysis', 'cluster-forest'], help='Plot type')
+    parser.add_argument('type', choices=['distribution', 'cluster-analysis', 'cluster-forest', 'cluster-stacked'], help='Plot type')
     parser.add_argument('--model', default='gpt5.2-high', help='Model name')
     parser.add_argument('--split', default='test', help='Dataset split')
     parser.add_argument('--context', default='submission-media-discussion-user', help='Context')
@@ -359,6 +490,8 @@ def main():
         return plot_distribution()
     elif args.type == 'cluster-forest':
         return plot_cluster_forest(args.model, args.split, args.context, args.metric, args.phrase, args.mode)
+    elif args.type == 'cluster-stacked':
+        return plot_cluster_stacked(args.model, args.split, args.context, args.phrase, args.mode)
     else:
         return plot_cluster_analysis(args.model, args.split, args.context, args.metric, args.phrase, args.mode)
 
