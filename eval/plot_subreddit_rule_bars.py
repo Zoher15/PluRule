@@ -201,7 +201,7 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
     ax_left.barh(y_sub, sub_mod, height=0.8, color='#336699', alpha=1.0, edgecolor='none', zorder=4)
     # Annotate only overall accuracy (white, inside bar at end)
     for i, ovr in enumerate(sub_overall):
-        ax_left.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4, color='white', fontweight='bold', va='center', ha='right', zorder=5)
+        ax_left.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4.75, color='white', fontweight='bold', va='center', ha='right', zorder=5)
 
     ax_left.set_xlabel(xlabel, fontsize=8)
     ax_left.set_yticks(y_sub)
@@ -225,7 +225,7 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
     ax_right.barh(y_rule, rule_mod, height=0.8, color='#FF4500', alpha=1.0, edgecolor='none', zorder=4)
     # Annotate only overall accuracy (white, inside bar at end)
     for i, ovr in enumerate(rule_overall):
-        ax_right.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4, color='white', fontweight='bold', va='center', ha='right', zorder=5)
+        ax_right.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4.75, color='white', fontweight='bold', va='center', ha='right', zorder=5)
 
     ax_right.set_xlabel(xlabel, fontsize=8)
     ax_right.set_yticks(y_rule)
