@@ -71,37 +71,42 @@ VLLM_MODELS = {
     }
 }
 
-# API Model Configurations (Placeholder for Claude, GPT-4V, etc.)
+# API Model Configurations (uses Flex API for OpenAI models)
 API_MODELS = {
     'claude-sonnet-4': {
         'api_type': 'anthropic',
         'model_id': 'claude-sonnet-4-20250514',
-        'max_tokens': 4096,
-        'use_batch_api': True
+        'max_tokens': 4096
     },
     'gpt-4o': {
         'api_type': 'openai',
         'model_id': 'gpt-4o',
         'max_tokens': 4096,
-        'use_batch_api': True
+        'stage2_model': 'qwen3-vl-30b-instruct'
     },
-    'gpt-5.2': {
+    'gpt5.2-high': {
         'api_type': 'openai',
         'model_id': 'gpt-5.2',
         'max_tokens': 4096,
-        'use_batch_api': True,
-        'stage2_model': 'qwen3-vl-30b-instruct'  # Local model for answer extraction
+        'reasoning_effort': 'high',
+        'stage2_model': 'qwen3-vl-30b-instruct'
+    },
+    'gpt5.2-low': {
+        'api_type': 'openai',
+        'model_id': 'gpt-5.2',
+        'max_tokens': 4096,
+        'reasoning_effort': 'low',
+        'stage2_model': 'qwen3-vl-30b-instruct'
     }
 }
 
-# OpenAI Batch API Configuration
-OPENAI_BATCH_CONFIG = {
-    'poll_interval_seconds': 60,      # How often to check batch status
-    'max_poll_attempts': 1440,        # Max ~24 hours of polling
-    'completion_window': '24h',       # Batch completion window
-    'state_filename': 'batch_state.json',  # State file for recovery
-    'max_requests_per_batch': 50000,  # OpenAI limit: 50K requests per batch
-    'max_file_size_bytes': 190 * 1024 * 1024,  # 190 MB (leave buffer under 200 MB limit)
+# OpenAI Flex API Configuration
+OPENAI_FLEX_CONFIG = {
+    'timeout_seconds': 900,       # 15 minutes (Flex can be slow)
+    'max_retries': 5,             # Retry on 429 Resource Unavailable
+    'base_retry_delay': 30,       # Base delay for exponential backoff (seconds)
+    'max_workers': 50,            # ThreadPoolExecutor workers (I/O-bound, not CPU-bound)
+    'checkpoint_interval': 100,   # Save progress every N completions
 }
 
 def get_model_config(model_name: str) -> Dict[str, Any]:

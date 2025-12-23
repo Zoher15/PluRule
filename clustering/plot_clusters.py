@@ -245,7 +245,7 @@ def main():
     """Main execution function."""
     # Parse arguments
     parser = argparse.ArgumentParser(description='Plot cluster visualizations (two-column ACL format)')
-    parser.add_argument('--rotate', type=float, default=0, help='Rotation angle in degrees (affects color assignment, default: 0)')
+    parser.add_argument('--rotate', type=float, default=-45, help='Rotation angle in degrees (affects color assignment, default: -45)')
     args = parser.parse_args()
 
     # Create directories
@@ -300,9 +300,11 @@ def main():
         logger.info("Plotting rule clusters on right...")
         plot_cluster_on_axes(ax_right, rule_coords, rule_metadata, 'rule', clustering_dir, logger, args.rotate)
 
-        # Add subplot labels
+        # Add subplot labels (bottom right)
         logger.info("Adding subplot labels...")
-        add_subplot_labels([ax_left, ax_right], labels=['a', 'b'], fontsize=7)
+        for ax, label in zip([ax_left, ax_right], ['a', 'b']):
+            ax.text(0.98, 0.02, f'({label})', transform=ax.transAxes,
+                   fontsize=10, verticalalignment='bottom', horizontalalignment='right')
 
         # Add dotted border between subplots
         logger.info("Adding dotted divider between subplots...")
@@ -316,7 +318,7 @@ def main():
         logger.info("\nSaving figure...")
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0)
         output_base = clustering_dir / 'clusters_2d'
-        save_figure(fig, output_base, dpi=300, bbox_inches='tight')
+        save_figure(fig, output_base, dpi=300, bbox_inches=None)
 
         plt.close(fig)
 

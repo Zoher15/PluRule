@@ -16,9 +16,9 @@ import base64
 import os
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 from collections import defaultdict
-from dataclasses import dataclass, asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from PIL import Image
 
@@ -119,7 +119,8 @@ def _build_openai_messages(pair: Dict[str, Any],
             content_out = []
             for item in content_in:
                 if item.get('type') == 'text':
-                    content_out.append({"type": "text", "text": item['text']})
+                    # Responses API uses 'input_text' instead of 'text'
+                    content_out.append({"type": "input_text", "text": item['text']})
                 elif item.get('type') == 'image':
                     # Only encode images if media flag is set
                     if context_config.get('include_media', False):
@@ -132,9 +133,11 @@ def _build_openai_messages(pair: Dict[str, Any],
                         if image_path:
                             try:
                                 base64_url = _encode_image_base64(image_path)
+                                # Responses API uses 'input_image' with 'image_url' as direct string
                                 content_out.append({
-                                    "type": "image_url",
-                                    "image_url": {"url": base64_url}
+                                    "type": "input_image",
+                                    "image_url": base64_url,
+                                    "detail": "low"
                                 })
                             except Exception as e:
                                 logger.warning(f"Failed to encode image {image_path}: {e}")
@@ -143,364 +146,95 @@ def _build_openai_messages(pair: Dict[str, Any],
     return messages_out
 
 
-def _create_batch_jsonl_files(thread_pairs: List[Dict[str, Any]],
-                              model_id: str,
-                              max_tokens: int,
-                              context: str,
-                              output_path: Path,
-                              logger: logging.Logger) -> List[Path]:
-    """
-    Create JSONL file(s) for OpenAI Batch API, splitting if needed for size limits.
+# =============================================================================
+# OPENAI FLEX API FUNCTIONS
+# =============================================================================
 
-    OpenAI limits: 50,000 requests per batch, 200 MB max file size.
-    This function splits into multiple batch files when approaching limits.
+def _call_openai_flex(
+    messages: List[Dict],
+    model_id: str,
+    max_tokens: int,
+    reasoning_effort: str = None,
+    timeout: float = 900.0,
+    max_retries: int = 5
+) -> Dict[str, Any]:
+    """
+    Make a single OpenAI Flex API call using Responses API with reasoning.
+
+    Handles:
+    - 408 Request Timeout (auto-retry by SDK)
+    - 429 Resource Unavailable (retry with exponential backoff)
 
     Args:
-        thread_pairs: Thread pairs with prompts
-        model_id: OpenAI model ID (e.g., 'gpt-5.2-2025-12-11')
-        max_tokens: Maximum response tokens
-        context: Context string for parsing flags
-        output_path: Directory to save JSONL
-        logger: Logger instance
+        messages: OpenAI-compatible messages list (input format)
+        model_id: OpenAI model ID (e.g., 'gpt-5.2')
+        max_tokens: Maximum output tokens for response
+        reasoning_effort: Reasoning effort level ('low', 'medium', 'high') or None to skip reasoning
+        timeout: Request timeout in seconds (default 15 min for Flex)
+        max_retries: Maximum retry attempts for 429 errors
 
     Returns:
-        List of paths to created JSONL files
+        Dict with 'content' (output text) and 'reasoning_summary' (reasoning summary)
     """
-    context_config = config.parse_context_flags(context)
-    max_requests = config.OPENAI_BATCH_CONFIG['max_requests_per_batch']
-    max_file_size = config.OPENAI_BATCH_CONFIG['max_file_size_bytes']
+    from openai import OpenAI
 
-    # Ensure output directory exists
-    output_path.mkdir(parents=True, exist_ok=True)
+    client = OpenAI(timeout=timeout)
 
-    jsonl_files = []
-    current_batch_idx = 0
-    current_file = None
-    current_size = 0
-    current_requests = 0
-
-    def start_new_batch():
-        nonlocal current_batch_idx, current_file, current_size, current_requests
-        if current_file:
-            current_file.close()
-        jsonl_path = output_path / f'batch_requests_{current_batch_idx}.jsonl'
-        jsonl_files.append(jsonl_path)
-        current_file = open(jsonl_path, 'w')
-        current_size = 0
-        current_requests = 0
-        current_batch_idx += 1
-        logger.info(f"Starting batch file {current_batch_idx}: {jsonl_path}")
-
-    # Start first batch
-    start_new_batch()
-
-    for pair in thread_pairs:
-        for thread_type in ['moderated', 'unmoderated']:
-            # Build custom_id: mod_comment_id + thread_type
-            custom_id = f"{pair['mod_comment_id']}_{thread_type}"
-
-            # Build OpenAI messages
-            messages = _build_openai_messages(pair, thread_type, context_config, logger)
-
-            # Create batch request entry
-            request = {
-                "custom_id": custom_id,
-                "method": "POST",
-                "url": "/v1/chat/completions",
-                "body": {
-                    "model": model_id,
-                    "messages": messages,
-                    "max_completion_tokens": max_tokens,
-                    "temperature": 0.0
-                }
-            }
-
-            request_line = json.dumps(request) + '\n'
-            request_size = len(request_line.encode('utf-8'))
-
-            # Check if we need to start a new batch
-            if current_requests >= max_requests or (current_size + request_size) > max_file_size:
-                logger.info(f"Batch {current_batch_idx} reached limits: {current_requests} requests, {current_size / (1024*1024):.1f} MB")
-                start_new_batch()
-
-            current_file.write(request_line)
-            current_size += request_size
-            current_requests += 1
-
-    # Close the last file
-    if current_file:
-        current_file.close()
-
-    total_requests = len(thread_pairs) * 2
-    logger.info(f"Created {len(jsonl_files)} batch file(s) with {total_requests} total requests")
-    for i, path in enumerate(jsonl_files):
-        file_size = path.stat().st_size / (1024 * 1024)
-        logger.info(f"  Batch {i+1}: {path.name} ({file_size:.1f} MB)")
-
-    return jsonl_files
-
-
-# =============================================================================
-# OPENAI BATCH API - STATE MANAGEMENT
-# =============================================================================
-
-@dataclass
-class BatchState:
-    """State for a single batch job."""
-    batch_id: str
-    input_file_id: str
-    status: str  # 'created', 'validating', 'in_progress', 'completed', 'failed', 'expired', 'cancelled'
-    output_file_id: Optional[str]
-    error_file_id: Optional[str]
-    created_at: str
-    completed_at: Optional[str]
-    request_counts: Dict[str, int]  # total, completed, failed
-    batch_index: int = 0  # Index in multi-batch sequence
-
-
-@dataclass
-class MultiBatchState:
-    """State for multiple batch jobs (handles OpenAI size limits)."""
-    batches: List[BatchState]
-    total_requests: int
-    jsonl_files: List[str]  # Paths to JSONL files
-
-
-def _save_multi_batch_state(state: MultiBatchState, output_dir: Path, logger: logging.Logger) -> Path:
-    """Save multi-batch state to JSON for recovery/resumption."""
-    state_path = output_dir / config.OPENAI_BATCH_CONFIG['state_filename']
-
-    state_dict = {
-        'batches': [asdict(b) for b in state.batches],
-        'total_requests': state.total_requests,
-        'jsonl_files': state.jsonl_files
+    # Build request kwargs
+    request_kwargs = {
+        'model': model_id,
+        'input': messages,
+        'max_output_tokens': max_tokens,
+        'service_tier': "flex"
     }
+    if reasoning_effort:
+        request_kwargs['reasoning'] = {"effort": reasoning_effort, "summary": "detailed"}
 
-    with open(state_path, 'w') as f:
-        json.dump(state_dict, f, indent=2)
-
-    logger.info(f"Saved multi-batch state ({len(state.batches)} batches) to: {state_path}")
-    return state_path
-
-
-def _load_multi_batch_state(output_dir: Path, logger: logging.Logger) -> Optional[MultiBatchState]:
-    """Load existing multi-batch state if available."""
-    state_path = output_dir / config.OPENAI_BATCH_CONFIG['state_filename']
-
-    if not state_path.exists():
-        return None
-
-    with open(state_path, 'r') as f:
-        state_dict = json.load(f)
-
-    # Handle both old single-batch format and new multi-batch format
-    if 'batches' in state_dict:
-        batches = [BatchState(**b) for b in state_dict['batches']]
-        state = MultiBatchState(
-            batches=batches,
-            total_requests=state_dict['total_requests'],
-            jsonl_files=state_dict['jsonl_files']
-        )
-    else:
-        # Legacy single-batch format - convert to multi-batch
-        batch = BatchState(**state_dict)
-        state = MultiBatchState(
-            batches=[batch],
-            total_requests=batch.request_counts.get('total', 0),
-            jsonl_files=[]
-        )
-
-    logger.info(f"Loaded existing multi-batch state ({len(state.batches)} batches) from: {state_path}")
-    return state
-
-
-# =============================================================================
-# OPENAI BATCH API - OPERATIONS
-# =============================================================================
-
-def _submit_openai_batch(jsonl_path: Path,
-                         logger: logging.Logger,
-                         max_retries: int = 5,
-                         base_delay: float = 30.0) -> Tuple[str, str]:
-    """
-    Upload JSONL and create OpenAI batch job with retry logic for transient errors.
-
-    Args:
-        jsonl_path: Path to batch requests JSONL
-        logger: Logger instance
-        max_retries: Maximum number of retry attempts for transient errors
-        base_delay: Base delay in seconds between retries (exponential backoff)
-
-    Returns:
-        Tuple of (batch_id, input_file_id)
-    """
-    from openai import OpenAI, APIError, APIConnectionError, RateLimitError
-
-    client = OpenAI()  # Uses OPENAI_API_KEY env var
-
-    # Upload input file with retry logic
-    input_file_id = None
     for attempt in range(max_retries):
         try:
-            logger.info(f"Uploading batch input file: {jsonl_path}" + (f" (attempt {attempt + 1}/{max_retries})" if attempt > 0 else ""))
-            with open(jsonl_path, 'rb') as f:
-                file_response = client.files.create(file=f, purpose='batch')
-            input_file_id = file_response.id
-            logger.info(f"Uploaded file with ID: {input_file_id}")
-            break
-        except (APIError, APIConnectionError, RateLimitError) as e:
-            if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)  # Exponential backoff
-                logger.warning(f"⚠️  Upload failed: {e}. Retrying in {delay:.0f}s...")
+            response = client.responses.create(**request_kwargs)
+
+            # Extract output text
+            content = response.output_text or ''
+
+            # Extract reasoning summary from output array
+            reasoning_summary = ''
+            for item in response.output:
+                if item.type == 'reasoning' and hasattr(item, 'summary'):
+                    # Concatenate all summary texts
+                    summaries = [s.text for s in item.summary if hasattr(s, 'text')]
+                    reasoning_summary = '\n'.join(summaries)
+                    break
+
+            return {
+                'content': content,
+                'reasoning_summary': reasoning_summary
+            }
+        except Exception as e:
+            error_str = str(e)
+            # Retry on 429 Resource Unavailable
+            if "429" in error_str and attempt < max_retries - 1:
+                delay = config.OPENAI_FLEX_CONFIG['base_retry_delay'] * (2 ** attempt)
                 time.sleep(delay)
             else:
-                logger.error(f"❌ Upload failed after {max_retries} attempts")
                 raise
 
-    # Create batch with retry logic
-    for attempt in range(max_retries):
-        try:
-            logger.info("Creating batch job..." + (f" (attempt {attempt + 1}/{max_retries})" if attempt > 0 else ""))
-            batch_response = client.batches.create(
-                input_file_id=input_file_id,
-                endpoint="/v1/chat/completions",
-                completion_window=config.OPENAI_BATCH_CONFIG['completion_window']
-            )
-            batch_id = batch_response.id
-            logger.info(f"Created batch job with ID: {batch_id}")
-            return batch_id, input_file_id
-        except (APIError, APIConnectionError, RateLimitError) as e:
-            if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                logger.warning(f"⚠️  Batch creation failed: {e}. Retrying in {delay:.0f}s...")
-                time.sleep(delay)
-            else:
-                logger.error(f"❌ Batch creation failed after {max_retries} attempts")
-                raise
+    return {'content': '', 'reasoning_summary': ''}
 
 
-def _poll_batch_status(batch_id: str,
-                       batch_index: int,
-                       logger: logging.Logger) -> BatchState:
+def _process_single_flex_request(args: Tuple) -> Tuple[str, Dict[str, str]]:
     """
-    Poll a single batch job until completion.
+    Worker function for ThreadPoolExecutor.
 
     Args:
-        batch_id: OpenAI batch ID
-        batch_index: Index of this batch in multi-batch sequence
-        logger: Logger instance
+        args: Tuple of (custom_id, messages, model_id, max_tokens, reasoning_effort)
 
     Returns:
-        Final BatchState
+        Tuple of (custom_id, response_dict) where response_dict has 'content' and 'reasoning_summary'
     """
-    from openai import OpenAI
-
-    client = OpenAI()
-    poll_interval = config.OPENAI_BATCH_CONFIG['poll_interval_seconds']
-    max_attempts = config.OPENAI_BATCH_CONFIG['max_poll_attempts']
-
-    for attempt in range(max_attempts):
-        batch = client.batches.retrieve(batch_id)
-
-        state = BatchState(
-            batch_id=batch.id,
-            input_file_id=batch.input_file_id,
-            status=batch.status,
-            output_file_id=batch.output_file_id,
-            error_file_id=batch.error_file_id,
-            created_at=str(batch.created_at) if batch.created_at else None,
-            completed_at=str(batch.completed_at) if batch.completed_at else None,
-            request_counts={
-                'total': batch.request_counts.total if batch.request_counts else 0,
-                'completed': batch.request_counts.completed if batch.request_counts else 0,
-                'failed': batch.request_counts.failed if batch.request_counts else 0
-            },
-            batch_index=batch_index
-        )
-
-        logger.info(
-            f"[Batch {batch_index + 1}] Status: {state.status} "
-            f"({state.request_counts['completed']}/{state.request_counts['total']} completed, "
-            f"{state.request_counts['failed']} failed) - poll {attempt + 1}/{max_attempts}"
-        )
-
-        if state.status in ['completed', 'failed', 'expired', 'cancelled']:
-            return state
-
-        time.sleep(poll_interval)
-
-    raise TimeoutError(f"Batch {batch_id} did not complete within {max_attempts * poll_interval} seconds")
-
-
-def _download_batch_results(state: BatchState,
-                            output_dir: Path,
-                            logger: logging.Logger) -> Dict[str, str]:
-    """
-    Download batch results and parse into response dict.
-
-    Args:
-        state: Completed BatchState
-        output_dir: Directory to save results
-        logger: Logger instance
-
-    Returns:
-        Dict mapping custom_id to response text
-    """
-    from openai import OpenAI
-
-    client = OpenAI()
-
-    if state.status != 'completed':
-        raise ValueError(f"Cannot download results for batch with status: {state.status}")
-
-    # Download output file
-    batch_idx = state.batch_index
-    logger.info(f"[Batch {batch_idx + 1}] Downloading results from file: {state.output_file_id}")
-    file_content = client.files.content(state.output_file_id)
-
-    # Save raw output for debugging (include batch index in filename)
-    output_path = output_dir / f'batch_output_{batch_idx}.jsonl'
-    with open(output_path, 'wb') as f:
-        f.write(file_content.content)
-    logger.info(f"[Batch {batch_idx + 1}] Saved raw output to: {output_path}")
-
-    # Parse results
-    responses = {}
-    failed_requests = []
-    with open(output_path, 'r') as f:
-        for line in f:
-            result = json.loads(line)
-            custom_id = result['custom_id']
-
-            if result.get('error'):
-                logger.warning(f"[Batch {batch_idx + 1}] Request {custom_id} failed: {result['error']}")
-                failed_requests.append({
-                    'custom_id': custom_id,
-                    'error': result['error']
-                })
-                responses[custom_id] = None
-            else:
-                # Extract response text
-                response_body = result['response']['body']
-                message_content = response_body['choices'][0]['message']['content']
-                responses[custom_id] = message_content
-
-    # Download and log error file if present
-    if state.error_file_id:
-        error_content = client.files.content(state.error_file_id)
-        error_path = output_dir / f'batch_errors_{batch_idx}.jsonl'
-        with open(error_path, 'wb') as f:
-            f.write(error_content.content)
-        logger.warning(f"[Batch {batch_idx + 1}] Had errors, saved to: {error_path}")
-
-    # Save failed requests for debugging
-    if failed_requests:
-        logger.warning(f"[Batch {batch_idx + 1}] {len(failed_requests)} requests failed")
-        with open(output_dir / f'failed_requests_{batch_idx}.json', 'w') as f:
-            json.dump(failed_requests, f, indent=2)
-
-    logger.info(f"[Batch {batch_idx + 1}] Downloaded {len(responses)} responses ({len(failed_requests)} failed)")
-    return responses
+    custom_id, messages, model_id, max_tokens, reasoning_effort = args
+    response = _call_openai_flex(messages, model_id, max_tokens, reasoning_effort)
+    return custom_id, response
 
 
 # =============================================================================
@@ -1362,21 +1096,21 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                            override: bool = False,
                            stage2_batch_size: int = 275) -> List[Dict[str, Any]]:
     """
-    Two-stage evaluation using OpenAI Batch API (Stage 1) + local vLLM (Stage 2).
+    Two-stage evaluation using OpenAI Flex API (Stage 1) + local vLLM (Stage 2).
 
-    Stage 1: OpenAI Batch API generates reasoning responses (async, cost-effective)
-             Sends all data at once (OpenAI handles 190MB/50K request limits internally)
+    Stage 1: OpenAI Flex API generates reasoning responses (50% cost savings)
+             Uses ThreadPoolExecutor for concurrent requests with checkpointing
     Stage 2: Local Qwen3-VL-30B via vLLM extracts clean answers (fast, free)
              Processes in batches to manage GPU memory
 
     Args:
         thread_pairs: Thread pairs with prompts
         model_config: Model configuration from config.py
-        output_dir: Output directory for state files and results
+        output_dir: Output directory for checkpoint and results
         context: Context string (e.g., "submission-media")
         max_response_tokens: Max tokens for Stage 1 response
         logger: Logger instance
-        override: If True, re-run Stage 2 even if results exist
+        override: If True, re-run even if results exist
         stage2_batch_size: Batch size for Stage 2 local vLLM processing (default: 275)
 
     Returns:
@@ -1385,7 +1119,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     # =========================================================================
     # CHECK FOR EXISTING RESULTS (skip if reasoning_*.json exists and not override)
     # =========================================================================
-    existing_reasoning_files = list(output_dir.glob("reasoning_*.json")) if output_dir.exists() else []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    existing_reasoning_files = list(output_dir.glob("reasoning_*.json"))
 
     if existing_reasoning_files and not override:
         latest_reasoning_file = sorted(existing_reasoning_files)[-1]
@@ -1399,121 +1134,100 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
         return results
 
     if existing_reasoning_files and override:
-        logger.info(f"♻️  Override mode: Will re-run Stage 2 (found {len(existing_reasoning_files)} existing result file(s))")
+        logger.info(f"♻️  Override mode: Will re-run (found {len(existing_reasoning_files)} existing result file(s))")
 
     # =========================================================================
-    # STAGE 1: OpenAI Batch API for Reasoning (supports multiple batches)
+    # STAGE 1: OpenAI Flex API with ThreadPool + Checkpointing
     # =========================================================================
     logger.info("=" * 60)
-    logger.info("STAGE 1: OpenAI Batch API - Generating Reasoning")
+    logger.info("STAGE 1: OpenAI Flex API - Generating Reasoning")
     logger.info("=" * 60)
 
-    # Check for existing multi-batch state (resumption support)
-    existing_state = _load_multi_batch_state(output_dir, logger)
+    context_config = config.parse_context_flags(context)
+    checkpoint_path = output_dir / "flex_checkpoint.json"
+
+    # Load checkpoint if exists (for crash recovery)
     stage1_responses = {}
+    if checkpoint_path.exists() and not override:
+        with open(checkpoint_path, 'r') as f:
+            stage1_responses = json.load(f)
+        logger.info(f"📂 Loaded {len(stage1_responses)} responses from checkpoint")
 
-    if existing_state:
-        # Resume from existing state
-        logger.info(f"Found existing state with {len(existing_state.batches)} batch(es)")
+    # Build work items (skip already completed requests)
+    work_items = []
+    reasoning_effort = model_config.get('reasoning_effort')
+    for pair in thread_pairs:
+        for thread_type in ['moderated', 'unmoderated']:
+            custom_id = f"{pair['mod_comment_id']}_{thread_type}"
+            if custom_id not in stage1_responses:
+                messages = _build_openai_messages(pair, thread_type, context_config, logger)
+                work_items.append((custom_id, messages, model_config['model_id'], max_response_tokens, reasoning_effort))
 
-        for batch_state in existing_state.batches:
-            batch_idx = batch_state.batch_index
+    total_requests = len(thread_pairs) * 2
+    logger.info(f"📊 Stage 1: {len(work_items)} requests remaining (of {total_requests} total)")
+    logger.info(f"🧠 Reasoning effort: {reasoning_effort or 'none'}")
 
-            if batch_state.status == 'completed':
-                logger.info(f"[Batch {batch_idx + 1}] Already completed, downloading results...")
-                batch_responses = _download_batch_results(batch_state, output_dir, logger)
-                stage1_responses.update(batch_responses)
+    if work_items:
+        # Process with ThreadPoolExecutor
+        max_workers = config.OPENAI_FLEX_CONFIG['max_workers']
+        checkpoint_interval = config.OPENAI_FLEX_CONFIG['checkpoint_interval']
+        completed = 0
+        failed = 0
 
-            elif batch_state.status in ['created', 'validating', 'in_progress', 'finalizing']:
-                # 'created' means batch was submitted but not yet started - poll until complete
-                logger.info(f"[Batch {batch_idx + 1}] Status '{batch_state.status}' - polling for completion...")
-                final_state = _poll_batch_status(batch_state.batch_id, batch_idx, logger)
+        logger.info(f"🚀 Starting ThreadPoolExecutor with {max_workers} workers")
 
-                # Update state
-                existing_state.batches[batch_idx] = final_state
-                _save_multi_batch_state(existing_state, output_dir, logger)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process_single_flex_request, item): item[0] for item in work_items}
 
-                if final_state.status == 'completed':
-                    batch_responses = _download_batch_results(final_state, output_dir, logger)
-                    stage1_responses.update(batch_responses)
-                else:
-                    raise RuntimeError(f"Batch {batch_idx + 1} failed with status: {final_state.status}")
+            for future in as_completed(futures):
+                custom_id = futures[future]
+                try:
+                    result_id, response_dict = future.result()
+                    stage1_responses[result_id] = response_dict  # Dict with 'content' and 'reasoning_summary'
+                    completed += 1
 
-            elif batch_state.status in ['failed', 'expired', 'cancelled']:
-                raise RuntimeError(f"Batch {batch_idx + 1} previously failed with status: {batch_state.status}")
+                    # Checkpoint periodically
+                    if completed % checkpoint_interval == 0:
+                        with open(checkpoint_path, 'w') as f:
+                            json.dump(stage1_responses, f)
+                        logger.info(f"📊 Stage 1: {completed}/{len(work_items)} complete (checkpoint saved)")
 
-            else:
-                # Unknown status - raise error
-                raise RuntimeError(f"Batch {batch_idx + 1} has unknown status: {batch_state.status}")
+                except Exception as e:
+                    logger.error(f"❌ Request {custom_id} failed: {e}")
+                    stage1_responses[custom_id] = {'content': '', 'reasoning_summary': ''}
+                    failed += 1
+
+        # Final checkpoint
+        with open(checkpoint_path, 'w') as f:
+            json.dump(stage1_responses, f)
+
+        logger.info(f"✅ Stage 1 complete: {completed} succeeded, {failed} failed")
 
     else:
-        # Create and submit new batches
-        jsonl_files = _create_batch_jsonl_files(
-            thread_pairs=thread_pairs,
-            model_id=model_config['model_id'],
-            max_tokens=max_response_tokens,
-            context=context,
-            output_path=output_dir,
-            logger=logger
-        )
+        logger.info("✅ Stage 1: All requests already in checkpoint")
 
-        # Initialize multi-batch state
-        batch_states = []
-        total_requests = len(thread_pairs) * 2
+    logger.info(f"📊 Stage 1 total: {len(stage1_responses)} responses collected")
 
-        # Submit all batches
-        for batch_idx, jsonl_path in enumerate(jsonl_files):
-            logger.info(f"[Batch {batch_idx + 1}/{len(jsonl_files)}] Submitting...")
-            batch_id, input_file_id = _submit_openai_batch(jsonl_path, logger)
+    # Helper to extract content from response (handles both dict and legacy string format)
+    def _get_response_field(resp, field='content'):
+        if isinstance(resp, dict):
+            return resp.get(field, '') or ''
+        return resp if field == 'content' else ''  # Legacy string format has no reasoning
 
-            batch_state = BatchState(
-                batch_id=batch_id,
-                input_file_id=input_file_id,
-                status='created',
-                output_file_id=None,
-                error_file_id=None,
-                created_at=datetime.now().isoformat(),
-                completed_at=None,
-                request_counts={'total': 0, 'completed': 0, 'failed': 0},
-                batch_index=batch_idx
-            )
-            batch_states.append(batch_state)
-
-        # Save initial multi-batch state
-        multi_state = MultiBatchState(
-            batches=batch_states,
-            total_requests=total_requests,
-            jsonl_files=[str(p) for p in jsonl_files]
-        )
-        _save_multi_batch_state(multi_state, output_dir, logger)
-
-        # Poll all batches until completion
-        for batch_idx, batch_state in enumerate(batch_states):
-            logger.info(f"[Batch {batch_idx + 1}/{len(batch_states)}] Polling for completion...")
-            final_state = _poll_batch_status(batch_state.batch_id, batch_idx, logger)
-
-            # Update state
-            multi_state.batches[batch_idx] = final_state
-            _save_multi_batch_state(multi_state, output_dir, logger)
-
-            if final_state.status == 'completed':
-                batch_responses = _download_batch_results(final_state, output_dir, logger)
-                stage1_responses.update(batch_responses)
-            else:
-                raise RuntimeError(f"Batch {batch_idx + 1} failed with status: {final_state.status}")
-
-    logger.info(f"Stage 1 complete: {len(stage1_responses)} total responses collected")
-
-    # Organize Stage 1 responses by pair
-    stage1_by_pair = []
-    for pair in thread_pairs:
-        mod_id = f"{pair['mod_comment_id']}_moderated"
-        unmod_id = f"{pair['mod_comment_id']}_unmoderated"
-
-        stage1_by_pair.append({
-            'moderated': stage1_responses.get(mod_id, '') or '',
-            'unmoderated': stage1_responses.get(unmod_id, '') or ''
-        })
+    # Organize Stage 1 responses by pair (both content and reasoning_summary)
+    stage1_by_pair = [
+        {
+            'moderated_content': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_moderated", {}), 'content'),
+            'moderated_reasoning': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_moderated", {}), 'reasoning_summary'),
+            'unmoderated_content': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_unmoderated", {}), 'content'),
+            'unmoderated_reasoning': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_unmoderated", {}), 'reasoning_summary'),
+        }
+        for pair in thread_pairs
+    ]
 
     # =========================================================================
     # STAGE 2: Local Qwen3-VL-30B via vLLM for Answer Extraction
@@ -1526,16 +1240,16 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     stage2_config = config.get_model_config(stage2_model)
 
     # Apply chat template for Stage 2 model (gets base prompt with assistant turn prefix)
-    thread_pairs, resource_stats = apply_chat_template(thread_pairs, stage2_model, logger)
+    thread_pairs, _ = apply_chat_template(thread_pairs, stage2_model, logger)
 
-    # Build Stage 2 prompts FIRST (Stage 1 reasoning + answer phrase as prefill)
-    # These are appended after the assistant turn prefix from chat template
+    # Build Stage 2 prompts FIRST (Stage 1 content only + answer phrase as prefill)
+    # NOTE: We use 'content' (output text), not 'reasoning_summary' for Stage 2
     moderated_prompts = [
-        pair['moderated_prompt_text'] + stage1['moderated'] + config.ANSWER_PHRASE
+        pair['moderated_prompt_text'] + stage1['moderated_content'] + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_by_pair)
     ]
     unmoderated_prompts = [
-        pair['unmoderated_prompt_text'] + stage1['unmoderated'] + config.ANSWER_PHRASE
+        pair['unmoderated_prompt_text'] + stage1['unmoderated_content'] + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_by_pair)
     ]
 
@@ -1634,7 +1348,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
 
             'moderated': {
                 'stage2_prompt': moderated_prompts[idx],
-                'reasoning_response': stage1['moderated'],
+                'reasoning_response': stage1['moderated_content'],
+                'reasoning_summary': stage1['moderated_reasoning'],
                 'clean_answer_response': mod_clean,
                 'extracted_prediction': mod_prediction,
                 'correct_answer': mod_correct,
@@ -1644,7 +1359,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
 
             'unmoderated': {
                 'stage2_prompt': unmoderated_prompts[idx],
-                'reasoning_response': stage1['unmoderated'],
+                'reasoning_response': stage1['unmoderated_content'],
+                'reasoning_summary': stage1['unmoderated_reasoning'],
                 'clean_answer_response': unmod_clean,
                 'extracted_prediction': unmod_prediction,
                 'correct_answer': unmod_correct,
