@@ -129,7 +129,7 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     ax_left.scatter(sub_values, y_sub, color='#336699', s=30, zorder=3)
     # Add accuracy values on top of circles
     for i, val in enumerate(sub_values):
-        ax_left.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4, color='white', fontweight='bold', zorder=4)
+        ax_left.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(sub_cis):
         ax_left.hlines(i, ci_low, ci_high, color='#336699', linewidth=1, zorder=2)
         # Caps at ends
@@ -157,7 +157,7 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     ax_right.scatter(rule_values, y_rule, color='#FF4500', s=30, zorder=3)
     # Add accuracy values on top of circles
     for i, val in enumerate(rule_values):
-        ax_right.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4, color='white', fontweight='bold', zorder=4)
+        ax_right.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(rule_cis):
         ax_right.hlines(i, ci_low, ci_high, color='#FF4500', linewidth=1, zorder=2)
         # Caps at ends
