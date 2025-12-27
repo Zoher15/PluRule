@@ -28,6 +28,7 @@ import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from pathlib import Path
 from datetime import datetime
 import argparse
@@ -42,6 +43,8 @@ import umap
 from adjustText import adjust_text
 from coloring import assign_colors_with_conflicts
 from scipy.spatial import ConvexHull
+from collections import Counter
+from config import PATHS
 
 
 def rotate_coordinates(coords: np.ndarray, angle_degrees: float) -> np.ndarray:
@@ -52,6 +55,93 @@ def rotate_coordinates(coords: np.ndarray, angle_degrees: float) -> np.ndarray:
         [np.sin(angle_rad), np.cos(angle_rad)]
     ])
     return coords @ rotation_matrix.T
+
+
+def load_cluster_distribution(cluster_type: str) -> list:
+    """Load cluster distribution from stage10 stats.
+
+    Args:
+        cluster_type: 'subreddit' or 'rule'
+
+    Returns:
+        List of (name, count) tuples sorted by count descending
+    """
+    stats_file = Path(PATHS['data']) / 'stage10_cluster_assignment_stats.json'
+    with open(stats_file) as f:
+        data = json.load(f)
+
+    all_stats = data.get('cluster_assignment_statistics', {})
+
+    # Sum counts across all splits
+    total_counts = Counter()
+    for split, stats in all_stats.items():
+        key = f'{cluster_type}_clusters'
+        if key in stats:
+            for label, count in stats[key].items():
+                total_counts[label] += count
+
+    # Sort by count descending, lowercase "Other" to "other"
+    sorted_data = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
+    sorted_data = [('other' if l == 'Other' else l, c) for l, c in sorted_data]
+
+    return sorted_data
+
+
+def get_bar_colors(labels: list, color_json_path: Path) -> list:
+    """Get bar colors from cluster color JSON file.
+
+    Args:
+        labels: List of cluster names
+        color_json_path: Path to cluster colors JSON
+
+    Returns:
+        List of hex color strings
+    """
+    with open(color_json_path) as f:
+        color_data = json.load(f)
+
+    # Build name -> color map
+    name_to_color = {}
+    for cluster_id, info in color_data['clusters'].items():
+        name_to_color[info['name']] = info['color']
+
+    # Map labels to colors, default gray for "other"
+    colors = []
+    for label in labels:
+        if label.lower() == 'other':
+            colors.append('#DDDDDD')
+        else:
+            colors.append(name_to_color.get(label, '#DDDDDD'))
+    return colors
+
+
+def plot_distribution_bars(ax, labels: list, counts: list, colors: list, xlabel: str = 'Number of Instances'):
+    """Plot horizontal distribution bars with cluster colors.
+
+    Args:
+        ax: Matplotlib axes
+        labels: Cluster names
+        counts: Thread pair counts
+        colors: Hex colors for each bar
+        xlabel: X-axis label
+    """
+    y_pos = np.arange(len(labels))
+
+    ax.barh(y_pos, counts, height=0.8, color=colors, edgecolor='none')
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
+    ax.tick_params(axis='y', pad=0.5, length=3, width=0.25)
+    ax.grid(axis='x', alpha=0.2, linestyle='--', linewidth=1.0)
+    ax.set_ylim(-0.45, len(labels) - 0.2)
+    ax.invert_yaxis()  # Highest values at top
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_linewidth(0.25)
+    ax.spines['bottom'].set_linewidth(0.25)
+    ax.set_xscale('log')
+    ax.set_xlim(left=10, right=10000)
 
 
 def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, logger, cache_dir: Path) -> np.ndarray:
@@ -199,7 +289,7 @@ def plot_cluster_on_axes(ax, coords_2d: np.ndarray, metadata: pd.DataFrame, enti
     point_colors = np.array([cluster_colors.get(label, '#DDDDDD') for label in labels])
 
     # Plot noise points first (very faint)
-    point_size = 25  # Smaller for ACL two-column format
+    point_size = 50  # Larger dots for better visibility
     if n_noise > 0:
         ax.scatter(coords_2d[noise_mask, 0], coords_2d[noise_mask, 1], c='lightgray', s=point_size, alpha=0.15)
 
@@ -222,11 +312,10 @@ def plot_cluster_on_axes(ax, coords_2d: np.ndarray, metadata: pd.DataFrame, enti
         if cluster_id in median_centroids:
             centroid = median_centroids[cluster_id]
             label_text = cluster_label_map.get(cluster_id, f'Cluster {cluster_id}')
-            # Display cluster ID starting from 1 instead of 0
-            display_id = cluster_id + 1
-            text = ax.text(centroid[0], centroid[1], f'{display_id}: {label_text}',
-                          fontsize=4, ha='center', va='center',
-                          bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8, edgecolor='black', linewidth=0.05))
+            # Remove number prefix - just show label text
+            text = ax.text(centroid[0], centroid[1], f'{label_text}',
+                          fontsize=6, ha='center', va='center',
+                          bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8, edgecolor='black', linewidth=0.025))
             texts.append(text)
 
     # Adjust text positions to avoid overlap (very gentle adjustment)
@@ -246,6 +335,7 @@ def main():
     # Parse arguments
     parser = argparse.ArgumentParser(description='Plot cluster visualizations (two-column ACL format)')
     parser.add_argument('--rotate', type=float, default=-45, help='Rotation angle in degrees (affects color assignment, default: -45)')
+    parser.add_argument('--grey-bars', action='store_true', help='Use grey bars instead of cluster colors')
     args = parser.parse_args()
 
     # Create directories
@@ -271,14 +361,21 @@ def main():
 
     try:
         logger.info("="*80)
-        logger.info("CLUSTER VISUALIZATION (ACL Two-Column Format)")
+        logger.info("CLUSTER VISUALIZATION (2x2 Layout with Distribution)")
         logger.info("="*80)
 
-        # Create two-column figure
-        logger.info("\nCreating two-column figure...")
-        fig, (ax_left, ax_right) = create_two_column_figure(plot_type='scatter')
+        # Create 2x2 figure with 2/3 vs 1/3 width ratio
+        logger.info("\nCreating 2x2 figure (6.3\" x 7.00\") with 2:1 width ratio...")
+        fig = plt.figure(figsize=(6.3, 7.00))
+        gs = gridspec.GridSpec(2, 2, figure=fig, width_ratios=[2, 1], wspace=0, hspace=0.025)
 
-        # Load and plot SUBREDDIT clusters (left)
+        # Create axes with custom width distribution
+        ax_sub_scatter = fig.add_subplot(gs[0, 0])   # Top-left: 2/3 width
+        ax_sub_bars = fig.add_subplot(gs[0, 1])      # Top-right: 1/3 width
+        ax_rule_scatter = fig.add_subplot(gs[1, 0])  # Bottom-left: 2/3 width
+        ax_rule_bars = fig.add_subplot(gs[1, 1])     # Bottom-right: 1/3 width
+
+        # Load and plot SUBREDDIT clusters (top-left)
         logger.info("\nLoading subreddit data...")
         sub_metadata = pd.read_csv(embeddings_dir / 'all_subreddit_metadata.tsv', sep='\t')
         sub_embeddings = np.loadtxt(embeddings_dir / 'all_subreddit_embeddings_reduced.tsv', delimiter='\t')
@@ -286,10 +383,20 @@ def main():
             sub_params = json.load(f)['best_params']['umap']
         sub_umap_params = {'n_neighbors': sub_params['n_neighbors'], 'min_dist': sub_params['min_dist']}
         sub_coords = apply_umap_2d(sub_embeddings, sub_umap_params, 'subreddit', logger, clustering_dir)
-        logger.info("Plotting subreddit clusters on left...")
-        plot_cluster_on_axes(ax_left, sub_coords, sub_metadata, 'subreddit', clustering_dir, logger, args.rotate)
+        logger.info("Plotting subreddit clusters (top-left)...")
+        plot_cluster_on_axes(ax_sub_scatter, sub_coords, sub_metadata, 'subreddit', clustering_dir, logger, args.rotate)
 
-        # Load and plot RULE clusters (right)
+        # Plot SUBREDDIT distribution bars (top-right)
+        logger.info("Plotting subreddit distribution (top-right)...")
+        sub_dist = load_cluster_distribution('subreddit')
+        sub_labels, sub_counts = zip(*sub_dist)
+        if args.grey_bars:
+            sub_colors = ['#888888'] * len(sub_labels)
+        else:
+            sub_colors = get_bar_colors(sub_labels, clustering_dir / 'subreddit_cluster_colors.json')
+        plot_distribution_bars(ax_sub_bars, sub_labels, sub_counts, sub_colors)
+
+        # Load and plot RULE clusters (bottom-left)
         logger.info("\nLoading rule data...")
         rule_metadata = pd.read_csv(embeddings_dir / 'all_rule_metadata.tsv', sep='\t')
         rule_embeddings = np.loadtxt(embeddings_dir / 'all_rule_embeddings_reduced.tsv', delimiter='\t')
@@ -297,27 +404,55 @@ def main():
             rule_params = json.load(f)['best_params']['umap']
         rule_umap_params = {'n_neighbors': rule_params['n_neighbors'], 'min_dist': rule_params['min_dist']}
         rule_coords = apply_umap_2d(rule_embeddings, rule_umap_params, 'rule', logger, clustering_dir)
-        logger.info("Plotting rule clusters on right...")
-        plot_cluster_on_axes(ax_right, rule_coords, rule_metadata, 'rule', clustering_dir, logger, args.rotate)
+        logger.info("Plotting rule clusters (bottom-left)...")
+        plot_cluster_on_axes(ax_rule_scatter, rule_coords, rule_metadata, 'rule', clustering_dir, logger, args.rotate)
 
-        # Add subplot labels (bottom right)
+        # Plot RULE distribution bars (bottom-right)
+        logger.info("Plotting rule distribution (bottom-right)...")
+        rule_dist = load_cluster_distribution('rule')
+        rule_labels, rule_counts = zip(*rule_dist)
+        if args.grey_bars:
+            rule_colors = ['#888888'] * len(rule_labels)
+        else:
+            rule_colors = get_bar_colors(rule_labels, clustering_dir / 'rule_cluster_colors.json')
+        plot_distribution_bars(ax_rule_bars, rule_labels, rule_counts, rule_colors)
+
+        # Add subplot labels (a), (b), (c), (d) in bottom right corners
+        # Order: (a) top-left scatter, (b) bottom-left scatter, (c) top-right bars, (d) bottom-right bars
         logger.info("Adding subplot labels...")
-        for ax, label in zip([ax_left, ax_right], ['a', 'b']):
+        # Bar plots use axes transform
+        for ax, label in zip([ax_sub_bars, ax_rule_bars], ['c', 'd']):
             ax.text(0.98, 0.02, f'({label})', transform=ax.transAxes,
                    fontsize=10, verticalalignment='bottom', horizontalalignment='right')
+        # Scatter plots use axes transform at same position
+        # After bar adjustment (y0 + 0.045, height - 0.05), calculate matching position
+        # Bar plot height after adjustment: 0.5 - 0.05 = 0.45
+        # Bar plot at 2% = 0.45 * 0.02 = 0.009
+        # Scatter plot height: 0.5, so 0.009 / 0.5 = 0.018 (1.8% instead of 2%)
+        # But we need to account for the upward shift of 0.045 in the bar plots
+        # Match the bar plot's absolute position: 0.045 + 0.009 for bottom, 0.545 + 0.009 for top
+        # For scatter: (0.045 + 0.009) / 0.5 = 0.108 for bottom, (0.545 + 0.009 - 0.5) / 0.5 = 0.108 for top
+        for ax, label in zip([ax_sub_scatter, ax_rule_scatter], ['a', 'b']):
+            ax.text(0.96, 0.108, f'({label})', transform=ax.transAxes,
+                   fontsize=10, verticalalignment='bottom', horizontalalignment='right')
 
-        # Add dotted border between subplots
-        logger.info("Adding dotted divider between subplots...")
-        # Make right spine of left plot visible as dotted line
-        ax_left.spines['right'].set_visible(True)
-        ax_left.spines['right'].set_linestyle(':')
-        ax_left.spines['right'].set_linewidth(0.8)
-        ax_left.spines['right'].set_color('black')
-
-        # Save combined figure (full width, no gap between subplots)
+        # Save combined figure (no gap between subplots)
         logger.info("\nSaving figure...")
-        fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0)
-        output_base = clustering_dir / 'clusters_2d'
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0.025)
+
+        # Inward adjustment for bar plots to create spacing for axis labels
+        for ax_bars in [ax_sub_bars, ax_rule_bars]:
+            pos = ax_bars.get_position()
+            ax_bars.set_position([pos.x0 + 0.10, pos.y0 + 0.05, pos.width - 0.115, pos.height - 0.05])
+
+        # Add horizontal line between top and bottom panels
+        from matplotlib.lines import Line2D
+        line = Line2D([0, 1], [0.5, 0.5], transform=fig.transFigure,
+                      color='black', linestyle='-', linewidth=0.25, alpha=0.2)
+        fig.add_artist(line)
+
+        output_suffix = '_grey' if args.grey_bars else ''
+        output_base = clustering_dir / f'clusters_2d{output_suffix}'
         save_figure(fig, output_base, dpi=300, bbox_inches=None)
 
         plt.close(fig)
@@ -325,8 +460,8 @@ def main():
         logger.info("\n" + "="*80)
         logger.info("✅ COMPLETE")
         logger.info("="*80)
-        logger.info(f"Output: {clustering_dir / 'clusters_2d.pdf'}")
-        logger.info(f"        {clustering_dir / 'clusters_2d.png'}")
+        logger.info(f"Output: {output_base}.pdf")
+        logger.info(f"        {output_base}.png")
 
         return 0
 

@@ -37,14 +37,14 @@ def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels,
     y_sub = np.arange(len(sub_labels))
     y_rule = np.arange(len(rule_labels))
 
-    # LEFT: Subreddit (Reddit Lapis Lazuli) - horizontal bars
-    ax_left.barh(y_sub, sub_values, height=0.8, color='#336699', edgecolor='none')
+    # LEFT: Subreddit (Orange Red) - horizontal bars
+    ax_left.barh(y_sub, sub_values, height=0.8, color='#FF4500', edgecolor='none')
     ax_left.set_xlabel(xlabel, fontsize=8)
     ax_left.set_yticks(y_sub)
-    ax_left.set_yticklabels(sub_labels, fontsize=6)
-    ax_left.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_left.set_yticklabels(sub_labels, fontsize=7)
+    ax_left.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
     ax_left.tick_params(axis='y', pad=0.5, length=3, width=0.25)
-    ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+    ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=1.0)
     ax_left.set_ylim(-0.45, len(sub_labels) - 0.2)
     ax_left.invert_yaxis()  # Highest values at top
     ax_left.spines['top'].set_visible(False)
@@ -59,14 +59,14 @@ def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels,
     else:
         ax_left.set_xlim(left=10)
 
-    # RIGHT: Rule (Orange Red) - horizontal bars
-    ax_right.barh(y_rule, rule_values, height=0.8, color='#FF4500', edgecolor='none')
+    # RIGHT: Rule (Lapis Lazuli) - horizontal bars
+    ax_right.barh(y_rule, rule_values, height=0.8, color='#336699', edgecolor='none')
     ax_right.set_xlabel(xlabel, fontsize=8)
     ax_right.set_yticks(y_rule)
-    ax_right.set_yticklabels(rule_labels, fontsize=6)
-    ax_right.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_right.set_yticklabels(rule_labels, fontsize=7)
+    ax_right.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
     ax_right.tick_params(axis='y', pad=0.5, length=3, width=0.25)
-    ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+    ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=1.0)
     ax_right.set_ylim(-0.45, len(rule_labels) - 0.2)
     ax_right.invert_yaxis()  # Highest values at top
     ax_right.spines['top'].set_visible(False)
@@ -122,18 +122,18 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     y_sub = np.arange(len(sub_labels))
     y_rule = np.arange(len(rule_labels))
 
-    # LEFT: Subreddit clusters
+    # LEFT: Subreddit clusters (Orange Red)
     # Faint horizontal lines at each cluster position
     for i in y_sub:
         ax_left.axhline(y=i, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.5, zorder=1)
-    ax_left.scatter(sub_values, y_sub, color='#336699', s=30, zorder=3)
+    ax_left.scatter(sub_values, y_sub, color='#FF4500', s=35, zorder=3)
     # Add accuracy values on top of circles
     for i, val in enumerate(sub_values):
-        ax_left.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
+        ax_left.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(sub_cis):
-        ax_left.hlines(i, ci_low, ci_high, color='#336699', linewidth=1, zorder=2)
+        ax_left.hlines(i, ci_low, ci_high, color='#FF4500', linewidth=1, zorder=2)
         # Caps at ends
-        ax_left.vlines([ci_low, ci_high], i - 0.25, i + 0.25, color='#336699', linewidth=1, zorder=2)
+        ax_left.vlines([ci_low, ci_high], i - 0.25, i + 0.25, color='#FF4500', linewidth=1, zorder=2)
 
     ax_left.set_xlabel(xlabel, fontsize=8)
     ax_left.set_yticks(y_sub)
@@ -150,18 +150,18 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     ax_left.spines['left'].set_linewidth(0.25)
     ax_left.spines['bottom'].set_linewidth(0.25)
 
-    # RIGHT: Rule clusters
+    # RIGHT: Rule clusters (Lapis Lazuli)
     # Faint horizontal lines at each cluster position
     for i in y_rule:
         ax_right.axhline(y=i, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.5, zorder=1)
-    ax_right.scatter(rule_values, y_rule, color='#FF4500', s=30, zorder=3)
+    ax_right.scatter(rule_values, y_rule, color='#336699', s=35, zorder=3)
     # Add accuracy values on top of circles
     for i, val in enumerate(rule_values):
-        ax_right.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
+        ax_right.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(rule_cis):
-        ax_right.hlines(i, ci_low, ci_high, color='#FF4500', linewidth=1, zorder=2)
+        ax_right.hlines(i, ci_low, ci_high, color='#336699', linewidth=1, zorder=2)
         # Caps at ends
-        ax_right.vlines([ci_low, ci_high], i - 0.25, i + 0.25, color='#FF4500', linewidth=1, zorder=2)
+        ax_right.vlines([ci_low, ci_high], i - 0.25, i + 0.25, color='#336699', linewidth=1, zorder=2)
 
     ax_right.set_xlabel(xlabel, fontsize=8)
     ax_right.set_yticks(y_rule)
@@ -194,14 +194,14 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
     y_sub = np.arange(len(sub_labels))
     y_rule = np.arange(len(rule_labels))
 
-    # LEFT: Subreddit clusters
+    # LEFT: Subreddit clusters (Orange Red)
     # Draw bars back to front
-    ax_left.barh(y_sub, sub_unmod, height=0.8, color='#336699', alpha=0.2, edgecolor='none', zorder=2)
-    ax_left.barh(y_sub, sub_overall, height=0.8, color='#336699', alpha=0.55, edgecolor='none', zorder=3)
-    ax_left.barh(y_sub, sub_mod, height=0.8, color='#336699', alpha=1.0, edgecolor='none', zorder=4)
+    ax_left.barh(y_sub, sub_unmod, height=0.8, color='#FF4500', alpha=0.2, edgecolor='none', zorder=2)
+    ax_left.barh(y_sub, sub_overall, height=0.8, color='#FF4500', alpha=0.55, edgecolor='none', zorder=3)
+    ax_left.barh(y_sub, sub_mod, height=0.8, color='#FF4500', alpha=1.0, edgecolor='none', zorder=4)
     # Annotate only overall accuracy (white, inside bar at end)
-    for i, ovr in enumerate(sub_overall):
-        ax_left.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4.75, color='white', fontweight='bold', va='center', ha='right', zorder=5)
+    # for i, ovr in enumerate(sub_overall):
+    #     ax_left.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4.75, color='white', fontweight='bold', va='center', ha='right', zorder=5)
 
     ax_left.set_xlabel(xlabel, fontsize=8)
     ax_left.set_yticks(y_sub)
@@ -218,14 +218,14 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
     ax_left.spines['left'].set_linewidth(0.25)
     ax_left.spines['bottom'].set_linewidth(0.25)
 
-    # RIGHT: Rule clusters
+    # RIGHT: Rule clusters (Lapis Lazuli)
     # Draw bars back to front
-    ax_right.barh(y_rule, rule_unmod, height=0.8, color='#FF4500', alpha=0.2, edgecolor='none', zorder=2)
-    ax_right.barh(y_rule, rule_overall, height=0.8, color='#FF4500', alpha=0.55, edgecolor='none', zorder=3)
-    ax_right.barh(y_rule, rule_mod, height=0.8, color='#FF4500', alpha=1.0, edgecolor='none', zorder=4)
+    ax_right.barh(y_rule, rule_unmod, height=0.8, color='#336699', alpha=0.2, edgecolor='none', zorder=2)
+    ax_right.barh(y_rule, rule_overall, height=0.8, color='#336699', alpha=0.55, edgecolor='none', zorder=3)
+    ax_right.barh(y_rule, rule_mod, height=0.8, color='#336699', alpha=1.0, edgecolor='none', zorder=4)
     # Annotate only overall accuracy (white, inside bar at end)
-    for i, ovr in enumerate(rule_overall):
-        ax_right.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4.75, color='white', fontweight='bold', va='center', ha='right', zorder=5)
+    # for i, ovr in enumerate(rule_overall):
+    #     ax_right.text(ovr - 1, i, f'{ovr:.0f}', fontsize=4.75, color='white', fontweight='bold', va='center', ha='right', zorder=5)
 
     ax_right.set_xlabel(xlabel, fontsize=8)
     ax_right.set_yticks(y_rule)
@@ -398,7 +398,7 @@ def plot_cluster_forest(model, split, context, metric, phrase='baseline', mode='
     plot_two_column_forest(ax_left, ax_right, sub_labels, sub_accs, sub_cis,
                            rule_labels, rule_accs, rule_cis, 'Accuracy (%)')
 
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.99, bottom=0.11, wspace=0.28)
+    fig.subplots_adjust(left=0.13, right=0.98, top=0.99, bottom=0.1, wspace=0.28)
     filename = f"cluster_forest_{model}_{split}_{context}_{phrase if phrase=='baseline' else f'{phrase}_{mode}'}_{metric}"
     plots_dir = eval_dir / 'plots'
     plots_dir.mkdir(parents=True, exist_ok=True)
