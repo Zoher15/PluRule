@@ -18,6 +18,7 @@ import json
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 from collections import Counter
 from pathlib import Path
 
@@ -126,10 +127,10 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     # Faint horizontal lines at each cluster position
     for i in y_sub:
         ax_left.axhline(y=i, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.5, zorder=1)
-    ax_left.scatter(sub_values, y_sub, color='#FF4500', s=35, zorder=3)
+    ax_left.scatter(sub_values, y_sub, color='#FF4500', s=30, marker='s', zorder=3)
     # Add accuracy values on top of circles
     for i, val in enumerate(sub_values):
-        ax_left.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=5, color='white', fontweight='bold', zorder=4)
+        ax_left.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(sub_cis):
         ax_left.hlines(i, ci_low, ci_high, color='#FF4500', linewidth=1, zorder=2)
         # Caps at ends
@@ -137,8 +138,8 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
 
     ax_left.set_xlabel(xlabel, fontsize=8)
     ax_left.set_yticks(y_sub)
-    ax_left.set_yticklabels(sub_labels, fontsize=6)
-    ax_left.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_left.set_yticklabels(sub_labels, fontsize=7)
+    ax_left.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
     ax_left.tick_params(axis='y', pad=0.5, length=3, width=0.25)
     ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
     ax_left.set_ylim(-0.5, len(sub_labels) - 0.5)
@@ -154,10 +155,10 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     # Faint horizontal lines at each cluster position
     for i in y_rule:
         ax_right.axhline(y=i, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.5, zorder=1)
-    ax_right.scatter(rule_values, y_rule, color='#336699', s=35, zorder=3)
+    ax_right.scatter(rule_values, y_rule, color='#336699', s=30, marker='s', zorder=3)
     # Add accuracy values on top of circles
     for i, val in enumerate(rule_values):
-        ax_right.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=5, color='white', fontweight='bold', zorder=4)
+        ax_right.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(rule_cis):
         ax_right.hlines(i, ci_low, ci_high, color='#336699', linewidth=1, zorder=2)
         # Caps at ends
@@ -165,8 +166,8 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
 
     ax_right.set_xlabel(xlabel, fontsize=8)
     ax_right.set_yticks(y_rule)
-    ax_right.set_yticklabels(rule_labels, fontsize=6)
-    ax_right.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_right.set_yticklabels(rule_labels, fontsize=7)
+    ax_right.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
     ax_right.tick_params(axis='y', pad=0.5, length=3, width=0.25)
     ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
     ax_right.set_ylim(-0.5, len(rule_labels) - 0.5)
@@ -205,8 +206,8 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
 
     ax_left.set_xlabel(xlabel, fontsize=8)
     ax_left.set_yticks(y_sub)
-    ax_left.set_yticklabels(sub_labels, fontsize=6)
-    ax_left.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_left.set_yticklabels(sub_labels, fontsize=7)
+    ax_left.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
     ax_left.tick_params(axis='y', pad=0.5, length=3, width=0.25)
     ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
     ax_left.set_ylim(-0.5, len(sub_labels) - 0.5)
@@ -229,8 +230,8 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
 
     ax_right.set_xlabel(xlabel, fontsize=8)
     ax_right.set_yticks(y_rule)
-    ax_right.set_yticklabels(rule_labels, fontsize=6)
-    ax_right.tick_params(axis='x', labelsize=6, pad=0.5, length=3, width=0.25)
+    ax_right.set_yticklabels(rule_labels, fontsize=7)
+    ax_right.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
     ax_right.tick_params(axis='y', pad=0.5, length=3, width=0.25)
     ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
     ax_right.set_ylim(-0.5, len(rule_labels) - 0.5)
@@ -276,7 +277,7 @@ def plot_distribution():
         else:
             rule_labels, rule_counts = zip(*sorted_data)
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='scatter')
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
     plot_two_column_bars(ax_left, ax_right, sub_labels, sub_counts, rule_labels, rule_counts,
                          'Number of Thread Pairs', log_scale=True)
 
@@ -330,7 +331,7 @@ def plot_cluster_analysis(model, split, context, metric, phrase='baseline', mode
         print(f"❌ No cluster metrics found")
         return 1
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='scatter')
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
     plot_two_column_bars(ax_left, ax_right, sub_labels, sub_accs, rule_labels, rule_accs,
                          'Accuracy (%)', bar_values=(sub_accs, rule_accs), show_baseline=True)
 
@@ -394,11 +395,11 @@ def plot_cluster_forest(model, split, context, metric, phrase='baseline', mode='
         print("No cluster metrics found")
         return 1
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='scatter')
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
     plot_two_column_forest(ax_left, ax_right, sub_labels, sub_accs, sub_cis,
                            rule_labels, rule_accs, rule_cis, 'Accuracy (%)')
 
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.99, bottom=0.1, wspace=0.28)
+    fig.subplots_adjust(left=0.15, right=0.98, top=0.99, bottom=0.1, wspace=0.32)
     filename = f"cluster_forest_{model}_{split}_{context}_{phrase if phrase=='baseline' else f'{phrase}_{mode}'}_{metric}"
     plots_dir = eval_dir / 'plots'
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -451,21 +452,21 @@ def plot_cluster_stacked(model, split, context, phrase='baseline', mode='prefill
         print("No cluster metrics found")
         return 1
 
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='scatter')
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
     plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall, sub_unmod,
-                            rule_labels, rule_mod, rule_overall, rule_unmod, 'Accuracy (%)')
+                            rule_labels, rule_mod, rule_overall, rule_unmod, '%')
 
     # Add legend with gray swatches showing alpha levels
     from matplotlib.patches import Patch
     legend_elements = [
-        Patch(facecolor='gray', alpha=1.0, label='moderated'),
-        Patch(facecolor='gray', alpha=0.55, label='overall'),
-        Patch(facecolor='gray', alpha=0.2, label='unmoderated'),
+        Patch(facecolor='gray', alpha=1.0, label='violating recall'),
+        Patch(facecolor='gray', alpha=0.55, label='accuracy'),
+        Patch(facecolor='gray', alpha=0.2, label='compliant recall'),
     ]
-    fig.legend(handles=legend_elements, loc='upper center', ncol=3, fontsize=6,
+    fig.legend(handles=legend_elements, loc='upper center', ncol=3, fontsize=7,
                frameon=False, bbox_to_anchor=(0.5, 1.0))
 
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.94, bottom=0.11, wspace=0.25)
+    fig.subplots_adjust(left=0.15, right=0.98, top=0.94, bottom=0.09, wspace=0.32)
     filename = f"cluster_stacked_{model}_{split}_{context}_{phrase if phrase=='baseline' else f'{phrase}_{mode}'}"
     plots_dir = eval_dir / 'plots'
     plots_dir.mkdir(parents=True, exist_ok=True)

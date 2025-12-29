@@ -37,7 +37,7 @@ import argparse
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from config import PROCESSES
-from plotting_config import create_two_column_figure, save_figure, add_subplot_labels
+from plotting_config import create_two_column_figure, save_figure, add_subplot_labels, FIGURE_HEIGHT_SCATTER, TWO_COLUMN_WIDTH
 import umap
 
 from adjustText import adjust_text
@@ -365,8 +365,8 @@ def main():
         logger.info("="*80)
 
         # Create 2x2 figure with 2/3 vs 1/3 width ratio
-        logger.info("\nCreating 2x2 figure (6.3\" x 7.00\") with 2:1 width ratio...")
-        fig = plt.figure(figsize=(6.3, 7.00))
+        logger.info(f"\nCreating 2x2 figure ({TWO_COLUMN_WIDTH}\" x {FIGURE_HEIGHT_SCATTER}\") with 2:1 width ratio...")
+        fig = plt.figure(figsize=(TWO_COLUMN_WIDTH, FIGURE_HEIGHT_SCATTER))
         gs = gridspec.GridSpec(2, 2, figure=fig, width_ratios=[2, 1], wspace=0, hspace=0.025)
 
         # Create axes with custom width distribution

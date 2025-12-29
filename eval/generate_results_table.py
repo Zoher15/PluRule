@@ -199,7 +199,7 @@ def generate_results_table() -> str:
 
 
 def generate_appendix_table() -> str:
-    """Generate LaTeX table with mod/unmod/overall breakdown for appendix (transposed: contexts as columns)."""
+    """Generate LaTeX table with violating recall/compliant recall/accuracy breakdown for appendix (transposed: contexts as columns)."""
 
     # Build flat list of (model_base, variant, display_name, variant_display) for rows
     all_rows = []
@@ -268,7 +268,7 @@ def generate_appendix_table() -> str:
     table.append(" & ".join(header_parts) + " \\\\")
     table.append("\\midrule")
 
-    # Data rows: grouped by model, then variant, with Mod, Unmod, and Overall rows
+    # Data rows: grouped by model, then variant, with Vio Rec, Com Rec, and Acc rows
     # Track which model we're in to use multirow for model names
     current_model = None
     variant_idx_in_model = 0
@@ -280,11 +280,11 @@ def generate_appendix_table() -> str:
             variant_idx_in_model = 0
             # Count how many variants this model has (for multirow span)
             num_variants = len([r for r in all_rows if r[2] == display_name])
-            model_row_span = num_variants * 3  # 3 rows per variant (Mod + Unmod + Overall)
+            model_row_span = num_variants * 3  # 3 rows per variant (Vio Rec + Com Rec + Acc)
         else:
             variant_idx_in_model += 1
 
-        # Mod row
+        # Violating Recall row
         mod_cells = []
         prev_mod = None
         for context_name, _, show_delta in CONTEXTS:
@@ -301,7 +301,7 @@ def generate_appendix_table() -> str:
                 cell = "—"
             mod_cells.append(cell)
 
-        # Unmod row
+        # Compliant Recall row
         unmod_cells = []
         prev_unmod = None
         for context_name, _, show_delta in CONTEXTS:
@@ -318,7 +318,7 @@ def generate_appendix_table() -> str:
                 cell = "—"
             unmod_cells.append(cell)
 
-        # Overall row
+        # Accuracy row
         overall_cells = []
         prev_overall = None
         for context_name, _, show_delta in CONTEXTS:
@@ -343,12 +343,12 @@ def generate_appendix_table() -> str:
             # Continuation of model - empty cell
             model_cell = ""
 
-        # Variant always uses multirow spanning 3 rows (Mod + Unmod + Overall)
+        # Variant always uses multirow spanning 3 rows (Vio Rec + Com Rec + Acc)
         variant_cell = f"\\multirow{{3}}{{*}}{{{variant_display}}}"
 
-        table.append(f"{model_cell} & {variant_cell} & Mod & " + " & ".join(mod_cells) + " \\\\")
-        table.append(" & & Unmod & " + " & ".join(unmod_cells) + " \\\\")
-        table.append(" & & Overall & " + " & ".join(overall_cells) + " \\\\")
+        table.append(f"{model_cell} & {variant_cell} & Vio Rec & " + " & ".join(mod_cells) + " \\\\")
+        table.append(" & & Com Rec & " + " & ".join(unmod_cells) + " \\\\")
+        table.append(" & & Acc & " + " & ".join(overall_cells) + " \\\\")
 
         # Add separators
         if i < len(all_rows) - 1:
@@ -359,16 +359,16 @@ def generate_appendix_table() -> str:
                 # Separator between variants of same model
                 table.append(f"\\cmidrule(lr){{2-{3 + num_context_cols}}}")
 
-    # Baseline row: 0% for Mod, 100% for Unmod, 50% for Overall (spanning all context columns)
+    # Baseline row: 0% for Vio Rec, 100% for Com Rec, 50% for Acc (spanning all context columns)
     table.append("\\midrule")
-    table.append(f"\\multirow{{3}}{{*}}{{No Moderation}} & & Mod & \\multicolumn{{{num_context_cols}}}{{c}}{{0.0}} \\\\")
-    table.append(f" & & Unmod & \\multicolumn{{{num_context_cols}}}{{c}}{{100.0}} \\\\")
-    table.append(f" & & Overall & \\multicolumn{{{num_context_cols}}}{{c}}{{50.0}} \\\\")
+    table.append(f"\\multirow{{3}}{{*}}{{No Moderation}} & & Vio Rec & \\multicolumn{{{num_context_cols}}}{{c}}{{0.0}} \\\\")
+    table.append(f" & & Com Rec & \\multicolumn{{{num_context_cols}}}{{c}}{{100.0}} \\\\")
+    table.append(f" & & Acc & \\multicolumn{{{num_context_cols}}}{{c}}{{50.0}} \\\\")
 
     table.append("\\bottomrule")
     table.append("\\end{tabular}")
     ci_str = f"{max_ci:.1f}" if max_ci > 0 else "1.5"
-    table.append(f"\\caption{{Moderated and unmoderated accuracy (\\%) across different models and contexts on the {SPLIT} set. Numbers in parentheses indicate differences compared to accuracy values in the previous column. All values have 95\\% CI of $\\pm {ci_str}\\%$.}}")
+    table.append(f"\\caption{{Violating recall, compliant recall, and accuracy (\\%) across different models and contexts on the {SPLIT} set. Numbers in parentheses indicate differences compared to accuracy values in the previous column. All values have 95\\% CI of $\\pm {ci_str}\\%$.}}")
     table.append("\\label{tab:results-mod-unmod}")
     table.append("\\end{table*}")
 
