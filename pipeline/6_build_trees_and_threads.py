@@ -353,10 +353,10 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
     if not alternatives:
         return None, None, moderated_depth, rejection_stats
 
-    # Find best alternative using priority: length (longer better), common ancestors (more better), score (lower better)
+    # Find best alternative using priority: common ancestors (more better), length (longer better), score (lower better)
     best_alternative = None
     best_alternative_thread = None
-    best_score_tuple = None  # (length, common_ancestors, -score) - all higher is better
+    best_score_tuple = None  # (common_ancestors, length, -score) - all higher is better
 
     for alt_id in alternatives:
         alt_thread, has_issue, issue_type = build_thread_and_check_mod_response(
@@ -368,13 +368,13 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
             continue
 
         # Calculate ranking criteria
-        # Priority: 1) length (longer better), 2) common ancestors (more better), 3) score (lower better)
+        # Priority: 1) common ancestors (more better), 2) length (longer better), 3) score (lower better)
         thread_length = len(alt_thread)
         common_ancestors = count_common_ancestors(moderated_thread, alt_thread)
         score = comments.get(alt_id, {}).get('score', 0)
 
         # Create tuple for comparison (all values "higher is better")
-        score_tuple = (thread_length, common_ancestors, -score)
+        score_tuple = (common_ancestors, thread_length, -score)
 
         # Update best if this is better (tuple comparison does lexicographic ordering)
         if best_score_tuple is None or score_tuple > best_score_tuple:
@@ -617,8 +617,8 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         # Define paths
         submission_comments_dir = os.path.join(PATHS['organized_comments'], subreddit_name)
         match_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
-        trees_output = os.path.join(PATHS['comment_trees'], f"{subreddit_name}_comment_trees.pkl")
-        threads_output = os.path.join(PATHS['discussion_threads'], f"{subreddit_name}_discussion_threads.pkl")
+        trees_output = os.path.join(PATHS['comment_trees'], f"{subreddit_name}_comment_trees_anc.pkl")
+        threads_output = os.path.join(PATHS['discussion_threads'], f"{subreddit_name}_discussion_threads_anc.pkl")
 
         ensure_directory(trees_output)
         ensure_directory(threads_output)
@@ -849,7 +849,7 @@ def main():
         }
 
         # Save summary
-        summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
+        summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary_anc.json')
         write_json_file(summary, summary_file, pretty=True)
 
         logger.info(f"🎉 Stage 6 Complete!")

@@ -28,6 +28,78 @@ from config import PATHS
 from plotting_config import create_two_column_figure, save_figure, PUBLICATION_DPI
 
 
+def normalize_language(lang_code: str) -> str:
+    """Normalize language code by taking root (e.g., en-au → en, pt_BR → pt)."""
+    return lang_code.replace('_', '-').split('-')[0]
+
+
+def get_latest_performance_file(perf_dir: Path) -> Path:
+    """Get latest performance file, preferring _ci version if available."""
+    perf_files_ci = sorted(perf_dir.glob('performance_*_ci.json'))
+    perf_files = sorted(perf_dir.glob('performance_*.json'))
+
+    if perf_files_ci:
+        return perf_files_ci[-1]
+    elif perf_files:
+        return perf_files[-1]
+    else:
+        raise FileNotFoundError(f"No performance files in {perf_dir}")
+
+
+def load_language_distribution(use_cache: bool = True) -> list:
+    """Load language distribution from hydrated datasets across all splits.
+
+    Args:
+        use_cache: If True, use cached stats if available
+
+    Returns:
+        List of (normalized_language, count) tuples sorted by count descending
+    """
+    import zstandard as zstd
+
+    data_dir = Path(PATHS['data'])
+    cache_file = data_dir / 'language_distribution_stats.json'
+
+    # Try to load from cache
+    if use_cache and cache_file.exists():
+        print(f"  Loading from cache: {cache_file.name}")
+        with open(cache_file) as f:
+            cached_data = json.load(f)
+        return [(lang, count) for lang, count in cached_data['language_distribution']]
+
+    # Compute from scratch
+    print("  Computing language distribution from datasets...")
+    language_counts = Counter()
+
+    for split in ['train', 'val', 'test']:
+        dataset_file = data_dir / f'{split}_hydrated_clustered.json.zst'
+
+        with open(dataset_file, 'rb') as f:
+            dctx = zstd.ZstdDecompressor()
+            with dctx.stream_reader(f) as reader:
+                dataset = json.loads(reader.read())
+
+        for sub_data in dataset['subreddits']:
+            language = sub_data.get('language', 'unknown')
+            normalized_lang = normalize_language(language)
+            n_pairs = len(sub_data['thread_pairs'])
+            language_counts[normalized_lang] += n_pairs
+
+    sorted_data = sorted(language_counts.items(), key=lambda x: x[1], reverse=True)
+
+    # Save to cache
+    cache_data = {
+        'language_distribution': sorted_data,
+        'total_pairs': sum(language_counts.values()),
+        'n_languages': len(language_counts)
+    }
+    with open(cache_file, 'w') as f:
+        json.dump(cache_data, f, indent=2)
+    print(f"  Saved cache to: {cache_file.name}")
+
+    return sorted_data
+
+
 def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels, rule_values, xlabel, bar_values=None, show_baseline=False, log_scale=False, ci_errors=None):
     """Standardized two-column horizontal bar plot.
 
@@ -113,7 +185,7 @@ def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels,
 
 def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
                            rule_labels, rule_values, rule_cis, xlabel):
-    """Forest plot with dots for point estimates and horizontal lines for 95% CIs.
+    """Forest plot with squares for point estimates and horizontal lines for 95% CIs.
 
     Args:
         sub_labels, rule_labels: Cluster names
@@ -128,7 +200,7 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     for i in y_sub:
         ax_left.axhline(y=i, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.5, zorder=1)
     ax_left.scatter(sub_values, y_sub, color='#FF4500', s=30, marker='s', zorder=3)
-    # Add accuracy values on top of circles
+    # Add accuracy values on top of squares
     for i, val in enumerate(sub_values):
         ax_left.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(sub_cis):
@@ -156,7 +228,7 @@ def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
     for i in y_rule:
         ax_right.axhline(y=i, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.5, zorder=1)
     ax_right.scatter(rule_values, y_rule, color='#336699', s=30, marker='s', zorder=3)
-    # Add accuracy values on top of circles
+    # Add accuracy values on top of squares
     for i, val in enumerate(rule_values):
         ax_right.text(val, i, f'{val:.0f}', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold', zorder=4)
     for i, (ci_low, ci_high) in enumerate(rule_cis):
@@ -293,12 +365,13 @@ def plot_cluster_analysis(model, split, context, metric, phrase='baseline', mode
     eval_dir = Path(PATHS['data']).parent / 'output' / 'eval'
     perf_dir = eval_dir / model / split / context / ('baseline' if phrase == 'baseline' else f'{phrase}_{mode}')
 
-    perf_files = sorted(perf_dir.glob('performance_*.json'))
-    if not perf_files:
-        print(f"❌ No performance files in {perf_dir}")
+    try:
+        perf_file = get_latest_performance_file(perf_dir)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
         return 1
 
-    with open(perf_files[-1]) as f:
+    with open(perf_file) as f:
         data = json.load(f)
 
     # Extract metrics
@@ -350,12 +423,13 @@ def plot_cluster_forest(model, split, context, metric, phrase='baseline', mode='
     eval_dir = Path(PATHS['data']).parent / 'output' / 'eval'
     perf_dir = eval_dir / model / split / context / ('baseline' if phrase == 'baseline' else f'{phrase}_{mode}')
 
-    perf_files = sorted(perf_dir.glob('performance_*.json'))
-    if not perf_files:
-        print(f"No performance files in {perf_dir}")
+    try:
+        perf_file = get_latest_performance_file(perf_dir)
+    except FileNotFoundError as e:
+        print(e)
         return 1
 
-    with open(perf_files[-1]) as f:
+    with open(perf_file) as f:
         data = json.load(f)
 
     # Extract metrics with CIs
@@ -414,12 +488,13 @@ def plot_cluster_stacked(model, split, context, phrase='baseline', mode='prefill
     eval_dir = Path(PATHS['data']).parent / 'output' / 'eval'
     perf_dir = eval_dir / model / split / context / ('baseline' if phrase == 'baseline' else f'{phrase}_{mode}')
 
-    perf_files = sorted(perf_dir.glob('performance_*.json'))
-    if not perf_files:
-        print(f"No performance files in {perf_dir}")
+    try:
+        perf_file = get_latest_performance_file(perf_dir)
+    except FileNotFoundError as e:
+        print(e)
         return 1
 
-    with open(perf_files[-1]) as f:
+    with open(perf_file) as f:
         data = json.load(f)
 
     # Extract all three metrics per cluster
@@ -476,9 +551,151 @@ def plot_cluster_stacked(model, split, context, phrase='baseline', mode='prefill
     return 0
 
 
+def plot_language_diverging():
+    """Diverging plot: distribution (left) + language labels (middle) + accuracy forest (right)."""
+    # Language code to full name mapping
+    LANGUAGE_NAMES = {
+        'en': 'English', 'fr': 'French', 'de': 'German', 'pt': 'Portuguese',
+        'es': 'Spanish', 'nl': 'Dutch', 'it': 'Italian', 'pl': 'Polish',
+        'tr': 'Turkish', 'sv': 'Swedish', 'da': 'Danish', 'el': 'Greek',
+        'uk': 'Ukrainian', 'ro': 'Romanian', 'eo': 'Esperanto', 'hu': 'Hungarian',
+        'hr': 'Croatian', 'sk': 'Slovak', 'zh': 'Chinese', 'fi': 'Finnish',
+        'cs': 'Czech', 'ru': 'Russian', 'no': 'Norwegian', 'sl': 'Slovenian'
+    }
+
+    # Load distribution data (all splits)
+    print("Loading language distribution...")
+    lang_distribution = load_language_distribution()
+
+    # Load performance data (test, gpt5.2-high, full context)
+    eval_dir = Path(PATHS['data']).parent / 'output' / 'eval'
+    perf_dir = eval_dir / 'gpt5.2-high' / 'test' / 'submission-media-discussion-user' / 'baseline'
+
+    try:
+        perf_file = get_latest_performance_file(perf_dir)
+    except FileNotFoundError as e:
+        print(e)
+        return 1
+
+    print(f"Loading performance data from: {perf_file.name}")
+    with open(perf_file) as f:
+        perf_data = json.load(f)
+
+    # Extract per-language metrics
+    per_language = perf_data['metrics'].get('per_language', {})
+    if not per_language:
+        print("No per_language metrics found in performance JSON")
+        return 1
+
+    # Build mapping: language -> (count, accuracy, ci_low, ci_high)
+    language_data = {}
+    for lang, count in lang_distribution:
+        if lang in per_language:
+            acc = per_language[lang]['overall_accuracy'] * 100
+            ci_key = 'overall_accuracy_ci'
+            if ci_key in per_language[lang]:
+                ci_low, ci_high = per_language[lang][ci_key]
+                ci_low *= 100
+                ci_high *= 100
+            else:
+                ci_low, ci_high = acc, acc
+            language_data[lang] = (count, acc, ci_low, ci_high)
+
+    # Sort by count descending (matching distribution order)
+    sorted_langs = [(lang, *language_data[lang]) for lang, _ in lang_distribution if lang in language_data]
+
+    if not sorted_langs:
+        print("No language data to plot")
+        return 1
+
+    languages, counts, accs, ci_lows, ci_highs = zip(*sorted_langs)
+
+    # Convert language codes to full names
+    language_labels = [LANGUAGE_NAMES.get(lang, lang) for lang in languages]
+
+    # Create figure with two panels
+    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
+
+    y_pos = np.arange(len(languages))
+
+    # LEFT: Distribution bars extending leftward
+    ax_left.barh(y_pos, counts, height=0.8, color='#FF4500', edgecolor='none')
+    ax_left.set_xlabel('Number of Instances', fontsize=8)
+    ax_left.set_yticks(y_pos)
+    ax_left.set_yticklabels([])  # Hide default labels - we'll add them manually in the gap
+    ax_left.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
+    ax_left.tick_params(axis='y', pad=0.5, length=0, width=0.25)  # No tick marks
+    ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=1.0)
+    ax_left.set_ylim(-0.45, len(languages) - 0.2)
+    ax_left.invert_yaxis()  # Highest counts at top
+    ax_left.spines['top'].set_visible(False)
+    ax_left.spines['left'].set_visible(False)
+    ax_left.spines['right'].set_linewidth(0.25)
+    ax_left.spines['bottom'].set_linewidth(0.25)
+    ax_left.set_xscale('log')
+    ax_left.set_xlim(left=10000, right=0.1)  # Reversed: bars extend leftward from right edge (starting near 0)
+
+    # RIGHT: Forest plot with accuracies and CIs
+    # Faint horizontal lines at each position
+    for i in y_pos:
+        ax_right.axhline(y=i, color='lightgray', linestyle='-', linewidth=0.5, alpha=0.5, zorder=1)
+
+    ax_right.scatter(accs, y_pos, color='#FF4500', s=50, marker='s', zorder=3)
+
+    # Add text inside squares
+    for i, acc in enumerate(accs):
+        ax_right.text(acc, i, f'{acc:.0f}', ha='center', va='center',
+                     fontsize=4.5, color='white', fontweight='bold', zorder=4)
+
+    # Add CI lines with caps (instead of errorbar)
+    for i, (ci_low, ci_high) in enumerate(zip(ci_lows, ci_highs)):
+        ax_right.hlines(i, ci_low, ci_high, color='#FF4500', linewidth=1, zorder=2)
+        # Caps at ends
+        ax_right.vlines([ci_low, ci_high], i - 0.25, i + 0.25, color='#FF4500', linewidth=1, zorder=2)
+
+    ax_right.set_xlabel('Test Accuracy (%)', fontsize=8)
+    ax_right.set_yticks(y_pos)
+    ax_right.set_yticklabels([])  # Hide labels (shared from left)
+    ax_right.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
+    ax_right.tick_params(axis='y', pad=0.5, length=0, width=0.25)  # No y-tick marks (labels in middle)
+    ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+    ax_right.set_ylim(-0.5, len(languages) - 0.5)
+    ax_right.set_xlim(-3, 103)  # Extended to prevent clipping squares at 0 and 100
+    ax_right.invert_yaxis()
+    ax_right.axvline(x=50, color='gray', linestyle='--', linewidth=1.5, alpha=0.8, zorder=1)
+    ax_right.spines['top'].set_visible(False)
+    ax_right.spines['right'].set_visible(False)
+    ax_right.spines['left'].set_linewidth(0.25)
+    ax_right.spines['bottom'].set_linewidth(0.25)
+
+    # Add language labels centered in the gap between plots
+    for i, label_text in enumerate(language_labels):
+        # Position at x=1.125 (center of wspace=0.25) in ax_left's axes coordinates
+        ax_left.text(1.125, i, label_text, transform=ax_left.get_yaxis_transform(),
+                    fontsize=7, ha='center', va='center')
+
+    # Subplot labels: (a) in bottom left, (b) in bottom right
+    ax_left.text(0.02, 0.02, '(a)', transform=ax_left.transAxes,
+                fontsize=10, verticalalignment='bottom', horizontalalignment='left')
+    ax_right.text(0.98, 0.02, '(b)', transform=ax_right.transAxes,
+                 fontsize=10, verticalalignment='bottom', horizontalalignment='right')
+
+    # Adjust margins
+    fig.subplots_adjust(left=0.015, right=0.985, top=0.99, bottom=0.1, wspace=0.25)
+
+    # Save
+    filename = "language_analysis_gpt5.2-high_test_submission-media-discussion-user"
+    plots_dir = eval_dir / 'plots'
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    save_figure(fig, plots_dir / filename, dpi=PUBLICATION_DPI, bbox_inches=None)
+    plt.close(fig)
+    print(f"✅ Language diverging plot saved: {plots_dir / filename}.pdf")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate paper figures (subreddit vs rule bars)')
-    parser.add_argument('type', choices=['distribution', 'cluster-analysis', 'cluster-forest', 'cluster-stacked'], help='Plot type')
+    parser.add_argument('type', choices=['distribution', 'cluster-analysis', 'cluster-forest', 'cluster-stacked', 'language-analysis'], help='Plot type')
     parser.add_argument('--model', default='gpt5.2-high', help='Model name')
     parser.add_argument('--split', default='test', help='Dataset split')
     parser.add_argument('--context', default='submission-media-discussion-user', help='Context')
@@ -493,6 +710,8 @@ def main():
         return plot_cluster_forest(args.model, args.split, args.context, args.metric, args.phrase, args.mode)
     elif args.type == 'cluster-stacked':
         return plot_cluster_stacked(args.model, args.split, args.context, args.phrase, args.mode)
+    elif args.type == 'language-analysis':
+        return plot_language_diverging()
     else:
         return plot_cluster_analysis(args.model, args.split, args.context, args.metric, args.phrase, args.mode)
 

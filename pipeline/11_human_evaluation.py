@@ -417,7 +417,7 @@ def save_evaluation_metadata(samples: List[Dict], form_data: List[Dict],
             'mod_comment_id': sample['mod_comment_id'],
             'subreddit': sample['subreddit'],
             'submission_id': sample['submission_id'],
-            'correct_answer': sample['matched_rule'],
+            'predicted_answer': sample['matched_rule'],
             'rule_cluster_label': sample['rule_cluster_label'],
             'subreddit_cluster_label': sample['subreddit_cluster_label'],
             'answer_options': sample['answer_options']

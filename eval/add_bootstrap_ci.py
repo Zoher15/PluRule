@@ -39,6 +39,15 @@ from eval.config import DATASET_FILES, OUTPUT_DIR
 
 
 # =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def normalize_language(lang_code: str) -> str:
+    """Normalize language code by taking root (e.g., en-au → en, pt_BR → pt)."""
+    return lang_code.replace('_', '-').split('-')[0]
+
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -70,18 +79,22 @@ def load_test_set() -> Dict[str, Any]:
         with open(test_path, 'r') as f:
             data = json.load(f)
 
-    # Extract cluster labels for each pair
+    # Extract cluster labels and language for each pair
     rule_clusters = []
     subreddit_clusters = []
+    languages = []
     mod_comment_ids = []
 
     for subreddit_data in data['subreddits']:
         subreddit_cluster_label = subreddit_data.get('subreddit_cluster_label', 'Other')
+        language = subreddit_data.get('language', 'unknown')
+        normalized_lang = normalize_language(language)
 
         for pair in subreddit_data['thread_pairs']:
             rule_cluster_label = pair['metadata'].get('rule_cluster_label', 'Other')
             rule_clusters.append(rule_cluster_label)
             subreddit_clusters.append(subreddit_cluster_label)
+            languages.append(normalized_lang)
             mod_comment_ids.append(pair['mod_comment_id'])
 
     n_samples = len(mod_comment_ids)
@@ -89,21 +102,26 @@ def load_test_set() -> Dict[str, Any]:
     # Convert to numeric indices for fast array operations
     unique_rules = sorted(set(rule_clusters))
     unique_subreddits = sorted(set(subreddit_clusters))
+    unique_languages = sorted(set(languages))
 
     rule_to_idx = {r: i for i, r in enumerate(unique_rules)}
     subreddit_to_idx = {s: i for i, s in enumerate(unique_subreddits)}
+    language_to_idx = {l: i for i, l in enumerate(unique_languages)}
 
     rule_cluster_ids = np.array([rule_to_idx[r] for r in rule_clusters], dtype=np.int32)
     subreddit_cluster_ids = np.array([subreddit_to_idx[s] for s in subreddit_clusters], dtype=np.int32)
+    language_ids = np.array([language_to_idx[l] for l in languages], dtype=np.int32)
 
-    print(f"   ✅ {n_samples} pairs, {len(unique_rules)} rule clusters, {len(unique_subreddits)} subreddit clusters")
+    print(f"   ✅ {n_samples} pairs, {len(unique_rules)} rule clusters, {len(unique_subreddits)} subreddit clusters, {len(unique_languages)} languages")
 
     return {
         'n_samples': n_samples,
         'rule_cluster_ids': rule_cluster_ids,
         'subreddit_cluster_ids': subreddit_cluster_ids,
+        'language_ids': language_ids,
         'rule_cluster_names': unique_rules,
         'subreddit_cluster_names': unique_subreddits,
+        'language_names': unique_languages,
         'mod_comment_ids': mod_comment_ids
     }
 
@@ -246,8 +264,10 @@ def compute_cis_gpu(mod_scores: np.ndarray,
                     indices_gpu: cp.ndarray,
                     rule_cluster_ids_gpu: cp.ndarray,
                     subreddit_cluster_ids_gpu: cp.ndarray,
+                    language_ids_gpu: cp.ndarray,
                     rule_cluster_names: List[str],
                     subreddit_cluster_names: List[str],
+                    language_names: List[str],
                     ci: float = 0.95) -> Dict[str, Any]:
     """
     Compute all CIs using GPU-accelerated CuPy operations.
@@ -258,12 +278,14 @@ def compute_cis_gpu(mod_scores: np.ndarray,
         indices_gpu: Bootstrap indices (n_bootstrap, n_samples) - GPU cupy
         rule_cluster_ids_gpu: Rule cluster index per sample (n_samples,) - GPU cupy
         subreddit_cluster_ids_gpu: Subreddit cluster index per sample (n_samples,) - GPU cupy
+        language_ids_gpu: Language index per sample (n_samples,) - GPU cupy
         rule_cluster_names: List of rule cluster names
         subreddit_cluster_names: List of subreddit cluster names
+        language_names: List of language names
         ci: Confidence level
 
     Returns:
-        Dict with 'overall', 'per_rule_cluster', 'per_subreddit_cluster' CIs
+        Dict with 'overall', 'per_rule_cluster', 'per_subreddit_cluster', 'per_language' CIs
     """
     alpha = 1 - ci
 
@@ -298,7 +320,8 @@ def compute_cis_gpu(mod_scores: np.ndarray,
             'unmoderated_accuracy_ci': get_ci_gpu(overall_unmod_acc)
         },
         'per_rule_cluster': {},
-        'per_subreddit_cluster': {}
+        'per_subreddit_cluster': {},
+        'per_language': {}
     }
 
     # Per-cluster CIs (on GPU)
@@ -342,6 +365,26 @@ def compute_cis_gpu(mod_scores: np.ndarray,
             'unmoderated_accuracy_ci': get_ci_gpu(cluster_unmod_acc)
         }
 
+    # Languages
+    for lang_idx, lang_name in enumerate(language_names):
+        mask = (language_ids_gpu == lang_idx)
+        if int(cp.sum(mask)) == 0:
+            continue
+
+        boot_mask = mask[indices_gpu]
+        lang_mod = cp.where(boot_mask, boot_mod, cp.nan)
+        lang_unmod = cp.where(boot_mask, boot_unmod, cp.nan)
+
+        lang_mod_acc = cp.nanmean(lang_mod, axis=1)
+        lang_unmod_acc = cp.nanmean(lang_unmod, axis=1)
+        lang_acc = (lang_mod_acc + lang_unmod_acc) / 2
+
+        output['per_language'][lang_name] = {
+            'overall_accuracy_ci': get_ci_gpu(lang_acc),
+            'moderated_accuracy_ci': get_ci_gpu(lang_mod_acc),
+            'unmoderated_accuracy_ci': get_ci_gpu(lang_unmod_acc)
+        }
+
     # Free GPU memory
     del boot_mod, boot_unmod, mod_scores_gpu, unmod_scores_gpu
     cp.get_default_memory_pool().free_all_blocks()
@@ -367,6 +410,12 @@ def merge_cis_into_performance(performance: Dict, cis: Dict, n_bootstrap: int) -
         if cluster in performance['metrics']['per_subreddit_cluster']:
             for key, ci in cluster_cis.items():
                 performance['metrics']['per_subreddit_cluster'][cluster][key] = ci
+
+    # Per-language
+    for lang, lang_cis in cis['per_language'].items():
+        if lang in performance['metrics']['per_language']:
+            for key, ci in lang_cis.items():
+                performance['metrics']['per_language'][lang][key] = ci
 
     # Metadata
     performance['metrics']['bootstrap_ci'] = {
@@ -439,6 +488,7 @@ def main():
     indices_gpu = cp.array(indices, dtype=cp.int32)
     rule_cluster_ids_gpu = cp.array(test_data['rule_cluster_ids'], dtype=cp.int32)
     subreddit_cluster_ids_gpu = cp.array(test_data['subreddit_cluster_ids'], dtype=cp.int32)
+    language_ids_gpu = cp.array(test_data['language_ids'], dtype=cp.int32)
     print(f"   ✅ GPU memory allocated: {indices_gpu.nbytes / 1e9:.2f} GB")
 
     # Process directories sequentially (GPU is fast enough)
@@ -457,16 +507,20 @@ def main():
         try:
             reasoning_path, performance_path = get_latest_files(result_dir)
 
+            # Check if _ci file already exists
+            ci_performance_path = performance_path.parent / f"{performance_path.stem}_ci{performance_path.suffix}"
+            if ci_performance_path.exists() and not args.regenerate:
+                with open(ci_performance_path) as f:
+                    ci_perf = json.load(f)
+                existing_ci = ci_perf.get('metrics', {}).get('bootstrap_ci', {})
+                if existing_ci.get('n_bootstrap') == args.n_bootstrap:
+                    print(f"  ⏭️  {config_str} - already has {args.n_bootstrap:,} CIs")
+                    skipped += 1
+                    continue
+
             # Load performance
             with open(performance_path) as f:
                 performance = json.load(f)
-
-            # Check if already processed with same n_bootstrap
-            existing_ci = performance.get('metrics', {}).get('bootstrap_ci', {})
-            if existing_ci.get('n_bootstrap') == args.n_bootstrap and not args.regenerate:
-                print(f"  ⏭️  {config_str} - already has {args.n_bootstrap:,} CIs")
-                skipped += 1
-                continue
 
             # Load scores aligned to test set order
             mod_scores, unmod_scores = load_scores_from_reasoning(
@@ -483,16 +537,20 @@ def main():
                 indices_gpu,
                 rule_cluster_ids_gpu,
                 subreddit_cluster_ids_gpu,
+                language_ids_gpu,
                 test_data['rule_cluster_names'],
-                test_data['subreddit_cluster_names']
+                test_data['subreddit_cluster_names'],
+                test_data['language_names']
             )
 
             # Merge into performance
             performance = merge_cis_into_performance(performance, cis, args.n_bootstrap)
 
-            # Save
+            # Save to new file with _ci suffix
             if not args.dry_run:
-                with open(performance_path, 'w') as f:
+                # performance_20251218_013627.json -> performance_20251218_013627_ci.json
+                ci_performance_path = performance_path.parent / f"{performance_path.stem}_ci{performance_path.suffix}"
+                with open(ci_performance_path, 'w') as f:
                     json.dump(performance, f, indent=2)
 
             overall_ci = cis['overall']['overall_accuracy_ci']
