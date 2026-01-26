@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 9: Create Final Datasets with Train/Val/Test Splits
+Stage 8: Create Final Datasets with Train/Val/Test Splits
 
 Creates train/val/test splits using an adaptive strategy per subreddit:
 - n=1: 1 test, 0 val, 0 train
@@ -15,7 +15,7 @@ Input:
 - comment_trees/{subreddit}_comment_trees.pkl (from Stage 6)
 - submissions/{subreddit}_submissions.zst (from Stage 7)
 - media/{subreddit}/* (from Stage 8)
-- stage8_successful_submission_ids.json
+- stage7_successful_submission_ids.json
 - stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json
 
 Output:
@@ -23,8 +23,8 @@ Output:
 - val_hydrated.json.zst / val_dehydrated.json.zst
 - test_hydrated.json.zst / test_dehydrated.json.zst
 - test_hydrated.json (uncompressed)
-- stage9_final_datasets_stats.json
-- stage9_thread_distribution_analysis.json
+- stage8_final_datasets_stats.json
+- stage8_thread_distribution_analysis.json
 """
 
 import sys
@@ -210,7 +210,7 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
     PUSHSHIFT_CUTOFF = 1677628800  # March 1, 2023 00:00:00 UTC
 
     # Load Stage 8 successful IDs
-    success_file = os.path.join(PATHS['data'], 'stage8_successful_submission_ids.json')
+    success_file = os.path.join(PATHS['data'], 'stage7_successful_submission_ids.json')
     if not os.path.exists(success_file):
         logger.error(f"Stage 8 success file not found: {success_file}")
         return {}
@@ -592,8 +592,8 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
 # ============================================================================
 
 def main():
-    logger = get_stage_logger(9, "create_final_datasets")
-    log_stage_start(logger, 9, "Create Final Datasets (Train/Val/Test)")
+    logger = get_stage_logger(8, "create_final_datasets")
+    log_stage_start(logger, 8, "Create Final Datasets (Train/Val/Test)")
     start_time = time.time()
 
     try:
@@ -605,7 +605,7 @@ def main():
 
         if not subreddit_data:
             logger.error("❌ No data loaded!")
-            log_stage_end(logger, 9, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         # Load metadata
@@ -617,7 +617,7 @@ def main():
         subreddit_data, verification_results = verify_mod_comments_with_llm(subreddit_data, subreddit_rules, logger)
 
         # Save verification results
-        verification_file = os.path.join(PATHS['data'], 'stage9_llm_verification_results.json')
+        verification_file = os.path.join(PATHS['data'], 'stage8_llm_verification_results.json')
         verification_stats = {
             'metadata': {
                 'stage': 9,
@@ -647,13 +647,13 @@ def main():
 
         if not subreddit_data:
             logger.error("❌ No data remaining after LLM verification!")
-            log_stage_end(logger, 9, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         # Analyze distribution
         logger.info("📊 Analyzing distribution...")
         distribution = analyze_thread_distribution(subreddit_data, logger)
-        dist_file = os.path.join(PATHS['data'], 'stage9_thread_distribution_analysis.json')
+        dist_file = os.path.join(PATHS['data'], 'stage8_thread_distribution_analysis.json')
         write_json_file(distribution, dist_file, pretty=True)
         logger.info(f"  Saved to: {dist_file}")
 
@@ -701,7 +701,7 @@ def main():
 
         if not test_subreddits:
             logger.error("❌ No data!")
-            log_stage_end(logger, 9, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         # Rank by JSD
@@ -711,9 +711,9 @@ def main():
 
         # Load pipeline stats
         stage1_stats = read_json_file(os.path.join(PATHS['data'], 'stage1_subreddit_mod_comment_rankings.json'))
-        stage4_stats = read_json_file(os.path.join(PATHS['data'], 'stage4_matching_summary.json'))
-        stage6_stats = read_json_file(os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json'))
-        stage7_stats = read_json_file(os.path.join(PATHS['data'], 'stage7_submission_collection_stats.json'))
+        stage4_stats = read_json_file(os.path.join(PATHS['data'], 'stage3_matching_summary.json'))
+        stage6_stats = read_json_file(os.path.join(PATHS['data'], 'stage5_trees_and_threads_summary.json'))
+        stage7_stats = read_json_file(os.path.join(PATHS['data'], 'stage6_submission_collection_stats.json'))
 
         # Create metadata
         def create_metadata(split: str, subs: List[Dict]) -> Dict:
@@ -743,7 +743,7 @@ def main():
                     'stage1_total_mod_comments': stage1_stats.get('summary', {}).get('total_mod_comments', 0),
                     'stage4_matched_comments': stage4_stats.get('total_matched', 0),
                     'stage6_successful_thread_pairs': stage6_stats.get('summary', {}).get('total_successful_pairs', 0),
-                    'stage7_submissions_collected': stage7_stats.get('summary', {}).get('total_submissions_collected', 0),
+                    'stage6_submissions_collected': stage7_stats.get('summary', {}).get('total_submissions_collected', 0),
                 }
             }
 
@@ -811,17 +811,17 @@ def main():
             'output_files': output_files
         }
 
-        stats_file = os.path.join(PATHS['data'], 'stage9_final_datasets_stats.json')
+        stats_file = os.path.join(PATHS['data'], 'stage8_final_datasets_stats.json')
         write_json_file(summary_stats, stats_file, pretty=True)
 
         elapsed = time.time() - start_time
         logger.info(f"🎉 Stage 9 Complete! ({elapsed:.1f}s)")
-        log_stage_end(logger, 9, success=True, elapsed_time=elapsed)
+        log_stage_end(logger, 8, success=True, elapsed_time=elapsed)
         return 0
 
     except Exception as e:
         log_error_and_continue(logger, e, "Stage 9 execution")
-        log_stage_end(logger, 9, success=False, elapsed_time=time.time() - start_time)
+        log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 5: Collect and Organize Submission Comments (MEMORY-OPTIMIZED)
+Stage 4: Collect and Organize Submission Comments (MEMORY-OPTIMIZED)
 
 Pass 1: Filter Arctic Shift to temp file (all matching comments), count per submission
 Pass 2: Stream temp file, deduplicate, write submissions when complete
@@ -28,8 +28,8 @@ from utils.reddit import extract_submission_id, normalize_subreddit_name
 
 
 def load_submission_ids(logger):
-    """Load submission IDs from Stage 4."""
-    data = read_json_file(os.path.join(PATHS['data'], 'stage4_subreddit_submission_ids.json'))
+    """Load submission IDs from Stage 3."""
+    data = read_json_file(os.path.join(PATHS['data'], 'stage3_subreddit_submission_ids.json'))
     subreddit_to_ids = {}
     for subreddit, submission_ids in data['subreddit_submission_ids'].items():
         subreddit_to_ids[normalize_subreddit_name(subreddit)] = set(submission_ids)
@@ -71,7 +71,7 @@ def process_subreddit_comments(args: tuple) -> Dict[str, Any]:
     Pass 2: Deduplicate and write submissions
     """
     subreddit, target_submission_ids, output_dir = args
-    worker_logger = get_stage_logger(5, "collect_submission_comments", worker_identifier=f"subreddits/{subreddit}")
+    worker_logger = get_stage_logger(4, "collect_submission_comments", worker_identifier=f"subreddits/{subreddit}")
 
     worker_logger.info(f"🔄 Processing {subreddit} ({len(target_submission_ids)} target submissions)")
     start_time = time.time()
@@ -90,7 +90,7 @@ def process_subreddit_comments(args: tuple) -> Dict[str, Any]:
         worker_logger.info(f"   📊 Pass 1: Filtering comments...")
         pass1_start = time.time()
 
-        temp_dir = tempfile.mkdtemp(prefix=f"stage5_{subreddit}_")
+        temp_dir = tempfile.mkdtemp(prefix=f"stage4_{subreddit}_")
         temp_file = os.path.join(temp_dir, "filtered_comments.zst")
 
         # Track expected line count per submission (including duplicates)
@@ -224,8 +224,8 @@ def process_subreddit_comments(args: tuple) -> Dict[str, Any]:
 
 def main():
     """Main orchestration."""
-    logger = get_stage_logger(5, "collect_submission_comments")
-    log_stage_start(logger, 5, "Collect and Organize Submission Comments")
+    logger = get_stage_logger(4, "collect_submission_comments")
+    log_stage_start(logger, 4, "Collect and Organize Submission Comments")
     overall_start = time.time()
 
     try:
@@ -233,7 +233,7 @@ def main():
 
         if not os.path.exists(ARCTIC_SHIFT_DATA):
             logger.error(f"❌ Arctic Shift not found: {ARCTIC_SHIFT_DATA}")
-            log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
+            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - overall_start)
             return 1
 
         logger.info("📋 Loading submission IDs...")
@@ -241,7 +241,7 @@ def main():
 
         if not subreddit_to_ids:
             logger.error("❌ No submission IDs found")
-            log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
+            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - overall_start)
             return 1
 
         logger.info(f"🗂️  Processing {len(subreddit_to_ids)} subreddits with {PROCESSES} processes")
@@ -296,18 +296,18 @@ def main():
             'failed_subreddits': [{'subreddit': r['subreddit'], 'error': r.get('error', 'unknown')} for r in failed_results]
         }
 
-        stats_file = os.path.join(PATHS['data'], 'stage5_submission_comment_collection_stats.json')
+        stats_file = os.path.join(PATHS['data'], 'stage4_submission_comment_collection_stats.json')
         write_json_file(stats_data, stats_file, pretty=True)
 
         if failed_results:
             logger.warning(f"⚠️  Failed: {len(failed_results)} subreddits")
 
-        log_stage_end(logger, 5, success=True, elapsed_time=time.time() - overall_start)
+        log_stage_end(logger, 4, success=True, elapsed_time=time.time() - overall_start)
         return 0
 
     except Exception as e:
-        log_error_and_continue(logger, e, "Stage 5")
-        log_stage_end(logger, 5, success=False, elapsed_time=time.time() - overall_start)
+        log_error_and_continue(logger, e, "Stage 4")
+        log_stage_end(logger, 4, success=False, elapsed_time=time.time() - overall_start)
         return 1
 
 

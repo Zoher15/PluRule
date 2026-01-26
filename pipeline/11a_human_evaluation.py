@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 11: Human Evaluation from Final Dataset
+Stage 11a: Human Evaluation from Final Dataset
 
 Creates Google Forms for human evaluation of rule matching quality using the
 Stage 10 clustered test dataset. Samples 100 moderator comments from 100 unique
@@ -446,7 +446,7 @@ def save_evaluation_metadata(samples: List[Dict], form_data: List[Dict],
 
     # Save metadata
     os.makedirs(output_dir, exist_ok=True)
-    metadata_file = os.path.join(output_dir, 'stage11_human_evaluation_metadata.json')
+    metadata_file = os.path.join(output_dir, 'stage10_human_evaluation_metadata.json')
     write_json_file(metadata, metadata_file, pretty=True)
     logger.info(f"Saved metadata to: {metadata_file}")
 
@@ -466,7 +466,7 @@ def main():
 
     try:
         print("=" * 60)
-        print("Stage 11: Human Evaluation Form Creation")
+        print("Stage 11a: Human Evaluation Form Creation")
         print("=" * 60)
         print(f"\nConfiguration:")
         print(f"  Total samples: {TOTAL_SAMPLES}")

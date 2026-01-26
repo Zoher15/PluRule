@@ -14,7 +14,7 @@ Output:
 - data/{split}_hydrated_clustered.json.zst (updated datasets with cluster labels)
 - data/{split}_dehydrated_clustered.json.zst (dehydrated versions)
 - data/test_hydrated_clustered.json (uncompressed test set)
-- data/stage10_cluster_assignment_stats.json
+- data/stage9_cluster_assignment_stats.json
 - data/stage10_dataset_stats_table.tex (LaTeX table for paper)
 
 The script adds cluster labels to:
@@ -542,7 +542,7 @@ def main():
             'total_unique_subreddits_mapped': len(subreddit_mapping)
         }
 
-        stats_file = os.path.join(PATHS['data'], 'stage10_cluster_assignment_stats.json')
+        stats_file = os.path.join(PATHS['data'], 'stage9_cluster_assignment_stats.json')
         write_json_file(summary_stats, stats_file, pretty=True)
         logger.info(f"  ✅ Saved statistics to: {stats_file}")
 

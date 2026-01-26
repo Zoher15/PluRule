@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 6: Build Comment Trees and Discussion Threads
+Stage 5: Build Comment Trees and Discussion Threads
 
 Builds hierarchical comment tree structures and creates violating/compliant
 discussion thread pairs for training data.
@@ -609,7 +609,7 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
     """Process single subreddit: build trees and create discussion threads."""
     subreddit_name, complete_rule_set = args
 
-    worker_logger = get_stage_logger(6, "build_trees_and_threads", worker_identifier=f"subreddits/{subreddit_name}")
+    worker_logger = get_stage_logger(5, "build_trees_and_threads", worker_identifier=f"subreddits/{subreddit_name}")
     worker_logger.info(f"🔄 Processing {subreddit_name}")
     start_time = time.time()
 
@@ -762,8 +762,8 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
 
 def main():
     """Main execution function."""
-    logger = get_stage_logger(6, "build_trees_and_threads")
-    log_stage_start(logger, 6, "Build Comment Trees and Discussion Threads")
+    logger = get_stage_logger(5, "build_trees_and_threads")
+    log_stage_start(logger, 5, "Build Comment Trees and Discussion Threads")
 
     start_time = time.time()
 
@@ -776,7 +776,7 @@ def main():
 
         if not subreddit_languages:
             logger.error("❌ No subreddits loaded!")
-            log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 5, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         # Find subreddits with required input files
@@ -790,7 +790,7 @@ def main():
 
         if not subreddits_to_process:
             logger.error("❌ No subreddits found with required input files!")
-            log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 5, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         logger.info(f"Found {len(subreddits_to_process)} subreddits to process")
@@ -849,7 +849,7 @@ def main():
         }
 
         # Save summary
-        summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
+        summary_file = os.path.join(PATHS['data'], 'stage5_trees_and_threads_summary.json')
         write_json_file(summary, summary_file, pretty=True)
 
         logger.info(f"🎉 Stage 6 Complete!")
@@ -870,12 +870,12 @@ def main():
             if len(failed_results) > 10:
                 logger.warning(f"  ... and {len(failed_results) - 10} more")
 
-        log_stage_end(logger, 6, success=True, elapsed_time=elapsed)
+        log_stage_end(logger, 5, success=True, elapsed_time=elapsed)
         return 0
 
     except Exception as e:
         log_error_and_continue(logger, e, "Stage 6 execution")
-        log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
+        log_stage_end(logger, 5, success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

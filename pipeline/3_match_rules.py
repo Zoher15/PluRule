@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 4: Match Comments to Rules
+Stage 3: Match Comments to Rules
 
 Uses semantic similarity to match moderator comments to subreddit rules.
 Phase 1: Create similarity matrices using bucket-based parallel processing
@@ -248,13 +248,13 @@ def main():
     """Main execution function."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Stage 4: Match Comments to Rules")
+    parser = argparse.ArgumentParser(description="Stage 3: Match Comments to Rules")
     parser.add_argument("--phase2-only", action="store_true",
                        help="Skip Phase 1 (similarity matrix creation) and run only Phase 2 (matching)")
     args = parser.parse_args()
 
-    logger = get_stage_logger(4, "match_rules")
-    log_stage_start(logger, 4, "Match Comments to Rules")
+    logger = get_stage_logger(3, "match_rules")
+    log_stage_start(logger, 3, "Match Comments to Rules")
     start_time = time.time()
 
     try:
@@ -277,7 +277,7 @@ def main():
 
         if not os.path.exists(top_subreddits_dir):
             logger.error(f"❌ Top subreddits directory not found: {top_subreddits_dir}")
-            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 3, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         for entry in stage2_data['subreddits']:
@@ -295,7 +295,7 @@ def main():
 
         if not available_subreddits:
             logger.error("❌ No subreddit files found to process!")
-            log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 3, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         # Sort by comment count (descending)
@@ -340,7 +340,7 @@ def main():
 
                 cmd = [
                     sys.executable,
-                    'scripts/4_match_rules_bucket.py',
+                    'utils/match_rules_bucket.py',
                     '--cuda-device', str(cuda_id) if cuda_id is not None else "None",
                     '--subreddits', ','.join(bucket)
                 ]
@@ -466,7 +466,7 @@ def main():
             'subreddit_stats': clean_ranked_results
         }
 
-        summary_file = os.path.join(PATHS['data'], 'stage4_matching_summary.json')
+        summary_file = os.path.join(PATHS['data'], 'stage3_matching_summary.json')
         write_json_file(summary, summary_file, pretty=True)
 
         # Create submission IDs file for Stage 5
@@ -490,12 +490,12 @@ def main():
             'subreddit_submission_ids': submission_ids_data
         }
 
-        submission_ids_file = os.path.join(PATHS['data'], 'stage4_subreddit_submission_ids.json')
+        submission_ids_file = os.path.join(PATHS['data'], 'stage3_subreddit_submission_ids.json')
         write_json_file(submission_ids_output, submission_ids_file, pretty=True)
 
         elapsed = time.time() - start_time
 
-        logger.info(f"🎉 Stage 4 Complete!")
+        logger.info(f"🎉 Stage 3 Complete!")
         logger.info(f"Time: {elapsed:.1f}s")
         logger.info(f"📊 Processed {len(successful_results)} subreddits")
         logger.info(f"💬 Total comments: {total_comments:,}")
@@ -524,12 +524,12 @@ def main():
             matched = stats.get('matched_comments', 0)
             logger.info(f"{rank:<5} r/{subreddit:<19} {jsd:<8.4f} {match_pct:<8.1f} {matched:<8}")
 
-        log_stage_end(logger, 4, success=True, elapsed_time=elapsed)
+        log_stage_end(logger, 3, success=True, elapsed_time=elapsed)
         return 0
 
     except Exception as e:
-        logger.error(f"❌ Stage 4 execution failed: {e}", exc_info=True)
-        log_stage_end(logger, 4, success=False, elapsed_time=time.time() - start_time)
+        logger.error(f"❌ Stage 3 execution failed: {e}", exc_info=True)
+        log_stage_end(logger, 3, success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

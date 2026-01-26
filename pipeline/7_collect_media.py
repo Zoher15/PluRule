@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 8: Collect Media for Submissions
+Stage 7: Collect Media for Submissions
 
 Downloads media files (images, thumbnails) for submissions to provide visual context.
 Uses priority-based extraction with robust error handling and progress tracking.
@@ -17,8 +17,8 @@ Input:
 
 Output:
 - media/{subreddit}/{submission_id}_{media_id}.{ext}
-- data/stage8_media_collection_stats.json
-- data/stage8_successful_submission_ids.json
+- data/stage7_media_collection_stats.json
+- data/stage7_successful_submission_ids.json
 """
 
 import sys
@@ -432,7 +432,7 @@ def download_submission_media(submission: Dict, media_dir: str, session: request
 def process_subreddit(args: Tuple) -> Dict[str, Any]:
     """Process all submissions for a subreddit with progress tracking."""
     subreddit, = args
-    logger = get_stage_logger(8, "collect_media", worker_identifier=f"subreddits/{subreddit}")
+    logger = get_stage_logger(7, "collect_media", worker_identifier=f"subreddits/{subreddit}")
     logger.info(f"🔄 Processing r/{subreddit}")
 
     start_time = time.time()
@@ -504,8 +504,8 @@ def process_subreddit(args: Tuple) -> Dict[str, Any]:
 
 def main():
     """Main execution function."""
-    logger = get_stage_logger(8, "collect_media")
-    log_stage_start(logger, 8, "Collect Media for Submissions")
+    logger = get_stage_logger(7, "collect_media")
+    log_stage_start(logger, 7, "Collect Media for Submissions")
     start_time = time.time()
 
     try:
@@ -515,7 +515,7 @@ def main():
 
         if not os.path.exists(summary_file):
             logger.error(f"❌ Stage 7 summary not found: {summary_file}")
-            log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         summary = read_json_file(summary_file)
@@ -523,7 +523,7 @@ def main():
 
         if not qualified_stats:
             logger.error("❌ No subreddits found from Stage 7!")
-            log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
+            log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
             return 1
 
         logger.info(f"Loaded {len(qualified_stats)} subreddits from Stage 7")
@@ -598,7 +598,7 @@ def main():
         }
 
         # Save statistics
-        stats_file = os.path.join(PATHS['data'], 'stage8_media_collection_stats.json')
+        stats_file = os.path.join(PATHS['data'], 'stage7_media_collection_stats.json')
         write_json_file(summary, stats_file, pretty=True)
 
         # Save successful IDs
@@ -612,7 +612,7 @@ def main():
             'subreddit_submission_ids': successful_ids_by_subreddit
         }
 
-        ids_file = os.path.join(PATHS['data'], 'stage8_successful_submission_ids.json')
+        ids_file = os.path.join(PATHS['data'], 'stage7_successful_submission_ids.json')
         write_json_file(successful_ids_output, ids_file, pretty=True)
 
         # Log results
@@ -640,14 +640,14 @@ def main():
             for r in error_results[:10]:
                 logger.warning(f"  {r['subreddit']}: {r.get('error', 'unknown')}")
 
-        log_stage_end(logger, 8, success=True, elapsed_time=elapsed)
+        log_stage_end(logger, 7, success=True, elapsed_time=elapsed)
         return 0
 
     except Exception as e:
         logger.error(f"❌ Stage 8 failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
+        log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

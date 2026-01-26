@@ -41,7 +41,7 @@ from plotting_config import create_two_column_figure, save_figure, add_subplot_l
 import umap
 
 from adjustText import adjust_text
-from coloring import assign_colors_with_conflicts
+from clustering.coloring import assign_colors_with_conflicts
 from scipy.spatial import ConvexHull
 from collections import Counter
 from config import PATHS
@@ -66,7 +66,7 @@ def load_cluster_distribution(cluster_type: str) -> list:
     Returns:
         List of (name, count) tuples sorted by count descending
     """
-    stats_file = Path(PATHS['data']) / 'stage10_cluster_assignment_stats.json'
+    stats_file = Path(PATHS['data']) / 'stage9_cluster_assignment_stats.json'
     with open(stats_file) as f:
         data = json.load(f)
 

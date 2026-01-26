@@ -30,7 +30,7 @@ from utils.logging import get_stage_logger, log_stage_start, log_stage_end
 
 def load_annotations(logger) -> Dict[str, Any]:
     """Load human annotations with majority voting and adjudication."""
-    annotations_file = os.path.join(PATHS['data'], 'evaluation', 'stage11_human_annotations.json')
+    annotations_file = os.path.join(PATHS['data'], 'evaluation', 'stage10_human_annotations.json')
 
     if not os.path.exists(annotations_file):
         logger.error(f"Annotations file not found: {annotations_file}")
@@ -191,7 +191,7 @@ def save_evaluation_results(results: Dict, output_dir: str, logger) -> str:
     """Save evaluation results."""
     os.makedirs(output_dir, exist_ok=True)
 
-    output_file = os.path.join(output_dir, 'stage11_evaluation_results.json')
+    output_file = os.path.join(output_dir, 'stage10_evaluation_results.json')
     write_json_file(results, output_file, pretty=True)
     logger.info(f"Saved evaluation results to: {output_file}")
 

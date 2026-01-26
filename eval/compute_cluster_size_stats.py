@@ -129,7 +129,7 @@ def validate_cluster_coverage(cluster_stats: dict, stage10_stats_path: Path):
 
     Args:
         cluster_stats: Extracted cluster statistics
-        stage10_stats_path: Path to stage10_cluster_assignment_stats.json
+        stage10_stats_path: Path to stage9_cluster_assignment_stats.json
     """
     if not stage10_stats_path.exists():
         print(f"  ⚠ Stage10 stats not found: {stage10_stats_path.name}")
@@ -198,7 +198,7 @@ def main():
 
     # Paths
     data_dir = Path(PATHS['data'])
-    stage10_stats_path = data_dir / 'stage10_cluster_assignment_stats.json'
+    stage10_stats_path = data_dir / 'stage9_cluster_assignment_stats.json'
 
     # Load datasets
     if args.split == 'all':

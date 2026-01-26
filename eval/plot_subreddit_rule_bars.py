@@ -323,7 +323,7 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
 
 def plot_distribution():
     """Plot cluster distribution from stage10 stats."""
-    stats_file = Path(PATHS['data']) / 'stage10_cluster_assignment_stats.json'
+    stats_file = Path(PATHS['data']) / 'stage9_cluster_assignment_stats.json'
     if not stats_file.exists():
         print(f"❌ Stats file not found: {stats_file}")
         return 1
@@ -354,7 +354,7 @@ def plot_distribution():
                          'Number of Thread Pairs', log_scale=True)
 
     fig.subplots_adjust(left=0.13, right=0.98, top=0.99, bottom=0.11, wspace=0.30)
-    save_figure(fig, Path(PATHS['data']) / 'stage10_cluster_distribution', dpi=PUBLICATION_DPI, bbox_inches=None)
+    save_figure(fig, Path(PATHS['data']) / 'stage9_cluster_distribution', dpi=PUBLICATION_DPI, bbox_inches=None)
     plt.close(fig)
     print("✅ Distribution plot saved")
     return 0
