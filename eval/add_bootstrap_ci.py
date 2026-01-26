@@ -179,29 +179,29 @@ def load_scores_from_reasoning(reasoning_path: Path,
         mod_comment_ids: List of mod_comment_ids in test set order
 
     Returns:
-        Tuple of (mod_scores, unmod_scores) as numpy arrays
+        Tuple of (violating_scores, compliant_scores) as numpy arrays
     """
     with open(reasoning_path) as f:
         results = json.load(f)
 
     # Build lookup by mod_comment_id
     scores_by_id = {
-        r['mod_comment_id']: (r['moderated']['score'], r['unmoderated']['score'])
+        r['mod_comment_id']: (r['violating']['score'], r['compliant']['score'])
         for r in results
     }
 
     # Align to test set order
-    mod_scores = np.zeros(len(mod_comment_ids), dtype=np.float64)
-    unmod_scores = np.zeros(len(mod_comment_ids), dtype=np.float64)
+    violating_scores = np.zeros(len(mod_comment_ids), dtype=np.float64)
+    compliant_scores = np.zeros(len(mod_comment_ids), dtype=np.float64)
 
     for i, mid in enumerate(mod_comment_ids):
         if mid in scores_by_id:
-            mod_scores[i], unmod_scores[i] = scores_by_id[mid]
+            violating_scores[i], compliant_scores[i] = scores_by_id[mid]
         else:
-            mod_scores[i] = np.nan
-            unmod_scores[i] = np.nan
+            violating_scores[i] = np.nan
+            compliant_scores[i] = np.nan
 
-    return mod_scores, unmod_scores
+    return violating_scores, compliant_scores
 
 
 # =============================================================================
@@ -259,8 +259,8 @@ def load_bootstrap_indices(path: Path) -> Tuple[np.ndarray, Dict[str, Any]]:
     return data['indices'], test_data
 
 
-def compute_cis_gpu(mod_scores: np.ndarray,
-                    unmod_scores: np.ndarray,
+def compute_cis_gpu(violating_scores: np.ndarray,
+                    compliant_scores: np.ndarray,
                     indices_gpu: cp.ndarray,
                     rule_cluster_ids_gpu: cp.ndarray,
                     subreddit_cluster_ids_gpu: cp.ndarray,
@@ -273,8 +273,8 @@ def compute_cis_gpu(mod_scores: np.ndarray,
     Compute all CIs using GPU-accelerated CuPy operations.
 
     Args:
-        mod_scores: Moderated scores array (n_samples,) - CPU numpy
-        unmod_scores: Unmoderated scores array (n_samples,) - CPU numpy
+        violating_scores: Violating scores array (n_samples,) - CPU numpy
+        compliant_scores: Compliant scores array (n_samples,) - CPU numpy
         indices_gpu: Bootstrap indices (n_bootstrap, n_samples) - GPU cupy
         rule_cluster_ids_gpu: Rule cluster index per sample (n_samples,) - GPU cupy
         subreddit_cluster_ids_gpu: Subreddit cluster index per sample (n_samples,) - GPU cupy
@@ -290,17 +290,17 @@ def compute_cis_gpu(mod_scores: np.ndarray,
     alpha = 1 - ci
 
     # Move scores to GPU
-    mod_scores_gpu = cp.array(mod_scores, dtype=cp.float32)
-    unmod_scores_gpu = cp.array(unmod_scores, dtype=cp.float32)
+    violating_scores_gpu = cp.array(violating_scores, dtype=cp.float32)
+    compliant_scores_gpu = cp.array(compliant_scores, dtype=cp.float32)
 
     # Vectorized resampling on GPU: (n_bootstrap, n_samples)
-    boot_mod = mod_scores_gpu[indices_gpu]
-    boot_unmod = unmod_scores_gpu[indices_gpu]
+    boot_violating = violating_scores_gpu[indices_gpu]
+    boot_compliant = compliant_scores_gpu[indices_gpu]
 
     # Overall accuracy: mean across samples for each bootstrap
-    overall_mod_acc = cp.nanmean(boot_mod, axis=1)
-    overall_unmod_acc = cp.nanmean(boot_unmod, axis=1)
-    overall_acc = (overall_mod_acc + overall_unmod_acc) / 2
+    overall_violating_acc = cp.nanmean(boot_violating, axis=1)
+    overall_compliant_acc = cp.nanmean(boot_compliant, axis=1)
+    overall_acc = (overall_violating_acc + overall_compliant_acc) / 2
 
     def get_ci_gpu(values_gpu: cp.ndarray) -> List[float]:
         """Compute CI from GPU array."""
@@ -316,8 +316,8 @@ def compute_cis_gpu(mod_scores: np.ndarray,
     output = {
         'overall': {
             'overall_accuracy_ci': get_ci_gpu(overall_acc),
-            'moderated_accuracy_ci': get_ci_gpu(overall_mod_acc),
-            'unmoderated_accuracy_ci': get_ci_gpu(overall_unmod_acc)
+            'violating_accuracy_ci': get_ci_gpu(overall_violating_acc),
+            'compliant_accuracy_ci': get_ci_gpu(overall_compliant_acc)
         },
         'per_rule_cluster': {},
         'per_subreddit_cluster': {},
@@ -332,17 +332,17 @@ def compute_cis_gpu(mod_scores: np.ndarray,
             continue
 
         boot_mask = mask[indices_gpu]
-        cluster_mod = cp.where(boot_mask, boot_mod, cp.nan)
-        cluster_unmod = cp.where(boot_mask, boot_unmod, cp.nan)
+        cluster_violating = cp.where(boot_mask, boot_violating, cp.nan)
+        cluster_compliant = cp.where(boot_mask, boot_compliant, cp.nan)
 
-        cluster_mod_acc = cp.nanmean(cluster_mod, axis=1)
-        cluster_unmod_acc = cp.nanmean(cluster_unmod, axis=1)
-        cluster_acc = (cluster_mod_acc + cluster_unmod_acc) / 2
+        cluster_violating_acc = cp.nanmean(cluster_violating, axis=1)
+        cluster_compliant_acc = cp.nanmean(cluster_compliant, axis=1)
+        cluster_acc = (cluster_violating_acc + cluster_compliant_acc) / 2
 
         output['per_rule_cluster'][cluster_name] = {
             'overall_accuracy_ci': get_ci_gpu(cluster_acc),
-            'moderated_accuracy_ci': get_ci_gpu(cluster_mod_acc),
-            'unmoderated_accuracy_ci': get_ci_gpu(cluster_unmod_acc)
+            'violating_accuracy_ci': get_ci_gpu(cluster_violating_acc),
+            'compliant_accuracy_ci': get_ci_gpu(cluster_compliant_acc)
         }
 
     # Subreddit clusters
@@ -352,17 +352,17 @@ def compute_cis_gpu(mod_scores: np.ndarray,
             continue
 
         boot_mask = mask[indices_gpu]
-        cluster_mod = cp.where(boot_mask, boot_mod, cp.nan)
-        cluster_unmod = cp.where(boot_mask, boot_unmod, cp.nan)
+        cluster_violating = cp.where(boot_mask, boot_violating, cp.nan)
+        cluster_compliant = cp.where(boot_mask, boot_compliant, cp.nan)
 
-        cluster_mod_acc = cp.nanmean(cluster_mod, axis=1)
-        cluster_unmod_acc = cp.nanmean(cluster_unmod, axis=1)
-        cluster_acc = (cluster_mod_acc + cluster_unmod_acc) / 2
+        cluster_violating_acc = cp.nanmean(cluster_violating, axis=1)
+        cluster_compliant_acc = cp.nanmean(cluster_compliant, axis=1)
+        cluster_acc = (cluster_violating_acc + cluster_compliant_acc) / 2
 
         output['per_subreddit_cluster'][cluster_name] = {
             'overall_accuracy_ci': get_ci_gpu(cluster_acc),
-            'moderated_accuracy_ci': get_ci_gpu(cluster_mod_acc),
-            'unmoderated_accuracy_ci': get_ci_gpu(cluster_unmod_acc)
+            'violating_accuracy_ci': get_ci_gpu(cluster_violating_acc),
+            'compliant_accuracy_ci': get_ci_gpu(cluster_compliant_acc)
         }
 
     # Languages
@@ -372,21 +372,21 @@ def compute_cis_gpu(mod_scores: np.ndarray,
             continue
 
         boot_mask = mask[indices_gpu]
-        lang_mod = cp.where(boot_mask, boot_mod, cp.nan)
-        lang_unmod = cp.where(boot_mask, boot_unmod, cp.nan)
+        lang_violating = cp.where(boot_mask, boot_violating, cp.nan)
+        lang_compliant = cp.where(boot_mask, boot_compliant, cp.nan)
 
-        lang_mod_acc = cp.nanmean(lang_mod, axis=1)
-        lang_unmod_acc = cp.nanmean(lang_unmod, axis=1)
-        lang_acc = (lang_mod_acc + lang_unmod_acc) / 2
+        lang_violating_acc = cp.nanmean(lang_violating, axis=1)
+        lang_compliant_acc = cp.nanmean(lang_compliant, axis=1)
+        lang_acc = (lang_violating_acc + lang_compliant_acc) / 2
 
         output['per_language'][lang_name] = {
             'overall_accuracy_ci': get_ci_gpu(lang_acc),
-            'moderated_accuracy_ci': get_ci_gpu(lang_mod_acc),
-            'unmoderated_accuracy_ci': get_ci_gpu(lang_unmod_acc)
+            'violating_accuracy_ci': get_ci_gpu(lang_violating_acc),
+            'compliant_accuracy_ci': get_ci_gpu(lang_compliant_acc)
         }
 
     # Free GPU memory
-    del boot_mod, boot_unmod, mod_scores_gpu, unmod_scores_gpu
+    del boot_violating, boot_compliant, violating_scores_gpu, compliant_scores_gpu
     cp.get_default_memory_pool().free_all_blocks()
 
     return output
@@ -523,17 +523,17 @@ def main():
                 performance = json.load(f)
 
             # Load scores aligned to test set order
-            mod_scores, unmod_scores = load_scores_from_reasoning(
+            violating_scores, compliant_scores = load_scores_from_reasoning(
                 reasoning_path, test_data['mod_comment_ids']
             )
 
             # Check for missing scores
-            n_missing = int(np.isnan(mod_scores).sum())
+            n_missing = int(np.isnan(violating_scores).sum())
             warning = f" ⚠️ {n_missing} missing" if n_missing > 0 else ""
 
             # Compute CIs on GPU
             cis = compute_cis_gpu(
-                mod_scores, unmod_scores,
+                violating_scores, compliant_scores,
                 indices_gpu,
                 rule_cluster_ids_gpu,
                 subreddit_cluster_ids_gpu,

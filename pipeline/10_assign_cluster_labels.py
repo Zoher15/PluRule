@@ -230,7 +230,7 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
             stats['total_thread_pairs'] += 1
 
             # Count comments in both threads
-            num_comments = len(pair['moderated_thread']) + len(pair['unmoderated_thread'])
+            num_comments = len(pair['violating_thread']) + len(pair['compliant_thread'])
             stats['total_comments'] += num_comments
 
             # Get the matched rule from metadata
@@ -276,12 +276,12 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
             dehydrated_pairs.append({
                 'mod_comment_id': pair['mod_comment_id'],
                 'mod_comment': '[NEEDS_HYDRATION]',
-                'moderated_thread': ['[NEEDS_HYDRATION]'] * len(pair['moderated_thread']),
-                'unmoderated_thread': ['[NEEDS_HYDRATION]'] * len(pair['unmoderated_thread']),
-                'moderated_answer_options': pair['moderated_answer_options'],
-                'moderated_correct_answer': pair['moderated_correct_answer'],
-                'unmoderated_answer_options': pair['unmoderated_answer_options'],
-                'unmoderated_correct_answer': pair['unmoderated_correct_answer'],
+                'violating_thread': ['[NEEDS_HYDRATION]'] * len(pair['violating_thread']),
+                'compliant_thread': ['[NEEDS_HYDRATION]'] * len(pair['compliant_thread']),
+                'violating_answer_options': pair['violating_answer_options'],
+                'violating_correct_answer': pair['violating_correct_answer'],
+                'compliant_answer_options': pair['compliant_answer_options'],
+                'compliant_correct_answer': pair['compliant_correct_answer'],
                 'metadata': pair['metadata']  # Keep full metadata (includes cluster labels)
             })
 

@@ -87,11 +87,36 @@ def load_cluster_assignments(source_path: Path) -> Tuple[Dict[str, Dict], Dict[s
     return subreddit_clusters, rule_clusters
 
 
-def find_reasoning_files(output_dir: Path) -> List[Path]:
-    """Find all reasoning JSON files in output directory."""
+def find_reasoning_files(output_dir: Path, latest_only: bool = False) -> List[Path]:
+    """Find all reasoning JSON files in output directory.
+
+    Args:
+        output_dir: Root directory to search
+        latest_only: If True, only return the most recent file per model/split/context/phrase
+    """
     reasoning_files = list(output_dir.rglob("reasoning_*.json"))
     print(f"Found {len(reasoning_files)} reasoning files")
-    return reasoning_files
+
+    if not latest_only:
+        return reasoning_files
+
+    # Group by model/split/context/phrase directory
+    groups = defaultdict(list)
+
+    for file_path in reasoning_files:
+        # Group key is the parent directory path (model/split/context/phrase)
+        group_key = file_path.parent
+        groups[group_key].append(file_path)
+
+    # Select most recent file from each group (by filename timestamp)
+    latest_files = []
+    for group_key, files in groups.items():
+        # Sort by filename (timestamps are in filename) and take the last one
+        latest_file = sorted(files, key=lambda p: p.name)[-1]
+        latest_files.append(latest_file)
+
+    print(f"  Filtered to {len(latest_files)} latest files (one per model/context)")
+    return latest_files
 
 
 def update_reasoning_file(
@@ -177,29 +202,29 @@ def recalculate_performance(reasoning_path: Path) -> Dict[str, Any]:
     total_pairs = len(results)
 
     # Overall accuracy
-    mod_correct = sum(r['moderated']['score'] for r in results)
-    unmod_correct = sum(r['unmoderated']['score'] for r in results)
-    total_correct = mod_correct + unmod_correct
+    violating_correct = sum(r['violating']['score'] for r in results)
+    compliant_correct = sum(r['compliant']['score'] for r in results)
+    total_correct = violating_correct + compliant_correct
     total_threads = total_pairs * 2
 
     overall_accuracy = total_correct / total_threads if total_threads > 0 else 0
-    mod_accuracy = mod_correct / total_pairs if total_pairs > 0 else 0
-    unmod_accuracy = unmod_correct / total_pairs if total_pairs > 0 else 0
+    violating_accuracy = violating_correct / total_pairs if total_pairs > 0 else 0
+    compliant_accuracy = compliant_correct / total_pairs if total_pairs > 0 else 0
 
     # Per-cluster accuracy helper
     def calculate_cluster_stats(results: List[Dict], cluster_key: str) -> Dict[str, Dict]:
         cluster_stats = defaultdict(lambda: {
-            'mod_correct': 0,
-            'unmod_correct': 0,
+            'violating_correct': 0,
+            'compliant_correct': 0,
             'total_correct': 0,
             'count': 0
         })
 
         for result in results:
             cluster_label = result['metadata'][cluster_key]
-            cluster_stats[cluster_label]['mod_correct'] += result['moderated']['score']
-            cluster_stats[cluster_label]['unmod_correct'] += result['unmoderated']['score']
-            cluster_stats[cluster_label]['total_correct'] += result['moderated']['score'] + result['unmoderated']['score']
+            cluster_stats[cluster_label]['violating_correct'] += result['violating']['score']
+            cluster_stats[cluster_label]['compliant_correct'] += result['compliant']['score']
+            cluster_stats[cluster_label]['total_correct'] += result['violating']['score'] + result['compliant']['score']
             cluster_stats[cluster_label]['count'] += 1
 
         final_stats = {}
@@ -208,8 +233,8 @@ def recalculate_performance(reasoning_path: Path) -> Dict[str, Any]:
             total_threads = count * 2
             final_stats[cluster] = {
                 'overall_accuracy': stats['total_correct'] / total_threads if total_threads > 0 else 0,
-                'moderated_accuracy': stats['mod_correct'] / count if count > 0 else 0,
-                'unmoderated_accuracy': stats['unmod_correct'] / count if count > 0 else 0,
+                'violating_accuracy': stats['violating_correct'] / count if count > 0 else 0,
+                'compliant_accuracy': stats['compliant_correct'] / count if count > 0 else 0,
                 'count': count,
                 'total_threads': total_threads
             }
@@ -225,10 +250,10 @@ def recalculate_performance(reasoning_path: Path) -> Dict[str, Any]:
             'total_pairs': total_pairs,
             'total_threads': total_threads,
             'overall_accuracy': overall_accuracy,
-            'moderated_accuracy': mod_accuracy,
-            'unmoderated_accuracy': unmod_accuracy,
-            'moderated_correct': mod_correct,
-            'unmoderated_correct': unmod_correct,
+            'violating_accuracy': violating_accuracy,
+            'compliant_accuracy': compliant_accuracy,
+            'violating_correct': violating_correct,
+            'compliant_correct': compliant_correct,
             'total_correct': total_correct
         },
         'per_rule_cluster': rule_cluster_stats,
@@ -328,6 +353,12 @@ def main():
         help='Show detailed output'
     )
 
+    parser.add_argument(
+        '--latest-only', '-l',
+        action='store_true',
+        help='Only update the most recent reasoning file per model/context combination'
+    )
+
     args = parser.parse_args()
 
     source_path = Path(args.source)
@@ -347,13 +378,14 @@ def main():
     print(f"Source: {source_path}")
     print(f"Output dir: {output_dir}")
     print(f"Dry run: {args.dry_run}")
+    print(f"Latest only: {args.latest_only}")
     print("=" * 60)
 
     # Load new cluster assignments
     subreddit_clusters, rule_clusters = load_cluster_assignments(source_path)
 
     # Find all reasoning files
-    reasoning_files = find_reasoning_files(output_dir)
+    reasoning_files = find_reasoning_files(output_dir, latest_only=args.latest_only)
 
     if not reasoning_files:
         print("No reasoning files found. Nothing to update.")

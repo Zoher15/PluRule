@@ -85,8 +85,8 @@ def calculate_language_metrics(results: List[Dict[str, Any]],
         Dictionary mapping language codes to accuracy stats
     """
     language_stats = defaultdict(lambda: {
-        'mod_correct': 0,
-        'unmod_correct': 0,
+        'violating_correct': 0,
+        'compliant_correct': 0,
         'total_correct': 0,
         'count': 0
     })
@@ -102,9 +102,9 @@ def calculate_language_metrics(results: List[Dict[str, Any]],
             continue
 
         # Accumulate stats
-        language_stats[language]['mod_correct'] += result['moderated']['score']
-        language_stats[language]['unmod_correct'] += result['unmoderated']['score']
-        language_stats[language]['total_correct'] += result['moderated']['score'] + result['unmoderated']['score']
+        language_stats[language]['violating_correct'] += result['violating']['score']
+        language_stats[language]['compliant_correct'] += result['compliant']['score']
+        language_stats[language]['total_correct'] += result['violating']['score'] + result['compliant']['score']
         language_stats[language]['count'] += 1
 
     if skipped > 0:
@@ -118,8 +118,8 @@ def calculate_language_metrics(results: List[Dict[str, Any]],
 
         final_stats[language] = {
             'overall_accuracy': stats['total_correct'] / total_threads if total_threads > 0 else 0,
-            'moderated_accuracy': stats['mod_correct'] / count if count > 0 else 0,
-            'unmoderated_accuracy': stats['unmod_correct'] / count if count > 0 else 0,
+            'violating_accuracy': stats['violating_correct'] / count if count > 0 else 0,
+            'compliant_accuracy': stats['compliant_correct'] / count if count > 0 else 0,
             'count': count,
             'total_threads': total_threads
         }

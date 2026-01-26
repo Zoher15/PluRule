@@ -94,7 +94,7 @@ def _build_openai_messages(pair: Dict[str, Any],
 
     Args:
         pair: Thread pair dictionary with prompts
-        thread_type: 'moderated' or 'unmoderated'
+        thread_type: 'violating' or 'compliant'
         context_config: Context configuration
         logger: Logger instance
 
@@ -291,12 +291,12 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
                 'submission_id': submission_id,
                 'submission': submission_data,
                 'rules': subreddit_data['rules'],
-                'moderated_thread': pair['moderated_thread'],
-                'unmoderated_thread': pair['unmoderated_thread'],
-                'moderated_answer_options': pair['moderated_answer_options'],
-                'moderated_correct_answer': pair['moderated_correct_answer'],
-                'unmoderated_answer_options': pair['unmoderated_answer_options'],
-                'unmoderated_correct_answer': pair['unmoderated_correct_answer'],
+                'violating_thread': pair['violating_thread'],
+                'compliant_thread': pair['compliant_thread'],
+                'violating_answer_options': pair['violating_answer_options'],
+                'violating_correct_answer': pair['violating_correct_answer'],
+                'compliant_answer_options': pair['compliant_answer_options'],
+                'compliant_correct_answer': pair['compliant_correct_answer'],
                 'metadata': pair['metadata']
             }
             thread_pairs.append(thread_pair)
@@ -321,7 +321,7 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
                                    mode: str,
                                    logger: logging.Logger) -> List[Dict[str, Any]]:
     """
-    Build prompts for all thread pairs (both moderated and unmoderated).
+    Build prompts for all thread pairs (both violating and compliant).
 
     Args:
         thread_pairs: List of thread pair dictionaries
@@ -340,19 +340,19 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
 
     processed_pairs = []
     for pair in thread_pairs:
-        # Build prompts for both moderated and unmoderated threads
-        moderated_prompt = _build_single_prompt(
+        # Build prompts for both violating and compliant threads
+        violating_prompt = _build_single_prompt(
             pair,
-            thread_type='moderated',
+            thread_type='violating',
             context_config=context_config,
             phrase_text=phrase_text,
             model_config=model_config,
             mode=mode
         )
 
-        unmoderated_prompt = _build_single_prompt(
+        compliant_prompt = _build_single_prompt(
             pair,
-            thread_type='unmoderated',
+            thread_type='compliant',
             context_config=context_config,
             phrase_text=phrase_text,
             model_config=model_config,
@@ -361,8 +361,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
 
         processed_pair = {
             **pair,
-            'moderated_prompt': moderated_prompt,
-            'unmoderated_prompt': unmoderated_prompt,
+            'violating_prompt': violating_prompt,
+            'compliant_prompt': compliant_prompt,
             'phrase_text': phrase_text if mode == 'prefill' else None,
             'mode': mode
         }
@@ -378,11 +378,11 @@ def _build_single_prompt(pair: Dict[str, Any],
                         model_config: Dict[str, Any],
                         mode: str) -> Dict[str, Any]:
     """
-    Build prompt for a single thread (moderated or unmoderated).
+    Build prompt for a single thread (violating or compliant).
 
     Args:
         pair: Thread pair dictionary
-        thread_type: 'moderated' or 'unmoderated'
+        thread_type: 'violating' or 'compliant'
         context_config: Context configuration
         phrase_text: Phrase text to apply
         model_config: Model configuration
@@ -424,7 +424,7 @@ def _build_question_text(pair: Dict[str, Any],
 
     Args:
         pair: Thread pair dictionary
-        thread_type: 'moderated' or 'unmoderated'
+        thread_type: 'violating' or 'compliant'
         context_config: Context configuration with boolean flags
         prompt_phrase: Optional phrase to integrate into the question (for 'prompt' mode)
 
@@ -766,8 +766,8 @@ def apply_chat_template(thread_pairs: List[Dict[str, Any]],
     max_token_length = 0
 
     for pair in thread_pairs:
-        # Apply template to both moderated and unmoderated threads
-        for thread_type in ['moderated', 'unmoderated']:
+        # Apply template to both violating and compliant threads
+        for thread_type in ['violating', 'compliant']:
             messages = pair[f'{thread_type}_prompt']['messages']
 
             # Count images actually in the content (not just in media_files)
@@ -883,7 +883,7 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
     llm_engine = LLM(**llm_kwargs)
     logger.info(f"✅ LLM engine initialized with tensor_parallel_size={num_gpus}")
 
-    # Stage 1: Generate reasoning for all threads (moderated + unmoderated)
+    # Stage 1: Generate reasoning for all threads (violating + compliant)
     logger.info("📝 Stage 1: Generating reasoning responses...")
     stage1_responses = _generate_stage1_vllm(thread_pairs, llm_engine, max_response_tokens, context, logger)
     logger.info(f"✅ Generated {len(stage1_responses)} × 2 Stage 1 reasoning responses")
@@ -900,8 +900,8 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
                          max_response_tokens: int,
                          context: str,
                          logger: logging.Logger,
-                         moderated_prompts: List[str] = None,
-                         unmoderated_prompts: List[str] = None,
+                         violating_prompts: List[str] = None,
+                         compliant_prompts: List[str] = None,
                          sampling_params = None,
                          uuid_suffix: str = '') -> List[Dict[str, str]]:
     """
@@ -913,21 +913,21 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
         max_response_tokens: Maximum tokens for response generation
         context: Context string (e.g., "submission-media")
         logger: Logger instance
-        moderated_prompts: Optional custom prompts for moderated threads (defaults to pair['moderated_prompt_text'])
-        unmoderated_prompts: Optional custom prompts for unmoderated threads (defaults to pair['unmoderated_prompt_text'])
+        violating_prompts: Optional custom prompts for violating threads (defaults to pair['violating_prompt_text'])
+        compliant_prompts: Optional custom prompts for compliant threads (defaults to pair['compliant_prompt_text'])
         sampling_params: Optional custom sampling params (defaults to temperature=0, max_tokens from max_response_tokens)
         uuid_suffix: Optional suffix for multimodal UUIDs (e.g., '_s2' for stage 2)
 
     Returns:
-        List of dicts with 'moderated' and 'unmoderated' responses
+        List of dicts with 'violating' and 'compliant' responses
     """
     from vllm import SamplingParams
 
     # Use default prompts if not provided
-    if moderated_prompts is None:
-        moderated_prompts = [pair['moderated_prompt_text'] for pair in thread_pairs]
-    if unmoderated_prompts is None:
-        unmoderated_prompts = [pair['unmoderated_prompt_text'] for pair in thread_pairs]
+    if violating_prompts is None:
+        violating_prompts = [pair['violating_prompt_text'] for pair in thread_pairs]
+    if compliant_prompts is None:
+        compliant_prompts = [pair['compliant_prompt_text'] for pair in thread_pairs]
 
     # Use default sampling params if not provided
     if sampling_params is None:
@@ -936,11 +936,11 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
     # Check if media should be included based on context flags
     include_media = 'media' in context.split('-')
 
-    # Prepare inputs (flatten moderated + unmoderated)
+    # Prepare inputs (flatten violating + compliant)
     inputs = []
     for pair in thread_pairs:
-        # Build inputs for both moderated and unmoderated threads
-        for thread_type, prompts in [('mod', moderated_prompts), ('unmod', unmoderated_prompts)]:
+        # Build inputs for both violating and compliant threads
+        for thread_type, prompts in [('violating', violating_prompts), ('compliant', compliant_prompts)]:
             idx = thread_pairs.index(pair)
 
             # Only load and pass images if media flag is set in context
@@ -971,12 +971,12 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
     # Unflatten responses back to pairs
     responses = []
     for i in range(0, len(outputs), 2):
-        mod_response = outputs[i].outputs[0].text
-        unmod_response = outputs[i + 1].outputs[0].text
+        violating_response = outputs[i].outputs[0].text
+        compliant_response = outputs[i + 1].outputs[0].text
 
         responses.append({
-            'moderated': mod_response,
-            'unmoderated': unmod_response
+            'violating': violating_response,
+            'compliant': compliant_response
         })
 
     return responses
@@ -1004,12 +1004,12 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
     from vllm import SamplingParams
 
     # Prepare Stage 2 prompts (append reasoning + answer phrase)
-    moderated_prompts = [
-        pair['moderated_prompt_text'] + stage1['moderated'] + config.ANSWER_PHRASE
+    violating_prompts = [
+        pair['violating_prompt_text'] + stage1['violating'] + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_responses)
     ]
-    unmoderated_prompts = [
-        pair['unmoderated_prompt_text'] + stage1['unmoderated'] + config.ANSWER_PHRASE
+    compliant_prompts = [
+        pair['compliant_prompt_text'] + stage1['compliant'] + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_responses)
     ]
 
@@ -1025,8 +1025,8 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
         max_response_tokens=max_response_tokens,
         context=context,
         logger=logger,
-        moderated_prompts=moderated_prompts,
-        unmoderated_prompts=unmoderated_prompts,
+        violating_prompts=violating_prompts,
+        compliant_prompts=compliant_prompts,
         sampling_params=sampling_params,
         uuid_suffix='_s2'
     )
@@ -1034,44 +1034,44 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
     # Build final results
     results = []
     for pair, stage1, stage2 in zip(thread_pairs, stage1_responses, stage2_responses):
-        mod_clean = stage2['moderated']
-        unmod_clean = stage2['unmoderated']
+        violating_clean = stage2['violating']
+        compliant_clean = stage2['compliant']
 
         # Extract predictions
-        mod_prediction = _extract_answer_choice(mod_clean)
-        unmod_prediction = _extract_answer_choice(unmod_clean)
+        violating_prediction = _extract_answer_choice(violating_clean)
+        compliant_prediction = _extract_answer_choice(compliant_clean)
 
         # Get ground truth
-        mod_correct = pair['moderated_correct_answer']
-        unmod_correct = pair['unmoderated_correct_answer']
+        violating_correct = pair['violating_correct_answer']
+        compliant_correct = pair['compliant_correct_answer']
 
         # Calculate scores
-        mod_score = 1 if mod_prediction == mod_correct else 0
-        unmod_score = 1 if unmod_prediction == unmod_correct else 0
+        violating_score = 1 if violating_prediction == violating_correct else 0
+        compliant_score = 1 if compliant_prediction == compliant_correct else 0
 
         result = {
             'mod_comment_id': pair['mod_comment_id'],
             'subreddit': pair['subreddit'],
             'submission_id': pair['submission_id'],
 
-            'moderated': {
-                'input_prompt': pair['moderated_prompt_text'],
-                'reasoning_response': stage1['moderated'],
-                'clean_answer_response': mod_clean,
-                'extracted_prediction': mod_prediction,
-                'correct_answer': mod_correct,
-                'score': mod_score,
-                'answer_options': pair['moderated_answer_options']
+            'violating': {
+                'input_prompt': pair['violating_prompt_text'],
+                'reasoning_response': stage1['violating'],
+                'clean_answer_response': violating_clean,
+                'extracted_prediction': violating_prediction,
+                'correct_answer': violating_correct,
+                'score': violating_score,
+                'answer_options': pair['violating_answer_options']
             },
 
-            'unmoderated': {
-                'input_prompt': pair['unmoderated_prompt_text'],
-                'reasoning_response': stage1['unmoderated'],
-                'clean_answer_response': unmod_clean,
-                'extracted_prediction': unmod_prediction,
-                'correct_answer': unmod_correct,
-                'score': unmod_score,
-                'answer_options': pair['unmoderated_answer_options']
+            'compliant': {
+                'input_prompt': pair['compliant_prompt_text'],
+                'reasoning_response': stage1['compliant'],
+                'clean_answer_response': compliant_clean,
+                'extracted_prediction': compliant_prediction,
+                'correct_answer': compliant_correct,
+                'score': compliant_score,
+                'answer_options': pair['compliant_answer_options']
             },
 
             'metadata': {
@@ -1157,7 +1157,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     work_items = []
     reasoning_effort = model_config.get('reasoning_effort')
     for pair in thread_pairs:
-        for thread_type in ['moderated', 'unmoderated']:
+        for thread_type in ['violating', 'compliant']:
             custom_id = f"{pair['mod_comment_id']}_{thread_type}"
             if custom_id not in stage1_responses:
                 messages = _build_openai_messages(pair, thread_type, context_config, logger)
@@ -1217,14 +1217,14 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     # Organize Stage 1 responses by pair (both content and reasoning_summary)
     stage1_by_pair = [
         {
-            'moderated_content': _get_response_field(
-                stage1_responses.get(f"{pair['mod_comment_id']}_moderated", {}), 'content'),
-            'moderated_reasoning': _get_response_field(
-                stage1_responses.get(f"{pair['mod_comment_id']}_moderated", {}), 'reasoning_summary'),
-            'unmoderated_content': _get_response_field(
-                stage1_responses.get(f"{pair['mod_comment_id']}_unmoderated", {}), 'content'),
-            'unmoderated_reasoning': _get_response_field(
-                stage1_responses.get(f"{pair['mod_comment_id']}_unmoderated", {}), 'reasoning_summary'),
+            'violating_content': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_violating", {}), 'content'),
+            'violating_reasoning': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_violating", {}), 'reasoning_summary'),
+            'compliant_content': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_compliant", {}), 'content'),
+            'compliant_reasoning': _get_response_field(
+                stage1_responses.get(f"{pair['mod_comment_id']}_compliant", {}), 'reasoning_summary'),
         }
         for pair in thread_pairs
     ]
@@ -1244,12 +1244,12 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
 
     # Build Stage 2 prompts FIRST (Stage 1 content only + answer phrase as prefill)
     # NOTE: We use 'content' (output text), not 'reasoning_summary' for Stage 2
-    moderated_prompts = [
-        pair['moderated_prompt_text'] + stage1['moderated_content'] + config.ANSWER_PHRASE
+    violating_prompts = [
+        pair['violating_prompt_text'] + stage1['violating_content'] + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_by_pair)
     ]
-    unmoderated_prompts = [
-        pair['unmoderated_prompt_text'] + stage1['unmoderated_content'] + config.ANSWER_PHRASE
+    compliant_prompts = [
+        pair['compliant_prompt_text'] + stage1['compliant_content'] + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_by_pair)
     ]
 
@@ -1261,10 +1261,10 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     )
 
     max_stage2_tokens = 0
-    for mod_prompt, unmod_prompt in zip(moderated_prompts, unmoderated_prompts):
-        mod_tokens = len(tokenizer.encode(mod_prompt))
-        unmod_tokens = len(tokenizer.encode(unmod_prompt))
-        max_stage2_tokens = max(max_stage2_tokens, mod_tokens, unmod_tokens)
+    for violating_prompt, compliant_prompt in zip(violating_prompts, compliant_prompts):
+        violating_tokens = len(tokenizer.encode(violating_prompt))
+        compliant_tokens = len(tokenizer.encode(compliant_prompt))
+        max_stage2_tokens = max(max_stage2_tokens, violating_tokens, compliant_tokens)
 
     # Add buffer for generation (10 tokens) + safety margin
     stage2_max_model_len = max_stage2_tokens + 50
@@ -1305,8 +1305,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
         end = min((batch_idx + 1) * stage2_batch_size, len(thread_pairs))
 
         batch_pairs = thread_pairs[start:end]
-        batch_mod_prompts = moderated_prompts[start:end]
-        batch_unmod_prompts = unmoderated_prompts[start:end]
+        batch_violating_prompts = violating_prompts[start:end]
+        batch_compliant_prompts = compliant_prompts[start:end]
 
         logger.info(f"Stage 2 Batch {batch_idx + 1}/{num_stage2_batches}: pairs {start}-{end-1} ({len(batch_pairs)} pairs)")
 
@@ -1316,8 +1316,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
             max_response_tokens=10,
             context=stage2_context,  # No media for answer extraction
             logger=logger,
-            moderated_prompts=batch_mod_prompts,
-            unmoderated_prompts=batch_unmod_prompts,
+            violating_prompts=batch_violating_prompts,
+            compliant_prompts=batch_compliant_prompts,
             sampling_params=sampling_params,
             uuid_suffix=f'_s2_api_b{batch_idx}'
         )
@@ -1329,43 +1329,43 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     # =========================================================================
     results = []
     for idx, (pair, stage1, stage2) in enumerate(zip(thread_pairs, stage1_by_pair, stage2_responses)):
-        mod_clean = stage2['moderated']
-        unmod_clean = stage2['unmoderated']
+        violating_clean = stage2['violating']
+        compliant_clean = stage2['compliant']
 
-        mod_prediction = _extract_answer_choice(mod_clean)
-        unmod_prediction = _extract_answer_choice(unmod_clean)
+        violating_prediction = _extract_answer_choice(violating_clean)
+        compliant_prediction = _extract_answer_choice(compliant_clean)
 
-        mod_correct = pair['moderated_correct_answer']
-        unmod_correct = pair['unmoderated_correct_answer']
+        violating_correct = pair['violating_correct_answer']
+        compliant_correct = pair['compliant_correct_answer']
 
-        mod_score = 1 if mod_prediction == mod_correct else 0
-        unmod_score = 1 if unmod_prediction == unmod_correct else 0
+        violating_score = 1 if violating_prediction == violating_correct else 0
+        compliant_score = 1 if compliant_prediction == compliant_correct else 0
 
         result = {
             'mod_comment_id': pair['mod_comment_id'],
             'subreddit': pair['subreddit'],
             'submission_id': pair['submission_id'],
 
-            'moderated': {
-                'stage2_prompt': moderated_prompts[idx],
-                'reasoning_response': stage1['moderated_content'],
-                'reasoning_summary': stage1['moderated_reasoning'],
-                'clean_answer_response': mod_clean,
-                'extracted_prediction': mod_prediction,
-                'correct_answer': mod_correct,
-                'score': mod_score,
-                'answer_options': pair['moderated_answer_options']
+            'violating': {
+                'stage2_prompt': violating_prompts[idx],
+                'reasoning_response': stage1['violating_content'],
+                'reasoning_summary': stage1['violating_reasoning'],
+                'clean_answer_response': violating_clean,
+                'extracted_prediction': violating_prediction,
+                'correct_answer': violating_correct,
+                'score': violating_score,
+                'answer_options': pair['violating_answer_options']
             },
 
-            'unmoderated': {
-                'stage2_prompt': unmoderated_prompts[idx],
-                'reasoning_response': stage1['unmoderated_content'],
-                'reasoning_summary': stage1['unmoderated_reasoning'],
-                'clean_answer_response': unmod_clean,
-                'extracted_prediction': unmod_prediction,
-                'correct_answer': unmod_correct,
-                'score': unmod_score,
-                'answer_options': pair['unmoderated_answer_options']
+            'compliant': {
+                'stage2_prompt': compliant_prompts[idx],
+                'reasoning_response': stage1['compliant_content'],
+                'reasoning_summary': stage1['compliant_reasoning'],
+                'clean_answer_response': compliant_clean,
+                'extracted_prediction': compliant_prediction,
+                'correct_answer': compliant_correct,
+                'score': compliant_score,
+                'answer_options': pair['compliant_answer_options']
             },
 
             'metadata': {
@@ -1434,14 +1434,14 @@ def calculate_metrics(results: List[Dict[str, Any]], logger: logging.Logger) -> 
     total_pairs = len(results)
 
     # Overall accuracy
-    mod_correct = sum(r['moderated']['score'] for r in results)
-    unmod_correct = sum(r['unmoderated']['score'] for r in results)
-    total_correct = mod_correct + unmod_correct
+    violating_correct = sum(r['violating']['score'] for r in results)
+    compliant_correct = sum(r['compliant']['score'] for r in results)
+    total_correct = violating_correct + compliant_correct
     total_threads = total_pairs * 2
 
     overall_accuracy = total_correct / total_threads if total_threads > 0 else 0
-    mod_accuracy = mod_correct / total_pairs if total_pairs > 0 else 0
-    unmod_accuracy = unmod_correct / total_pairs if total_pairs > 0 else 0
+    violating_accuracy = violating_correct / total_pairs if total_pairs > 0 else 0
+    compliant_accuracy = compliant_correct / total_pairs if total_pairs > 0 else 0
 
     # Per-rule-cluster accuracy
     rule_cluster_stats = _calculate_cluster_accuracy(
@@ -1460,17 +1460,17 @@ def calculate_metrics(results: List[Dict[str, Any]], logger: logging.Logger) -> 
             'total_pairs': total_pairs,
             'total_threads': total_threads,
             'overall_accuracy': overall_accuracy,
-            'moderated_accuracy': mod_accuracy,
-            'unmoderated_accuracy': unmod_accuracy,
-            'moderated_correct': mod_correct,
-            'unmoderated_correct': unmod_correct,
+            'violating_accuracy': violating_accuracy,
+            'compliant_accuracy': compliant_accuracy,
+            'violating_correct': violating_correct,
+            'compliant_correct': compliant_correct,
             'total_correct': total_correct
         },
         'per_rule_cluster': rule_cluster_stats,
         'per_subreddit_cluster': subreddit_cluster_stats
     }
 
-    logger.info(f"📊 Metrics calculated - Overall: {overall_accuracy:.4f}, Mod: {mod_accuracy:.4f}, Unmod: {unmod_accuracy:.4f}")
+    logger.info(f"📊 Metrics calculated - Overall: {overall_accuracy:.4f}, Violating: {violating_accuracy:.4f}, Compliant: {compliant_accuracy:.4f}")
     return metrics
 
 def _calculate_cluster_accuracy(results: List[Dict[str, Any]],
@@ -1486,8 +1486,8 @@ def _calculate_cluster_accuracy(results: List[Dict[str, Any]],
         Dictionary mapping cluster labels to accuracy stats
     """
     cluster_stats = defaultdict(lambda: {
-        'mod_correct': 0,
-        'unmod_correct': 0,
+        'violating_correct': 0,
+        'compliant_correct': 0,
         'total_correct': 0,
         'count': 0
     })
@@ -1495,9 +1495,9 @@ def _calculate_cluster_accuracy(results: List[Dict[str, Any]],
     for result in results:
         cluster_label = result['metadata'][cluster_key]
 
-        cluster_stats[cluster_label]['mod_correct'] += result['moderated']['score']
-        cluster_stats[cluster_label]['unmod_correct'] += result['unmoderated']['score']
-        cluster_stats[cluster_label]['total_correct'] += result['moderated']['score'] + result['unmoderated']['score']
+        cluster_stats[cluster_label]['violating_correct'] += result['violating']['score']
+        cluster_stats[cluster_label]['compliant_correct'] += result['compliant']['score']
+        cluster_stats[cluster_label]['total_correct'] += result['violating']['score'] + result['compliant']['score']
         cluster_stats[cluster_label]['count'] += 1
 
     # Calculate accuracies
@@ -1508,8 +1508,8 @@ def _calculate_cluster_accuracy(results: List[Dict[str, Any]],
 
         final_stats[cluster] = {
             'overall_accuracy': stats['total_correct'] / total_threads if total_threads > 0 else 0,
-            'moderated_accuracy': stats['mod_correct'] / count if count > 0 else 0,
-            'unmoderated_accuracy': stats['unmod_correct'] / count if count > 0 else 0,
+            'violating_accuracy': stats['violating_correct'] / count if count > 0 else 0,
+            'compliant_accuracy': stats['compliant_correct'] / count if count > 0 else 0,
             'count': count,
             'total_threads': total_threads
         }

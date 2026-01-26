@@ -199,7 +199,7 @@ def generate_results_table() -> str:
 
 
 def generate_appendix_table() -> str:
-    """Generate LaTeX table with violating recall/compliant recall/accuracy breakdown for appendix (transposed: contexts as columns)."""
+    """Generate LaTeX table with violating accuracy/compliant accuracy/overall accuracy breakdown for appendix (transposed: contexts as columns)."""
 
     # Build flat list of (model_base, variant, display_name, variant_display) for rows
     all_rows = []
@@ -224,15 +224,15 @@ def generate_appendix_table() -> str:
             if perf_file:
                 perf_data = load_performance_data(perf_file)
                 overall_metrics = perf_data.get("metrics", {}).get("overall", {})
-                mod_acc = overall_metrics.get("moderated_accuracy")
-                unmod_acc = overall_metrics.get("unmoderated_accuracy")
+                mod_acc = overall_metrics.get("violating_accuracy")
+                unmod_acc = overall_metrics.get("compliant_accuracy")
                 overall_acc = overall_metrics.get("overall_accuracy")
                 # Extract CI
-                mod_ci = overall_metrics.get("moderated_accuracy_ci")
+                mod_ci = overall_metrics.get("violating_accuracy_ci")
                 if mod_ci and len(mod_ci) == 2:
                     ci_half_width = (mod_ci[1] - mod_ci[0]) / 2 * 100
                     max_ci = max(max_ci, ci_half_width)
-                unmod_ci = overall_metrics.get("unmoderated_accuracy_ci")
+                unmod_ci = overall_metrics.get("compliant_accuracy_ci")
                 if unmod_ci and len(unmod_ci) == 2:
                     ci_half_width = (unmod_ci[1] - unmod_ci[0]) / 2 * 100
                     max_ci = max(max_ci, ci_half_width)

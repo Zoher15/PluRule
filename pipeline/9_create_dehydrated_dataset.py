@@ -457,18 +457,18 @@ def process_subreddit_split(subreddit: str, data: Dict, pairs_to_process: List[D
         mod_comment_id = pair_copy['mod_comment_id']
         matched_rule = pair_copy['metadata'].get('rule', '')
 
-        # Moderated thread: correct answer is the matched rule
-        mod_options = create_shuffled_answer_options(rule_short_names, mod_comment_id, '_mod')
-        pair_copy['moderated_answer_options'] = mod_options
-        pair_copy['moderated_correct_answer'] = next(
-            (opt['label'] for opt in mod_options if opt['rule'] == matched_rule), None
+        # Violating thread: correct answer is the matched rule
+        violating_options = create_shuffled_answer_options(rule_short_names, mod_comment_id, '_violating')
+        pair_copy['violating_answer_options'] = violating_options
+        pair_copy['violating_correct_answer'] = next(
+            (opt['label'] for opt in violating_options if opt['rule'] == matched_rule), None
         )
 
-        # Unmoderated thread: correct answer is "No rules broken"
-        unmod_options = create_shuffled_answer_options(rule_short_names, mod_comment_id, '_unmod')
-        pair_copy['unmoderated_answer_options'] = unmod_options
-        pair_copy['unmoderated_correct_answer'] = next(
-            (opt['label'] for opt in unmod_options if opt['rule'] == 'No rules broken'), None
+        # Compliant thread: correct answer is "No rules broken"
+        compliant_options = create_shuffled_answer_options(rule_short_names, mod_comment_id, '_compliant')
+        pair_copy['compliant_answer_options'] = compliant_options
+        pair_copy['compliant_correct_answer'] = next(
+            (opt['label'] for opt in compliant_options if opt['rule'] == 'No rules broken'), None
         )
 
         processed_pairs.append(pair_copy)
@@ -556,14 +556,14 @@ def dehydrate_dataset(hydrated: Dict) -> Dict:
             dehydrated_pairs.append({
                 'mod_comment_id': pair['mod_comment_id'],
                 'mod_comment': '[NEEDS_HYDRATION]',
-                'moderated_thread': ['[NEEDS_HYDRATION]'] * len(pair['moderated_thread']),
-                'unmoderated_thread': ['[NEEDS_HYDRATION]'] * len(pair['unmoderated_thread']),
+                'violating_thread': ['[NEEDS_HYDRATION]'] * len(pair['violating_thread']),
+                'compliant_thread': ['[NEEDS_HYDRATION]'] * len(pair['compliant_thread']),
                 'metadata': pair['metadata'],
                 # Preserve answer options (they're deterministically generated, but useful to keep)
-                'moderated_answer_options': pair.get('moderated_answer_options', []),
-                'moderated_correct_answer': pair.get('moderated_correct_answer'),
-                'unmoderated_answer_options': pair.get('unmoderated_answer_options', []),
-                'unmoderated_correct_answer': pair.get('unmoderated_correct_answer')
+                'violating_answer_options': pair.get('violating_answer_options', []),
+                'violating_correct_answer': pair.get('violating_correct_answer'),
+                'compliant_answer_options': pair.get('compliant_answer_options', []),
+                'compliant_correct_answer': pair.get('compliant_correct_answer')
             })
 
         dehydrated['subreddits'].append({
@@ -721,7 +721,7 @@ def main():
             total_submissions = sum(len(s['submissions']) for s in subs)
             total_media = sum(s['num_media'] for sub in subs for s in sub['submissions'].values())
             total_comments = sum(
-                len(p['moderated_thread']) + len(p['unmoderated_thread'])
+                len(p['violating_thread']) + len(p['compliant_thread'])
                 for sub in subs for p in sub['thread_pairs']
             )
 
@@ -782,7 +782,7 @@ def main():
 
         # Save stats
         overall_comments = sum(
-            len(p['moderated_thread']) + len(p['unmoderated_thread'])
+            len(p['violating_thread']) + len(p['compliant_thread'])
             for subs in [test_subreddits, val_subreddits, train_subreddits]
             for sub in subs for p in sub['thread_pairs']
         )

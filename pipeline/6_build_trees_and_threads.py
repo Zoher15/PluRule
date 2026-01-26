@@ -2,7 +2,7 @@
 """
 Stage 6: Build Comment Trees and Discussion Threads
 
-Builds hierarchical comment tree structures and creates moderated/unmoderated
+Builds hierarchical comment tree structures and creates violating/compliant
 discussion thread pairs for training data.
 
 Input:
@@ -201,13 +201,13 @@ def build_subreddit_trees(submission_comments_dir: str, subreddit_name: str, log
 # ============================================================================
 
 def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dict],
-                                        tree: Dict[str, Any], mode: str = 'unmoderated') -> Tuple[List[Dict], bool, Optional[str]]:
+                                        tree: Dict[str, Any], mode: str = 'compliant') -> Tuple[List[Dict], bool, Optional[str]]:
     """
     Build thread from comment to root and check for issues.
 
     Modes:
-    - 'moderated': Expects mod response at leaf, skips checking leaf's children
-    - 'unmoderated': Checks that leaf has NO mod responses as direct children
+    - 'violating': Expects mod response at leaf, skips checking leaf's children
+    - 'compliant': Checks that leaf has NO mod responses as direct children
 
     Both modes check:
     1. If ANY comment (including all ancestors) has been removed/deleted body OR author
@@ -215,8 +215,8 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
     3. If ANY comment in the thread is by a moderator (we don't want mod-user back-and-forth)
 
     Mode-specific checks:
-    4. MODERATED only: If leaf comment has been edited (edited != False)
-    5. UNMODERATED only: If leaf comment has moderator responses as direct children
+    4. VIOLATING only: If leaf comment has been edited (edited != False)
+    5. COMPLIANT only: If leaf comment has moderator responses as direct children
 
     Returns:
         (thread, has_issue, issue_type) where issue_type is 'mod_response', 'removed_or_deleted', 'has_media', 'moderator_in_thread', 'edited_comment', or None
@@ -246,14 +246,14 @@ def build_thread_and_check_mod_response(comment_id: str, comments: Dict[str, Dic
         if is_moderator_comment(comment):
             return [], True, 'moderator_in_thread'
 
-        # Check if LEAF comment has been edited (moderated mode only)
-        if position == 0 and mode == 'moderated':
+        # Check if LEAF comment has been edited (violating mode only)
+        if position == 0 and mode == 'violating':
             edited = comment.get('edited', False)
             if edited is not False:
                 return [], True, 'edited_comment'
 
         # Check if LEAF comment has moderator responses (mode-dependent)
-        if position == 0 and mode == 'unmoderated':
+        if position == 0 and mode == 'compliant':
             for child_id in children_map.get(current_id, []):
                 if is_moderator_comment(comments.get(child_id, {})):
                     return [], True, 'mod_response'
@@ -288,17 +288,17 @@ def count_common_ancestors(thread1: List[Dict], thread2: List[Dict]) -> int:
     return common_count
 
 
-def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict],
+def find_best_alternative(violating_comment_id: str, violating_thread: List[Dict],
                          submission_id: str, comments: Dict[str, Dict],
                          trees: Dict[str, Any], used_alternatives: set) -> Tuple[Optional[str], Optional[List[Dict]], Optional[int], Optional[Dict]]:
     """
-    Find best alternative comment for unmoderated thread at same depth or depth-1.
+    Find best alternative comment for compliant thread at same depth or depth-1.
 
     Searches at:
-    1. Same depth as moderated comment
-    2. Depth-1 (if moderated_depth >= 2 and alternative is not direct parent of moderated comment)
+    1. Same depth as violating comment
+    2. Depth-1 (if violating_depth >= 2 and alternative is not direct parent of violating comment)
 
-    Returns: (alt_comment_id, alt_thread, moderated_depth, rejection_stats)
+    Returns: (alt_comment_id, alt_thread, violating_depth, rejection_stats)
     """
     rejection_stats = {
         'total_alternatives_at_depth': 0,
@@ -318,40 +318,40 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
     depth_levels = tree.get('depth_levels', {})
     parent_map = tree.get('parent_map', {})
 
-    # Find moderated comment's depth
-    moderated_depth = None
+    # Find violating comment's depth
+    violating_depth = None
     for depth, comment_ids in depth_levels.items():
-        if moderated_comment_id in comment_ids:
-            moderated_depth = depth
+        if violating_comment_id in comment_ids:
+            violating_depth = depth
             break
 
-    if moderated_depth is None:
+    if violating_depth is None:
         return None, None, None, rejection_stats
 
-    # Get direct parent of moderated comment
-    moderated_parent_id = parent_map.get(moderated_comment_id)
+    # Get direct parent of violating comment
+    violating_parent_id = parent_map.get(violating_comment_id)
 
     # Collect alternatives from same depth
-    same_depth_comments = depth_levels.get(moderated_depth, [])
+    same_depth_comments = depth_levels.get(violating_depth, [])
     alternatives = [cid for cid in same_depth_comments
-                   if cid != moderated_comment_id and cid not in used_alternatives]
+                   if cid != violating_comment_id and cid not in used_alternatives]
     rejection_stats['total_alternatives_at_depth'] = len(alternatives)
 
     # Collect alternatives from depth-1 (if depth >= 2)
-    if moderated_depth >= 2:
-        depth_minus_1_comments = depth_levels.get(moderated_depth - 1, [])
+    if violating_depth >= 2:
+        depth_minus_1_comments = depth_levels.get(violating_depth - 1, [])
         for cid in depth_minus_1_comments:
-            # Exclude if it's the direct parent of moderated comment or already used
-            if cid != moderated_parent_id and cid not in used_alternatives:
+            # Exclude if it's the direct parent of violating comment or already used
+            if cid != violating_parent_id and cid not in used_alternatives:
                 alternatives.append(cid)
         rejection_stats['total_alternatives_at_depth_minus_1'] = len([cid for cid in depth_minus_1_comments
-                                                                      if cid != moderated_parent_id and cid not in used_alternatives])
+                                                                      if cid != violating_parent_id and cid not in used_alternatives])
 
     # Sort for consistent processing
     alternatives = sorted(alternatives)
 
     if not alternatives:
-        return None, None, moderated_depth, rejection_stats
+        return None, None, violating_depth, rejection_stats
 
     # Find best alternative using priority: common ancestors (more better), length (longer better), score (lower better)
     best_alternative = None
@@ -360,7 +360,7 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
 
     for alt_id in alternatives:
         alt_thread, has_issue, issue_type = build_thread_and_check_mod_response(
-            alt_id, comments, tree, mode='unmoderated'
+            alt_id, comments, tree, mode='compliant'
         )
 
         if has_issue:
@@ -370,7 +370,7 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
         # Calculate ranking criteria
         # Priority: 1) common ancestors (more better), 2) length (longer better), 3) score (lower better)
         thread_length = len(alt_thread)
-        common_ancestors = count_common_ancestors(moderated_thread, alt_thread)
+        common_ancestors = count_common_ancestors(violating_thread, alt_thread)
         score = comments.get(alt_id, {}).get('score', 0)
 
         # Create tuple for comparison (all values "higher is better")
@@ -382,64 +382,64 @@ def find_best_alternative(moderated_comment_id: str, moderated_thread: List[Dict
             best_alternative_thread = alt_thread
             best_score_tuple = score_tuple
 
-    return best_alternative, best_alternative_thread, moderated_depth, rejection_stats
+    return best_alternative, best_alternative_thread, violating_depth, rejection_stats
 
 
 def build_thread_pair(mod_comment: Dict, comments: Dict[str, Dict],
                      trees: Dict[str, Any], logger, used_alternatives: set) -> Tuple[Optional[Dict], Optional[int], Optional[str], Optional[Dict]]:
     """
-    Build moderated and unmoderated thread pair for a moderator comment.
+    Build violating and compliant thread pair for a moderator comment.
 
-    Returns: (pair_dict, moderated_depth, failure_reason, rejection_stats)
+    Returns: (pair_dict, violating_depth, failure_reason, rejection_stats)
     """
     mod_comment_id = mod_comment.get('id')
-    moderated_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
+    violating_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
     submission_id = extract_submission_id(mod_comment.get('link_id', ''))
 
-    if not moderated_comment_id or not submission_id:
+    if not violating_comment_id or not submission_id:
         return None, None, None, None
 
-    if submission_id not in trees.get('trees', {}) or moderated_comment_id not in comments:
+    if submission_id not in trees.get('trees', {}) or violating_comment_id not in comments:
         return None, None, None, None
 
     tree = trees['trees'][submission_id]
 
-    # Build moderated thread (mode='moderated' skips checking leaf's children)
-    moderated_thread, has_issue, issue_type = build_thread_and_check_mod_response(
-        moderated_comment_id, comments, tree, mode='moderated'
+    # Build violating thread (mode='violating' skips checking leaf's children)
+    violating_thread, has_issue, issue_type = build_thread_and_check_mod_response(
+        violating_comment_id, comments, tree, mode='violating'
     )
 
-    if not moderated_thread or has_issue:
-        return None, None, f'moderated_thread_has_{issue_type}' if issue_type else None, None
+    if not violating_thread or has_issue:
+        return None, None, f'violating_thread_has_{issue_type}' if issue_type else None, None
 
     # Find best alternative at same depth or depth-1
-    alt_comment_id, unmoderated_thread, moderated_depth, rejection_stats = find_best_alternative(
-        moderated_comment_id, moderated_thread,
+    alt_comment_id, compliant_thread, violating_depth, rejection_stats = find_best_alternative(
+        violating_comment_id, violating_thread,
         submission_id, comments, trees, used_alternatives
     )
 
     if not alt_comment_id:
-        return None, moderated_depth, None, rejection_stats
+        return None, violating_depth, None, rejection_stats
 
-    common_ancestors = count_common_ancestors(moderated_thread, unmoderated_thread)
+    common_ancestors = count_common_ancestors(violating_thread, compliant_thread)
 
     return {
         'mod_comment_id': mod_comment_id,
         'mod_comment': mod_comment,
-        'moderated_thread': moderated_thread,
-        'unmoderated_thread': unmoderated_thread,
+        'violating_thread': violating_thread,
+        'compliant_thread': compliant_thread,
         'metadata': {
             'common_ancestors': common_ancestors,
             'rule': mod_comment.get('matched_rule', {}).get('short_name_clean', ''),
             'rule_similarity_score': mod_comment.get('matched_rule', {}).get('similarity_score', 0),
-            'moderated_comment_id': moderated_comment_id,
-            'unmoderated_comment_id': alt_comment_id,
+            'violating_comment_id': violating_comment_id,
+            'compliant_comment_id': alt_comment_id,
             'submission_id': submission_id,
-            'moderated_score': comments.get(moderated_comment_id, {}).get('score', 0),
-            'unmoderated_score': comments.get(alt_comment_id, {}).get('score', 0),
-            'moderated_depth': moderated_depth,
-            'moderated_length': len(moderated_thread),
-            'unmoderated_length': len(unmoderated_thread)
+            'violating_score': comments.get(violating_comment_id, {}).get('score', 0),
+            'compliant_score': comments.get(alt_comment_id, {}).get('score', 0),
+            'violating_depth': violating_depth,
+            'violating_length': len(violating_thread),
+            'compliant_length': len(compliant_thread)
         }
     }, None, None, rejection_stats
 
@@ -462,12 +462,12 @@ def build_discussion_threads(mod_comments: List[Dict], submission_comments_dir: 
     debug_counts = {
         'missing_submission': 0,
         'missing_parent_id': 0,
-        'missing_moderated_comment': 0,
-        'moderated_thread_has_mod_response': 0,
-        'moderated_thread_has_media': 0,
-        'moderated_thread_has_removed_or_deleted': 0,
-        'moderated_thread_has_moderator_in_thread': 0,
-        'moderated_thread_has_edited_comment': 0,
+        'missing_violating_comment': 0,
+        'violating_thread_has_mod_response': 0,
+        'violating_thread_has_media': 0,
+        'violating_thread_has_removed_or_deleted': 0,
+        'violating_thread_has_moderator_in_thread': 0,
+        'violating_thread_has_edited_comment': 0,
         'no_alternative_found': 0
     }
 
@@ -509,13 +509,13 @@ def build_discussion_threads(mod_comments: List[Dict], submission_comments_dir: 
         local_rules = defaultdict(int)
 
         for mod_comment in submission_mod_comments:
-            moderated_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
-            if not moderated_comment_id:
+            violating_comment_id = extract_comment_id(mod_comment.get('parent_id', ''))
+            if not violating_comment_id:
                 local_debug_counts['missing_parent_id'] += 1
                 continue
 
-            if moderated_comment_id not in comments:
-                local_debug_counts['missing_moderated_comment'] += 1
+            if violating_comment_id not in comments:
+                local_debug_counts['missing_violating_comment'] += 1
                 continue
 
             # Build thread pair
@@ -532,14 +532,14 @@ def build_discussion_threads(mod_comments: List[Dict], submission_comments_dir: 
                 pairs.append(pair)
 
                 # Mark alternative as used
-                unmod_comment_id = pair.get('metadata', {}).get('unmoderated_comment_id')
-                if unmod_comment_id:
-                    used_alternatives.add(unmod_comment_id)
+                compliant_comment_id = pair.get('metadata', {}).get('compliant_comment_id')
+                if compliant_comment_id:
+                    used_alternatives.add(compliant_comment_id)
 
                 # Track successful depth
-                moderated_thread = pair.get('moderated_thread', [])
-                if moderated_thread:
-                    local_successful_depths[len(moderated_thread)] += 1
+                violating_thread = pair.get('violating_thread', [])
+                if violating_thread:
+                    local_successful_depths[len(violating_thread)] += 1
 
                 # Track rule statistics
                 rule = mod_comment.get('matched_rule', {}).get('short_name_clean', 'unknown')
@@ -617,8 +617,8 @@ def process_subreddit(args: tuple) -> Dict[str, Any]:
         # Define paths
         submission_comments_dir = os.path.join(PATHS['organized_comments'], subreddit_name)
         match_file = os.path.join(PATHS['matched_comments'], f"{subreddit_name}_match.jsonl.zst")
-        trees_output = os.path.join(PATHS['comment_trees'], f"{subreddit_name}_comment_trees_anc.pkl")
-        threads_output = os.path.join(PATHS['discussion_threads'], f"{subreddit_name}_discussion_threads_anc.pkl")
+        trees_output = os.path.join(PATHS['comment_trees'], f"{subreddit_name}_comment_trees.pkl")
+        threads_output = os.path.join(PATHS['discussion_threads'], f"{subreddit_name}_discussion_threads.pkl")
 
         ensure_directory(trees_output)
         ensure_directory(threads_output)
@@ -849,7 +849,7 @@ def main():
         }
 
         # Save summary
-        summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary_anc.json')
+        summary_file = os.path.join(PATHS['data'], 'stage6_trees_and_threads_summary.json')
         write_json_file(summary, summary_file, pretty=True)
 
         logger.info(f"🎉 Stage 6 Complete!")

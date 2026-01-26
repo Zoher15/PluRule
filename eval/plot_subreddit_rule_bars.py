@@ -503,10 +503,10 @@ def plot_cluster_stacked(model, split, context, phrase='baseline', mode='prefill
         cluster_data = []
         for name, info in clusters.items():
             if 'overall_accuracy' in info:
-                mod = info.get('moderated_accuracy', 0) * 100
+                violating = info.get('violating_accuracy', 0) * 100
                 overall = info['overall_accuracy'] * 100
-                unmod = info.get('unmoderated_accuracy', 0) * 100
-                cluster_data.append((name, mod, overall, unmod))
+                compliant = info.get('compliant_accuracy', 0) * 100
+                cluster_data.append((name, violating, overall, compliant))
 
         # Sort by overall accuracy descending
         sorted_data = sorted(cluster_data, key=lambda x: x[2], reverse=True)
@@ -551,8 +551,12 @@ def plot_cluster_stacked(model, split, context, phrase='baseline', mode='prefill
     return 0
 
 
-def plot_language_diverging():
-    """Diverging plot: distribution (left) + language labels (middle) + accuracy forest (right)."""
+def plot_language_diverging(model='gpt5.2-high'):
+    """Diverging plot: distribution (left) + language labels (middle) + accuracy forest (right).
+
+    Args:
+        model: Model name (default: gpt5.2-high)
+    """
     # Language code to full name mapping
     LANGUAGE_NAMES = {
         'en': 'English', 'fr': 'French', 'de': 'German', 'pt': 'Portuguese',
@@ -567,9 +571,9 @@ def plot_language_diverging():
     print("Loading language distribution...")
     lang_distribution = load_language_distribution()
 
-    # Load performance data (test, gpt5.2-high, full context)
+    # Load performance data (test, full context)
     eval_dir = Path(PATHS['data']).parent / 'output' / 'eval'
-    perf_dir = eval_dir / 'gpt5.2-high' / 'test' / 'submission-media-discussion-user' / 'baseline'
+    perf_dir = eval_dir / model / 'test' / 'submission-media-discussion-user' / 'baseline'
 
     try:
         perf_file = get_latest_performance_file(perf_dir)
@@ -604,6 +608,9 @@ def plot_language_diverging():
     # Sort by count descending (matching distribution order)
     sorted_langs = [(lang, *language_data[lang]) for lang, _ in lang_distribution if lang in language_data]
 
+    # Filter out languages with less than 10 instances
+    sorted_langs = [(lang, count, acc, ci_low, ci_high) for lang, count, acc, ci_low, ci_high in sorted_langs if count >= 10]
+
     if not sorted_langs:
         print("No language data to plot")
         return 1
@@ -613,8 +620,8 @@ def plot_language_diverging():
     # Convert language codes to full names
     language_labels = [LANGUAGE_NAMES.get(lang, lang) for lang in languages]
 
-    # Create figure with two panels
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
+    # Create figure with two panels (custom height)
+    fig, (ax_left, ax_right) = create_two_column_figure(figsize=(6.3, 1.7))
 
     y_pos = np.arange(len(languages))
 
@@ -633,7 +640,7 @@ def plot_language_diverging():
     ax_left.spines['right'].set_linewidth(0.25)
     ax_left.spines['bottom'].set_linewidth(0.25)
     ax_left.set_xscale('log')
-    ax_left.set_xlim(left=10000, right=0.1)  # Reversed: bars extend leftward from right edge (starting near 0)
+    ax_left.set_xlim(left=10000, right=1)  # Reversed: bars extend leftward from right edge (10^0 = 1)
 
     # RIGHT: Forest plot with accuracies and CIs
     # Faint horizontal lines at each position
@@ -653,14 +660,14 @@ def plot_language_diverging():
         # Caps at ends
         ax_right.vlines([ci_low, ci_high], i - 0.25, i + 0.25, color='#FF4500', linewidth=1, zorder=2)
 
-    ax_right.set_xlabel('Test Accuracy (%)', fontsize=8)
+    ax_right.set_xlabel('Accuracy (%)', fontsize=8)
     ax_right.set_yticks(y_pos)
     ax_right.set_yticklabels([])  # Hide labels (shared from left)
     ax_right.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
     ax_right.tick_params(axis='y', pad=0.5, length=0, width=0.25)  # No y-tick marks (labels in middle)
     ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
     ax_right.set_ylim(-0.5, len(languages) - 0.5)
-    ax_right.set_xlim(-3, 103)  # Extended to prevent clipping squares at 0 and 100
+    ax_right.set_xlim(0, 100)
     ax_right.invert_yaxis()
     ax_right.axvline(x=50, color='gray', linestyle='--', linewidth=1.5, alpha=0.8, zorder=1)
     ax_right.spines['top'].set_visible(False)
@@ -681,10 +688,10 @@ def plot_language_diverging():
                  fontsize=10, verticalalignment='bottom', horizontalalignment='right')
 
     # Adjust margins
-    fig.subplots_adjust(left=0.015, right=0.985, top=0.99, bottom=0.1, wspace=0.25)
+    fig.subplots_adjust(left=0.015, right=0.985, top=0.99, bottom=0.2, wspace=0.25)
 
     # Save
-    filename = "language_analysis_gpt5.2-high_test_submission-media-discussion-user"
+    filename = f"language_analysis_{model}_test_submission-media-discussion-user"
     plots_dir = eval_dir / 'plots'
     plots_dir.mkdir(parents=True, exist_ok=True)
     save_figure(fig, plots_dir / filename, dpi=PUBLICATION_DPI, bbox_inches=None)
@@ -711,7 +718,7 @@ def main():
     elif args.type == 'cluster-stacked':
         return plot_cluster_stacked(args.model, args.split, args.context, args.phrase, args.mode)
     elif args.type == 'language-analysis':
-        return plot_language_diverging()
+        return plot_language_diverging(args.model)
     else:
         return plot_cluster_analysis(args.model, args.split, args.context, args.metric, args.phrase, args.mode)
 

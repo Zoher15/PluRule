@@ -9,32 +9,32 @@ echo "=================================="
 echo ""
 
 # echo "Stage 4: Matching rules (phase 2 only)..."
-# python scripts/4_match_rules.py --phase2-only
+# python pipeline/4_match_rules.py --phase2-only
 # echo "✅ Stage 4 complete"
 # echo ""
 
 echo "Stage 5: Collecting submission comments..."
-python scripts/5_collect_submission_comments.py
+python pipeline/5_collect_submission_comments.py
 echo "✅ Stage 5 complete"
 echo ""
 
 echo "Stage 6: Building trees and threads..."
-python scripts/6_build_trees_and_threads.py
+python pipeline/6_build_trees_and_threads.py
 echo "✅ Stage 6 complete"
 echo ""
 
 echo "Stage 7: Collecting submissions..."
-python scripts/7_collect_submissions.py
+python pipeline/7_collect_submissions.py
 echo "✅ Stage 7 complete"
 echo ""
 
 echo "Stage 8: Collecting media..."
-python scripts/8_collect_media.py
+python pipeline/8_collect_media.py
 echo "✅ Stage 8 complete"
 echo ""
 
 echo "Stage 9: Creating final datasets..."
-python scripts/9_create_dehydrated_dataset.py
+python pipeline/9_create_dehydrated_dataset.py
 echo "✅ Stage 9 complete"
 echo ""
 
@@ -89,7 +89,7 @@ if [ "$SKIP_EMBED" = false ]; then
     echo "================================================================================"
     echo "STEP 1/4: EMBEDDING"
     echo "================================================================================"
-    conda run -n reddit-mod-pipeline python analysis/embed_test_1k.py
+    conda run -n reddit-mod-pipeline python clustering/embed_test_1k.py
     if [ $? -ne 0 ]; then
         echo "❌ Embedding failed!"
         exit 1
@@ -106,7 +106,7 @@ if [ "$SKIP_CLUSTER" = false ]; then
     echo "================================================================================"
     echo "STEP 2/4: CLUSTERING (Grid Search + Apply Best)"
     echo "================================================================================"
-    conda run -n reddit-mod-pipeline python analysis/cluster_test_1k.py
+    conda run -n reddit-mod-pipeline python clustering/cluster_test_1k.py
     if [ $? -ne 0 ]; then
         echo "❌ Clustering failed!"
         exit 1
@@ -123,7 +123,7 @@ if [ "$SKIP_LABEL" = false ]; then
     echo "================================================================================"
     echo "STEP 3/4: LABELING CLUSTERS"
     echo "================================================================================"
-    conda run -n reddit-mod-pipeline python analysis/label_clusters.py
+    conda run -n reddit-mod-pipeline python clustering/label_clusters.py
     if [ $? -ne 0 ]; then
         echo "❌ Labeling failed!"
         exit 1
@@ -140,7 +140,7 @@ if [ "$SKIP_PLOT" = false ]; then
     echo "================================================================================"
     echo "STEP 4/4: PLOTTING"
     echo "================================================================================"
-    conda run -n reddit-mod-pipeline python analysis/plot_clusters.py
+    conda run -n reddit-mod-pipeline python clustering/plot_clusters.py
     if [ $? -ne 0 ]; then
         echo "❌ Plotting failed!"
         exit 1

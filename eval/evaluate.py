@@ -161,7 +161,7 @@ def _display_top_clusters(logger, metrics: dict, cluster_type: str, n: int = 5) 
     for cluster_label, stats in clusters:
         logger.info(f"  {cluster_label}:")
         logger.info(f"    Overall: {stats['overall_accuracy']:.4f} ({stats['count']} pairs)")
-        logger.info(f"    Mod: {stats['moderated_accuracy']:.4f}, Unmod: {stats['unmoderated_accuracy']:.4f}")
+        logger.info(f"    Violating: {stats['violating_accuracy']:.4f}, Compliant: {stats['compliant_accuracy']:.4f}")
 
 
 def main():
@@ -344,8 +344,8 @@ def main():
         logger.info(f"  Total thread pairs: {metrics['overall']['total_pairs']}")
         logger.info(f"  Total threads: {metrics['overall']['total_threads']}")
         logger.info(f"  Overall accuracy: {metrics['overall']['overall_accuracy']:.4f}")
-        logger.info(f"  Moderated accuracy: {metrics['overall']['moderated_accuracy']:.4f}")
-        logger.info(f"  Unmoderated accuracy: {metrics['overall']['unmoderated_accuracy']:.4f}")
+        logger.info(f"  Violating accuracy: {metrics['overall']['violating_accuracy']:.4f}")
+        logger.info(f"  Compliant accuracy: {metrics['overall']['compliant_accuracy']:.4f}")
         logger.info("")
 
         # Display top clusters
