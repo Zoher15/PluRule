@@ -20,12 +20,12 @@ ARCTIC_SHIFT_DATA = "/gpfs/slate-cnets/datasets/reddit/Arcticshift/Subreddits/su
 # Processing settings
 DATE_RANGE = ("2005-12", "2023-02")  # (start, end) inclusive PushshiftDumps
 MIN_RULES_FOR_MATCHING = 2  # Minimum rules needed for semantic matching (skip subreddits with ≤1 rule)
-GOLD_PERCENTILE = 99.3  # Top 0.7% of similarity scores considered gold matches (Stage 4 Phase 2)
-AMBIGUOUS_PERCENTILE = 98  # Top 2% of similarity scores considered ambiguous matches (Stage 4 Phase 2)
-MIN_MATCHED_COMMENTS = 1 # Minimum matched comments for subreddit inclusion in Stage 4
-MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 4
+GOLD_PERCENTILE = 99.3  # Top 0.7% of similarity scores considered gold matches (Stage 3 Phase 2)
+AMBIGUOUS_PERCENTILE = 98  # Top 2% of similarity scores considered ambiguous matches (Stage 3 Phase 2)
+MIN_MATCHED_COMMENTS = 1 # Minimum matched comments for subreddit inclusion in Stage 3
+MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 3
 
-# Stage 9: Dataset split configuration
+# Stage 8: Dataset split configuration
 # Note: No minimum threshold - all subreddits with ≥1 pair are included
 # Split logic per subreddit:
 #   n=1: 1 test, 0 val, 0 train
@@ -33,7 +33,7 @@ MAX_MATCHED_COMMENTS = 500  # Max sample size for matched comments in Stage 4
 #   3≤n<10: 1 test, 1 val, (n-2) train
 #   n≥10: 10% test, 10% val, 80% train (rounded, min 1 each)
 
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # Model used in Stage 4 for semantic matching
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"  # Model used in Stage 3 for semantic matching
 # Auto-detect number of CPU cores (use all available cores)
 PROCESSES = multiprocessing.cpu_count()
 
@@ -149,7 +149,7 @@ DATA_FLOW = {
         'name': 'Collect Media for Submissions',
         'script': '7_collect_media.py',
         'input_paths': ['submissions'],
-        'input_files': ['stage5_trees_and_threads_summary.json'],
+        'input_files': ['stage6_submission_collection_stats.json'],
         'output_dir': 'media',
         'produces': [
             '{subreddit}/{submission_id}_{media_id}_{source}.{ext}',  # Downloaded media files
@@ -258,7 +258,7 @@ DATA_FLOW = {
             'train_hydrated_clustered.json.zst',
             'val_hydrated_clustered.json.zst',
             'test_hydrated_clustered.json.zst',
-            'stage9_cluster_assignment_stats.json'
+            'stage10_cluster_assignment_stats.json'
         ],
         'notes': 'Assigns cluster labels to all thread pairs in the dataset based on embedding metadata.'
     },
@@ -269,7 +269,7 @@ DATA_FLOW = {
         'input_files': ['test_hydrated_clustered.json.zst'],
         'output_dir': 'data/evaluation',
         'produces': [
-            'stage10_human_evaluation_metadata.json'
+            'stage11_human_evaluation_metadata.json'
         ],
         'notes': 'Samples comments for human evaluation, creates Google Forms. Requires OAuth2 credentials.'
     },
@@ -277,10 +277,10 @@ DATA_FLOW = {
     'stage11b_retrieve_responses': {
         'name': 'Retrieve Human Evaluation Responses',
         'script': '11b_retrieve_responses.py',
-        'input_files': ['evaluation/stage10_human_evaluation_metadata.json'],
+        'input_files': ['evaluation/stage11_human_evaluation_metadata.json'],
         'output_dir': 'data/evaluation',
         'produces': [
-            'stage10_human_annotations.json'
+            'stage11_human_annotations.json'
         ],
         'notes': 'Retrieves responses from Google Forms and aggregates annotations.'
     },
@@ -288,10 +288,10 @@ DATA_FLOW = {
     'stage11c_evaluate_predictions': {
         'name': 'Evaluate Model Predictions Against Human Annotations',
         'script': '11c_evaluate_predictions.py',
-        'input_files': ['evaluation/stage10_human_annotations.json'],
+        'input_files': ['evaluation/stage11_human_annotations.json'],
         'output_dir': 'data/evaluation',
         'produces': [
-            'stage10_evaluation_results.json'
+            'stage11_evaluation_results.json'
         ],
         'notes': 'Computes accuracy metrics comparing model predictions to human ground truth.'
     }
