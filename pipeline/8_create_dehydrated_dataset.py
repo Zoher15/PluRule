@@ -11,10 +11,10 @@ Creates train/val/test splits using an adaptive strategy per subreddit:
 All three datasets are combined across subreddits (not per-subreddit splits).
 
 Input:
-- discussion_threads/{subreddit}_discussion_threads.pkl (from Stage 6)
-- comment_trees/{subreddit}_comment_trees.pkl (from Stage 6)
-- submissions/{subreddit}_submissions.zst (from Stage 7)
-- media/{subreddit}/* (from Stage 8)
+- discussion_threads/{subreddit}_discussion_threads.pkl (from Stage 5)
+- comment_trees/{subreddit}_comment_trees.pkl (from Stage 5)
+- submissions/{subreddit}_submissions.zst (from Stage 6)
+- media/{subreddit}/* (from Stage 7)
 - stage7_successful_submission_ids.json
 - stage2_sfw_subreddits_min_{MIN_MATCHED_COMMENTS}_comments.json
 
@@ -212,16 +212,16 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
     # Load Stage 8 successful IDs
     success_file = os.path.join(PATHS['data'], 'stage7_successful_submission_ids.json')
     if not os.path.exists(success_file):
-        logger.error(f"Stage 8 success file not found: {success_file}")
+        logger.error(f"Stage 7 success file not found: {success_file}")
         return {}
 
-    logger.info(f"📋 Loading Stage 8 successful submission IDs...")
+    logger.info(f"📋 Loading Stage 7 successful submission IDs...")
     data = read_json_file(success_file)
     stage8_ids = {sub: set(ids) for sub, ids in data.get('subreddit_submission_ids', {}).items()}
     logger.info(f"  {sum(len(ids) for ids in stage8_ids.values())} IDs across {len(stage8_ids)} subreddits")
 
     # Load submissions from Stage 7 (filter by Stage 8 + [removed])
-    logger.info(f"📄 Loading submissions from Stage 7...")
+    logger.info(f"📄 Loading submissions from Stage 6...")
     subreddit_data = {}
 
     for subreddit, needed_ids in stage8_ids.items():
@@ -253,7 +253,7 @@ def load_and_filter_all_data(logger) -> Dict[str, Dict]:
     logger.info(f"  ✅ {sum(len(d['submissions']) for d in subreddit_data.values())} submissions from {len(subreddit_data)} subreddits")
 
     # Load and filter thread pairs from Stage 6 (Pushshift only)
-    logger.info(f"🧵 Loading and filtering thread pairs from Stage 6 (Pushshift only)...")
+    logger.info(f"🧵 Loading and filtering thread pairs from Stage 5 (Pushshift only)...")
     total_original, total_filtered = 0, 0
 
     for subreddit, data in subreddit_data.items():
@@ -620,7 +620,7 @@ def main():
         verification_file = os.path.join(PATHS['data'], 'stage8_llm_verification_results.json')
         verification_stats = {
             'metadata': {
-                'stage': 9,
+                'stage': 8,
                 'creation_date': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'model': 'Qwen/Qwen3-30B-A3B-Instruct-2507',
                 'total_verified': len(verification_results),
@@ -795,7 +795,7 @@ def main():
 
         summary_stats = {
             'metadata': {
-                'stage': 9,
+                'stage': 8,
                 'stage_name': 'Create Final Datasets',
                 'creation_date': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'processing_time_seconds': time.time() - start_time
@@ -815,12 +815,12 @@ def main():
         write_json_file(summary_stats, stats_file, pretty=True)
 
         elapsed = time.time() - start_time
-        logger.info(f"🎉 Stage 9 Complete! ({elapsed:.1f}s)")
+        logger.info(f"🎉 Stage 8 Complete! ({elapsed:.1f}s)")
         log_stage_end(logger, 8, success=True, elapsed_time=elapsed)
         return 0
 
     except Exception as e:
-        log_error_and_continue(logger, e, "Stage 9 execution")
+        log_error_and_continue(logger, e, "Stage 8 execution")
         log_stage_end(logger, 8, success=False, elapsed_time=time.time() - start_time)
         return 1
 

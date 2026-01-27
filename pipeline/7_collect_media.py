@@ -12,8 +12,8 @@ Priority Hierarchy (early stopping):
 4. preview - Reddit cached images (fallback, 1 item)
 
 Input:
-- data/submissions/{subreddit}_submissions.zst (from Stage 7)
-- data/stage7_submission_collection_stats.json (for subreddit list)
+- data/submissions/{subreddit}_submissions.zst (from Stage 6)
+- data/stage6_submission_collection_stats.json (for subreddit list)
 
 Output:
 - media/{subreddit}/{submission_id}_{media_id}.{ext}
@@ -510,11 +510,11 @@ def main():
 
     try:
         # Load subreddits from Stage 7
-        logger.info("📋 Loading subreddits from Stage 7...")
-        summary_file = os.path.join(PATHS['data'], 'stage7_submission_collection_stats.json')
+        logger.info("📋 Loading subreddits from Stage 6...")
+        summary_file = os.path.join(PATHS['data'], 'stage6_submission_collection_stats.json')
 
         if not os.path.exists(summary_file):
-            logger.error(f"❌ Stage 7 summary not found: {summary_file}")
+            logger.error(f"❌ Stage 6 summary not found: {summary_file}")
             log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
             return 1
 
@@ -522,11 +522,11 @@ def main():
         qualified_stats = summary.get('subreddit_stats', [])
 
         if not qualified_stats:
-            logger.error("❌ No subreddits found from Stage 7!")
+            logger.error("❌ No subreddits found from Stage 6!")
             log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        logger.info(f"Loaded {len(qualified_stats)} subreddits from Stage 7")
+        logger.info(f"Loaded {len(qualified_stats)} subreddits from Stage 6")
 
         subreddits = [s['subreddit'] for s in qualified_stats]
         logger.info(f"Processing {len(subreddits)} subreddits")
@@ -616,7 +616,7 @@ def main():
         write_json_file(successful_ids_output, ids_file, pretty=True)
 
         # Log results
-        logger.info(f"\n🎉 Stage 8 Complete!")
+        logger.info(f"\n🎉 Stage 7 Complete!")
         logger.info(f"Time: {elapsed:.1f}s")
         logger.info(f"Subreddits: {len(valid_results)}/{len(subreddits)}")
         logger.info(f"Submissions: {total_submissions:,}")
@@ -644,7 +644,7 @@ def main():
         return 0
 
     except Exception as e:
-        logger.error(f"❌ Stage 8 failed: {e}")
+        logger.error(f"❌ Stage 7 failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
         log_stage_end(logger, 7, success=False, elapsed_time=time.time() - start_time)

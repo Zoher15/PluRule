@@ -6,8 +6,8 @@ Builds hierarchical comment tree structures and creates violating/compliant
 discussion thread pairs for training data.
 
 Input:
-- organized_comments/{subreddit}/submission_{id}.pkl (from Stage 5)
-- matched_comments/{subreddit}_match.jsonl.zst (from Stage 4)
+- organized_comments/{subreddit}/submission_{id}.pkl (from Stage 4)
+- matched_comments/{subreddit}_match.jsonl.zst (from Stage 3)
 - data/stage2_sfw_subreddits_min_{N}_comments.json (for rule sets)
 
 Output:
@@ -852,7 +852,7 @@ def main():
         summary_file = os.path.join(PATHS['data'], 'stage5_trees_and_threads_summary.json')
         write_json_file(summary, summary_file, pretty=True)
 
-        logger.info(f"🎉 Stage 6 Complete!")
+        logger.info(f"🎉 Stage 5 Complete!")
         logger.info(f"Time: {elapsed:.1f}s")
         logger.info(f"📊 Processed {len(completed_results)}/{len(subreddits_to_process)} subreddits")
         logger.info(f"🌳 Built {total_trees:,} comment trees")
@@ -874,7 +874,7 @@ def main():
         return 0
 
     except Exception as e:
-        log_error_and_continue(logger, e, "Stage 6 execution")
+        log_error_and_continue(logger, e, "Stage 5 execution")
         log_stage_end(logger, 5, success=False, elapsed_time=time.time() - start_time)
         return 1
 

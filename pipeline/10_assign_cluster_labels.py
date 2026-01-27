@@ -8,13 +8,13 @@ to thread pairs and subreddits in the train/val/test datasets.
 Input:
 - output/embeddings/all_rule_metadata.tsv (with cluster_id and cluster_label columns)
 - output/embeddings/all_subreddit_metadata.tsv (with cluster_id and cluster_label columns)
-- data/{split}_hydrated.json.zst (train/val/test datasets from Stage 9)
+- data/{split}_hydrated.json.zst (train/val/test datasets from Stage 8)
 
 Output:
 - data/{split}_hydrated_clustered.json.zst (updated datasets with cluster labels)
 - data/{split}_dehydrated_clustered.json.zst (dehydrated versions)
 - data/test_hydrated_clustered.json (uncompressed test set)
-- data/stage9_cluster_assignment_stats.json
+- data/stage10_cluster_assignment_stats.json
 - data/stage10_dataset_stats_table.tex (LaTeX table for paper)
 
 The script adds cluster labels to:
@@ -542,7 +542,7 @@ def main():
             'total_unique_subreddits_mapped': len(subreddit_mapping)
         }
 
-        stats_file = os.path.join(PATHS['data'], 'stage9_cluster_assignment_stats.json')
+        stats_file = os.path.join(PATHS['data'], 'stage10_cluster_assignment_stats.json')
         write_json_file(summary_stats, stats_file, pretty=True)
         logger.info(f"  ✅ Saved statistics to: {stats_file}")
 

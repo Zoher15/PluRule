@@ -71,7 +71,7 @@ def authenticate():
 
 def load_evaluation_metadata(logger) -> Dict[str, Any]:
     """Load the evaluation metadata created in Stage 11."""
-    metadata_file = os.path.join(PATHS['data'], 'evaluation', 'stage10_human_evaluation_metadata.json')
+    metadata_file = os.path.join(PATHS['data'], 'evaluation', 'stage11_human_evaluation_metadata.json')
 
     if not os.path.exists(metadata_file):
         logger.error(f"Metadata file not found: {metadata_file}")
@@ -285,7 +285,7 @@ def save_responses(data: Dict, output_dir: str, logger) -> str:
     """Save the retrieved responses."""
     os.makedirs(output_dir, exist_ok=True)
 
-    output_file = os.path.join(output_dir, 'stage10_human_annotations.json')
+    output_file = os.path.join(output_dir, 'stage11_human_annotations.json')
     write_json_file(data, output_file, pretty=True)
     logger.info(f"Saved human annotations to: {output_file}")
 

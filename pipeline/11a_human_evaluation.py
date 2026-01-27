@@ -446,7 +446,7 @@ def save_evaluation_metadata(samples: List[Dict], form_data: List[Dict],
 
     # Save metadata
     os.makedirs(output_dir, exist_ok=True)
-    metadata_file = os.path.join(output_dir, 'stage10_human_evaluation_metadata.json')
+    metadata_file = os.path.join(output_dir, 'stage11_human_evaluation_metadata.json')
     write_json_file(metadata, metadata_file, pretty=True)
     logger.info(f"Saved metadata to: {metadata_file}")
 

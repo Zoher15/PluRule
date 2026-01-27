@@ -6,7 +6,7 @@ Collects submission data for submissions referenced in discussion thread pairs.
 Uses Arctic Shift subreddit-specific submission files for efficient lookup.
 
 Input:
-- discussion_threads/{subreddit}_discussion_threads.pkl (from Stage 6)
+- discussion_threads/{subreddit}_discussion_threads.pkl (from Stage 5)
 - Arctic Shift: {first_letter}/{subreddit}_submissions.zst
 
 Output:
@@ -183,11 +183,11 @@ def main():
             return 1
 
         # Load subreddits from Stage 6
-        logger.info("📋 Loading subreddits from Stage 6...")
+        logger.info("📋 Loading subreddits from Stage 5...")
         summary_file = os.path.join(PATHS['data'], 'stage5_trees_and_threads_summary.json')
 
         if not os.path.exists(summary_file):
-            logger.error(f"❌ Stage 6 summary not found: {summary_file}")
+            logger.error(f"❌ Stage 5 summary not found: {summary_file}")
             log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
             return 1
 
@@ -195,11 +195,11 @@ def main():
         qualified_subreddits = summary.get('subreddit_stats', [])
 
         if not qualified_subreddits:
-            logger.error("❌ No subreddits found from Stage 6!")
+            logger.error("❌ No subreddits found from Stage 5!")
             log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        logger.info(f"Loaded {len(qualified_subreddits)} subreddits from Stage 6")
+        logger.info(f"Loaded {len(qualified_subreddits)} subreddits from Stage 5")
 
         # Extract submission IDs from discussion thread pairs
         logger.info("🔍 Extracting submission IDs from discussion threads...")
@@ -276,7 +276,7 @@ def main():
 
         # Log results
         overall_elapsed = time.time() - start_time
-        logger.info(f"🎉 Stage 7 Complete!")
+        logger.info(f"🎉 Stage 6 Complete!")
         logger.info(f"Time: {overall_elapsed:.1f}s")
         logger.info(f"📊 Subreddits processed: {len(successful_results)}/{len(subreddit_submission_ids)}")
         logger.info(f"📄 Submissions collected: {total_submissions:,}")
@@ -294,7 +294,7 @@ def main():
         return 0
 
     except Exception as e:
-        log_error_and_continue(logger, e, "Stage 7 execution")
+        log_error_and_continue(logger, e, "Stage 6 execution")
         log_stage_end(logger, 6, success=False, elapsed_time=time.time() - start_time)
         return 1
 
