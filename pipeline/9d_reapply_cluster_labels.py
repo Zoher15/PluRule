@@ -36,14 +36,22 @@ Output (updated):
 - output/embeddings/all_rule_metadata.tsv (cluster_label column + cluster_id merged)
 """
 
+import sys
+import os
 import json
-import logging
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import argparse
+import time
 from typing import Dict, Tuple
 from collections import defaultdict
+
+# Add parent directory to path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from config import PATHS
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 
 
 def parse_label_overrides(override_file: Path, logger) -> Dict[int, str]:
@@ -297,26 +305,15 @@ def main():
     )
     args = parser.parse_args()
 
-    # Create directories
-    base_dir = Path(__file__).resolve().parent.parent
-    logs_dir = base_dir / 'logs' / 'clustering'
-    embeddings_dir = base_dir / 'output' / 'embeddings'
-    clustering_dir = base_dir / 'output' / 'clustering'
+    logger = get_stage_logger("9d", "reapply_cluster_labels")
+    log_stage_start(logger, "9d", "Reapply/Override Cluster Labels")
 
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    start_time = time.time()
 
-    # Setup logging
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = logs_dir / f'reapply_labels_{timestamp}.log'
+    # Create directories using PATHS
+    embeddings_dir = Path(PATHS['embeddings'])
+    clustering_dir = Path(PATHS['clustering'])
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()],
-        force=True  # Override any existing logging config
-    )
-    logger = logging.getLogger(__name__)
-    logger.info(f"Log file: {log_file}")
     logger.info("\nManual Override Workflow:")
     logger.info("  1. Review output/clustering/{entity}_cluster_analysis.txt")
     logger.info("  2. Create/edit output/clustering/{entity}_label_overrides.txt")
@@ -334,18 +331,20 @@ def main():
         for entity_type in entity_types:
             reapply_entity_labels(entity_type, embeddings_dir, clustering_dir, logger)
 
-        logger.info("\n" + "="*80)
-        logger.info("✅ COMPLETE - Labels reapplied successfully")
-        logger.info("="*80)
         logger.info("\nNext steps:")
         logger.info("  - Review updated JSON files in output/clustering/")
         logger.info("  - Review updated metadata files in output/embeddings/")
         logger.info("  - Regenerate plots with: python analysis/plot_clusters.py")
 
+        elapsed = time.time() - start_time
+        logger.info(f"🎉 Stage 9d Complete!")
+        log_stage_end(logger, "9d", success=True, elapsed_time=elapsed)
+
         return 0
 
     except Exception as e:
-        logger.error(f"❌ Error: {e}", exc_info=True)
+        log_error_and_continue(logger, e, "Stage 9d execution")
+        log_stage_end(logger, "9d", success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

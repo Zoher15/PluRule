@@ -8,10 +8,10 @@ echo "Running Pipeline Stages 3-8"
 echo "=================================="
 echo ""
 
-# echo "Stage 3: Matching rules (phase 2 only)..."
-# python pipeline/3_match_rules.py --phase2-only
-# echo "Stage 3 complete"
-# echo ""
+echo "Stage 3: Matching rules (phase 2 only)..."
+python pipeline/3_match_rules.py --phase2-only
+echo "Stage 3 complete"
+echo ""
 
 echo "Stage 4: Collecting submission comments..."
 python pipeline/4_collect_submission_comments.py

@@ -26,8 +26,6 @@ import pandas as pd
 import zstandard
 from typing import Dict, List, Tuple
 from tqdm import tqdm
-import logging
-from datetime import datetime
 from pathlib import Path
 
 # Disable vLLM's default logging configuration
@@ -38,6 +36,7 @@ os.environ['TQDM_DISABLE'] = '1'
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from config import PATHS, MIN_MATCHED_COMMENTS, EMBEDDING_MODEL
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from utils.files import read_json_file
 from transformers import AutoTokenizer
 from vllm import LLM
@@ -298,28 +297,12 @@ def write_tsv_files(embeddings: List[List[float]], metadata: List[Dict], embeddi
 
 def main():
     """Main execution function."""
-    # Create directories
-    base_dir = Path(__file__).resolve().parent.parent
-    logs_dir = base_dir / 'logs' / 'embeddings'
-    output_dir = base_dir / 'output' / 'embeddings'
-
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Setup logging with timestamp
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = logs_dir / f'embed_test_{timestamp}.log'
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()]
-    )
-    logger = logging.getLogger(__name__)
-    logger.info(f"Log file: {log_file}")
-    logger.info(f"Output directory: {output_dir}")
+    logger = get_stage_logger("9a", "embed_clusters")
+    log_stage_start(logger, "9a", "Embed Subreddits and Rules for Clustering")
 
     start_time = time.time()
+    output_dir = Path(PATHS['embeddings'])
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         # Load data (single function loads all datasets for both subreddits and rules)
@@ -367,16 +350,16 @@ def main():
                        output_dir / 'all_rule_metadata.tsv', ['subreddit', 'short_name', 'description', 'full_text', 'total_violations', 'splits', 'num_subreddits'], logger)
 
         elapsed = time.time() - start_time
-        logger.info("\n" + "="*80)
-        logger.info(f"✅ COMPLETE! Time: {elapsed:.1f}s")
-        logger.info("="*80)
         logger.info(f"Subreddit embeddings: {len(subreddit_embeddings)} x {len(subreddit_embeddings[0])}")
         logger.info(f"Rule embeddings: {len(rule_embeddings)} x {len(rule_embeddings[0])}")
+        logger.info(f"🎉 Stage 9a Complete!")
+        log_stage_end(logger, "9a", success=True, elapsed_time=elapsed)
 
         return 0
 
     except Exception as e:
-        logger.error(f"❌ Error: {e}", exc_info=True)
+        log_error_and_continue(logger, e, "Stage 9a execution")
+        log_stage_end(logger, "9a", success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

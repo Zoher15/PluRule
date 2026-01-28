@@ -40,6 +40,9 @@ from collections import defaultdict
 # Disable vLLM's default logging configuration
 os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
 
+# Use only GPU 1
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (PATHS, MIN_MATCHED_COMMENTS, create_directories)
@@ -709,6 +712,12 @@ def main():
         val_subreddits = rank_by_score(val_subreddits, 'jsd_from_uniform', ascending=True)
         train_subreddits = rank_by_score(train_subreddits, 'jsd_from_uniform', ascending=True)
 
+        # Log thread pairs per split
+        test_pairs = sum(s['total_thread_pairs'] for s in test_subreddits)
+        val_pairs = sum(s['total_thread_pairs'] for s in val_subreddits)
+        train_pairs = sum(s['total_thread_pairs'] for s in train_subreddits)
+        logger.info(f"📊 Thread pairs per split: test={test_pairs}, val={val_pairs}, train={train_pairs}")
+
         # Load pipeline stats
         stage1_stats = read_json_file(os.path.join(PATHS['data'], 'stage1_subreddit_mod_comment_rankings.json'))
         stage4_stats = read_json_file(os.path.join(PATHS['data'], 'stage3_matching_summary.json'))
@@ -804,6 +813,9 @@ def main():
                 'test_subreddits': len(test_subreddits),
                 'val_subreddits': len(val_subreddits),
                 'train_subreddits': len(train_subreddits),
+                'test_thread_pairs': test_pairs,
+                'val_thread_pairs': val_pairs,
+                'train_thread_pairs': train_pairs,
                 'split_strategy': 'Adaptive: n=1→(1,0,0), n=2→(1,0,1), 3≤n<10→(1,1,n-2), n≥10→(10%,10%,80%)',
                 'total_comments_overall': overall_comments,
                 'total_thread_pairs_overall': overall_thread_pairs

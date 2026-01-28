@@ -23,13 +23,13 @@ Output:
 
 import sys
 import json
-import logging
 import os
 import pandas as pd
 from pathlib import Path
 from typing import Dict
 from datetime import datetime
 import argparse
+import time
 
 # Disable vLLM's default logging configuration
 os.environ['VLLM_CONFIGURE_LOGGING'] = '0'
@@ -39,6 +39,8 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 # Add parent directory to path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+from config import PATHS
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
@@ -274,27 +276,15 @@ def main():
     parser.add_argument('--entity', choices=['subreddit', 'rule'], help='Label only one entity type')
     args = parser.parse_args()
 
-    # Create directories
-    base_dir = Path(__file__).resolve().parent.parent
-    logs_dir = base_dir / 'logs' / 'clustering'
-    embeddings_dir = base_dir / 'output' / 'embeddings'
-    clustering_dir = base_dir / 'output' / 'clustering'
+    logger = get_stage_logger("9c", "label_clusters")
+    log_stage_start(logger, "9c", "Label Clusters with LLM")
 
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    start_time = time.time()
+
+    # Create directories using PATHS
+    embeddings_dir = Path(PATHS['embeddings'])
+    clustering_dir = Path(PATHS['clustering'])
     clustering_dir.mkdir(parents=True, exist_ok=True)
-
-    # Setup logging
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = logs_dir / f'label_clusters_{timestamp}.log'
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()],
-        force=True  # Override any existing logging config from vLLM/transformers
-    )
-    logger = logging.getLogger(__name__)
-    logger.info(f"Log file: {log_file}")
 
     try:
         # Load tokenizer
@@ -348,7 +338,15 @@ def main():
         logger.info("="*80)
 
         # Import and run reapply_cluster_labels to merge any duplicate labels
-        from reapply_cluster_labels import reapply_entity_labels
+        # Use importlib because module name starts with a number
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "reapply_cluster_labels",
+            os.path.join(os.path.dirname(__file__), "9d_reapply_cluster_labels.py")
+        )
+        reapply_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reapply_module)
+        reapply_entity_labels = reapply_module.reapply_entity_labels
 
         for entity_type in entity_types:
             try:
@@ -356,14 +354,15 @@ def main():
             except Exception as e:
                 logger.warning(f"⚠️  Failed to merge duplicates for {entity_type}: {e}")
 
-        logger.info("\n" + "="*80)
-        logger.info("COMPLETE")
-        logger.info("="*80)
+        elapsed = time.time() - start_time
+        logger.info(f"🎉 Stage 9c Complete!")
+        log_stage_end(logger, "9c", success=True, elapsed_time=elapsed)
 
         return 0
 
     except Exception as e:
-        logger.error(f"❌ Error: {e}", exc_info=True)
+        log_error_and_continue(logger, e, "Stage 9c execution")
+        log_stage_end(logger, "9c", success=False, elapsed_time=time.time() - start_time)
         return 1
 
 

@@ -24,6 +24,7 @@ Output:
 """
 
 import sys
+import os
 import json
 import warnings
 import numpy as np
@@ -33,7 +34,6 @@ from itertools import product
 from typing import Dict, List, Tuple
 import multiprocessing
 from pathlib import Path
-import logging
 import time
 import argparse
 
@@ -50,7 +50,8 @@ warnings.filterwarnings('ignore', message="'force_all_finite' was renamed", cate
 parent_dir = Path(__file__).resolve().parent.parent
 sys.path.append(str(parent_dir))
 
-from config import PROCESSES
+from config import PATHS, PROCESSES
+from utils.logging import get_stage_logger, log_stage_start, log_stage_end, log_error_and_continue
 import umap
 import hdbscan
 from hdbscan import validity_index
@@ -382,27 +383,14 @@ def main():
     run_grid = args.grid_search or not args.apply_best  # Default is to run both
     run_apply = args.apply_best or not args.grid_search
 
-    # Create directories using pathlib
-    base_dir = Path(__file__).resolve().parent.parent
-    logs_dir = base_dir / 'logs' / 'clustering'
-    output_dir = base_dir / 'output' / 'clustering'
-    embeddings_dir = base_dir / 'output' / 'embeddings'
+    logger = get_stage_logger("9b", "cluster_embeddings")
+    log_stage_start(logger, "9b", "Cluster Embeddings with UMAP + HDBSCAN")
 
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    # Create directories using PATHS
+    output_dir = Path(PATHS['clustering'])
+    embeddings_dir = Path(PATHS['embeddings'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Setup logging
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    mode = 'grid_search' if args.grid_search else ('apply_best' if args.apply_best else 'full')
-    log_file = logs_dir / f'cluster_{mode}_{timestamp}.log'
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.FileHandler(str(log_file)), logging.StreamHandler()]
-    )
-    logger = logging.getLogger(__name__)
-    logger.info(f"Log file: {log_file}")
     logger.info(f"Mode: {'Grid search only' if args.grid_search else ('Apply best only' if args.apply_best else 'Full pipeline')}")
 
     start_time = time.time()
@@ -435,15 +423,14 @@ def main():
 
         # Summary
         elapsed = time.time() - start_time
-        logger.info("\n" + "="*80)
-        logger.info("COMPLETE")
-        logger.info("="*80)
-        logger.info(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
+        logger.info(f"🎉 Stage 9b Complete!")
+        log_stage_end(logger, "9b", success=True, elapsed_time=elapsed)
 
         return 0
 
     except Exception as e:
-        logger.error(f"❌ Error: {e}", exc_info=True)
+        log_error_and_continue(logger, e, "Stage 9b execution")
+        log_stage_end(logger, "9b", success=False, elapsed_time=time.time() - start_time)
         return 1
 
 
