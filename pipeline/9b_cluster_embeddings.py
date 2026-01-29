@@ -57,7 +57,7 @@ import hdbscan
 from hdbscan import validity_index
 
 # Default static parameters - single source of truth for reproducibility
-DEFAULT_UMAP_STATIC_PARAMS = {'metric': 'cosine', 'random_state': 15, 'verbose': False}
+DEFAULT_UMAP_STATIC_PARAMS = {'metric': 'cosine', 'random_state': 0, 'verbose': False}
 DEFAULT_HDBSCAN_STATIC_PARAMS = {'cluster_selection_method': 'eom'}
 
 
@@ -249,10 +249,21 @@ def run_grid_search(embeddings: np.ndarray, param_grid: Dict[str, List], data_na
     return results
 
 
-def analyze_results(results: List[Dict], logger) -> Dict:
-    """Analyze grid search results and find best parameters."""
-    # Filter out failed runs
-    valid_results = [r for r in results if r['metrics']['dbcv'] is not None]
+def analyze_results(results: List[Dict], logger, min_clusters: int = 5, max_clusters: int = 30) -> Dict:
+    """Analyze grid search results and find best parameters.
+
+    Args:
+        results: List of grid search results
+        logger: Logger instance
+        min_clusters: Minimum number of clusters required (default: 5)
+        max_clusters: Maximum number of clusters allowed (default: 30)
+    """
+    # Filter out failed runs and enforce cluster count constraints
+    valid_results = [r for r in results
+                     if r['metrics']['dbcv'] is not None
+                     and min_clusters <= r['metrics']['n_clusters'] <= max_clusters]
+
+    logger.info(f"Filtered to {len(valid_results)} results with {min_clusters}-{max_clusters} clusters")
 
     if not valid_results:
         logger.error("No valid results found!")
@@ -400,7 +411,7 @@ def main():
         # Note: UMAP uses cosine on original 4096D, HDBSCAN uses euclidean on reduced space
         param_grids = {
             'subreddit': {
-                'n_neighbors': [10, 15, 20, 30, 40, 50],
+                'n_neighbors': [10, 15, 20, 30],
                 'n_components': [5, 10, 15, 20, 25, 30],
                 'min_dist': [0.0],
                 'min_cluster_size': [15, 20, 25, 30],
@@ -408,10 +419,10 @@ def main():
                 'metric': ['euclidean']
             },
             'rule': {
-                'n_neighbors': [10, 15, 20, 30, 40, 50],
+                'n_neighbors': [10, 15, 20, 30],
                 'n_components': [5, 10, 15, 20, 25, 30],
                 'min_dist': [0.0],
-                'min_cluster_size': [20, 25, 30],
+                'min_cluster_size': [15, 20, 25, 30],
                 'min_samples': [5, 10, 15, 20],
                 'metric': ['euclidean']
             },

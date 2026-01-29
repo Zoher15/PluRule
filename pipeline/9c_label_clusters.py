@@ -332,28 +332,6 @@ def main():
         # Label each entity type
         for entity_type in entity_types:
             label_entity_type(entity_type, embeddings_dir, clustering_dir, llm, tokenizer, response_budget, logger)
-
-        logger.info("\n" + "="*80)
-        logger.info("POST-PROCESSING: MERGING DUPLICATE LABELS")
-        logger.info("="*80)
-
-        # Import and run reapply_cluster_labels to merge any duplicate labels
-        # Use importlib because module name starts with a number
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "reapply_cluster_labels",
-            os.path.join(os.path.dirname(__file__), "9d_reapply_cluster_labels.py")
-        )
-        reapply_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(reapply_module)
-        reapply_entity_labels = reapply_module.reapply_entity_labels
-
-        for entity_type in entity_types:
-            try:
-                reapply_entity_labels(entity_type, embeddings_dir, clustering_dir, logger)
-            except Exception as e:
-                logger.warning(f"⚠️  Failed to merge duplicates for {entity_type}: {e}")
-
         elapsed = time.time() - start_time
         logger.info(f"🎉 Stage 9c Complete!")
         log_stage_end(logger, "9c", success=True, elapsed_time=elapsed)
