@@ -288,9 +288,12 @@ def create_evaluation_form(service, samples: List[Dict], form_part: int,
     """Create a Google Form with one question per page."""
 
     # Create the basic form
-    title = "Reddit Moderation - Human Evaluation"
+    import time as _time
+    date_str = _time.strftime('%Y-%m-%d')
     if total_forms > 1:
-        title += f" (Part {form_part}/{total_forms})"
+        title = f"Part {form_part}/{total_forms} {date_str} - Reddit Moderation - Human Evaluation"
+    else:
+        title = f"{date_str} - Reddit Moderation - Human Evaluation"
 
     form = {"info": {"title": title}}
     result = service.forms().create(body=form).execute()

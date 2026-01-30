@@ -33,8 +33,8 @@ from pathlib import Path
 from datetime import datetime
 import argparse
 
-# Add parent directory to path
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+# Add parent directory to path (insert at beginning to find root config.py before eval/config.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import PROCESSES
 from plotting_config import create_two_column_figure, save_figure, add_subplot_labels, FIGURE_HEIGHT_SCATTER, TWO_COLUMN_WIDTH
@@ -57,32 +57,30 @@ def rotate_coordinates(coords: np.ndarray, angle_degrees: float) -> np.ndarray:
     return coords @ rotation_matrix.T
 
 
-def load_cluster_distribution(cluster_type: str) -> list:
-    """Load cluster distribution from stage10 stats.
+def load_cluster_distribution(cluster_type: str, embeddings_dir: Path) -> list:
+    """Load cluster distribution from metadata TSV.
 
     Args:
         cluster_type: 'subreddit' or 'rule'
+        embeddings_dir: Path to embeddings directory containing metadata TSV
 
     Returns:
         List of (name, count) tuples sorted by count descending
     """
-    stats_file = Path(PATHS['data']) / 'stage9_cluster_assignment_stats.json'
-    with open(stats_file) as f:
-        data = json.load(f)
+    metadata_file = embeddings_dir / f'all_{cluster_type}_metadata.tsv'
+    metadata = pd.read_csv(metadata_file, sep='\t')
 
-    all_stats = data.get('cluster_assignment_statistics', {})
+    # Count occurrences of each cluster label
+    if 'cluster_label' not in metadata.columns:
+        raise ValueError(f"No 'cluster_label' column in {metadata_file}")
 
-    # Sum counts across all splits
-    total_counts = Counter()
-    for split, stats in all_stats.items():
-        key = f'{cluster_type}_clusters'
-        if key in stats:
-            for label, count in stats[key].items():
-                total_counts[label] += count
+    # Normalize labels: Noise -> other, Other -> other, NaN -> other
+    labels = metadata['cluster_label'].fillna('other').tolist()
+    labels = ['other' if l in ('Noise', 'Other', 'noise') else l for l in labels]
+    total_counts = Counter(labels)
 
-    # Sort by count descending, lowercase "Other" to "other"
+    # Sort by count descending
     sorted_data = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
-    sorted_data = [('other' if l == 'Other' else l, c) for l, c in sorted_data]
 
     return sorted_data
 
@@ -107,11 +105,20 @@ def get_bar_colors(labels: list, color_json_path: Path) -> list:
 
     # Map labels to colors, default gray for "other"
     colors = []
+    missing_labels = []
     for label in labels:
         if label.lower() == 'other':
             colors.append('#DDDDDD')
+        elif label in name_to_color:
+            colors.append(name_to_color[label])
         else:
-            colors.append(name_to_color.get(label, '#DDDDDD'))
+            colors.append('#DDDDDD')
+            missing_labels.append(label)
+
+    if missing_labels:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"  ⚠️ Labels not found in color JSON (using grey): {missing_labels}")
+        logger.debug(f"     Available names in JSON: {list(name_to_color.keys())}")
     return colors
 
 
@@ -141,7 +148,7 @@ def plot_distribution_bars(ax, labels: list, counts: list, colors: list, xlabel:
     ax.spines['left'].set_linewidth(0.25)
     ax.spines['bottom'].set_linewidth(0.25)
     ax.set_xscale('log')
-    ax.set_xlim(left=10, right=10000)
+    ax.set_xlim(left=10, right=1000)
 
 
 def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, logger, cache_dir: Path) -> np.ndarray:
@@ -167,8 +174,12 @@ def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, l
     if cache_file.exists():
         logger.info(f"Loading cached 2D coordinates from {cache_file.name}...")
         coords_2d = np.load(cache_file)
-        logger.info(f"  ✅ Loaded shape {coords_2d.shape}")
-        return coords_2d
+        # Validate cache matches current embeddings
+        if coords_2d.shape[0] != embeddings.shape[0]:
+            logger.warning(f"  ⚠️ Cache mismatch: cached {coords_2d.shape[0]} rows but embeddings have {embeddings.shape[0]} rows. Recomputing...")
+        else:
+            logger.info(f"  ✅ Loaded shape {coords_2d.shape}")
+            return coords_2d
 
     # Compute UMAP
     logger.info(f"Reducing to 2D with UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, n_jobs={PROCESSES})...")
@@ -334,7 +345,8 @@ def main():
     """Main execution function."""
     # Parse arguments
     parser = argparse.ArgumentParser(description='Plot cluster visualizations (two-column ACL format)')
-    parser.add_argument('--rotate', type=float, default=-45, help='Rotation angle in degrees (affects color assignment, default: -45)')
+    parser.add_argument('--rotate-sub', type=float, default=240, help='Rotation angle for subreddit clusters (default: 240)')
+    parser.add_argument('--rotate-rule', type=float, default=310, help='Rotation angle for rule clusters (default: 310)')
     parser.add_argument('--grey-bars', action='store_true', help='Use grey bars instead of cluster colors')
     args = parser.parse_args()
 
@@ -384,11 +396,11 @@ def main():
         sub_umap_params = {'n_neighbors': sub_params['n_neighbors'], 'min_dist': sub_params['min_dist']}
         sub_coords = apply_umap_2d(sub_embeddings, sub_umap_params, 'subreddit', logger, clustering_dir)
         logger.info("Plotting subreddit clusters (top-left)...")
-        plot_cluster_on_axes(ax_sub_scatter, sub_coords, sub_metadata, 'subreddit', clustering_dir, logger, args.rotate)
+        plot_cluster_on_axes(ax_sub_scatter, sub_coords, sub_metadata, 'subreddit', clustering_dir, logger, args.rotate_sub)
 
         # Plot SUBREDDIT distribution bars (top-right)
         logger.info("Plotting subreddit distribution (top-right)...")
-        sub_dist = load_cluster_distribution('subreddit')
+        sub_dist = load_cluster_distribution('subreddit', embeddings_dir)
         sub_labels, sub_counts = zip(*sub_dist)
         if args.grey_bars:
             sub_colors = ['#888888'] * len(sub_labels)
@@ -405,11 +417,11 @@ def main():
         rule_umap_params = {'n_neighbors': rule_params['n_neighbors'], 'min_dist': rule_params['min_dist']}
         rule_coords = apply_umap_2d(rule_embeddings, rule_umap_params, 'rule', logger, clustering_dir)
         logger.info("Plotting rule clusters (bottom-left)...")
-        plot_cluster_on_axes(ax_rule_scatter, rule_coords, rule_metadata, 'rule', clustering_dir, logger, args.rotate)
+        plot_cluster_on_axes(ax_rule_scatter, rule_coords, rule_metadata, 'rule', clustering_dir, logger, args.rotate_rule)
 
         # Plot RULE distribution bars (bottom-right)
         logger.info("Plotting rule distribution (bottom-right)...")
-        rule_dist = load_cluster_distribution('rule')
+        rule_dist = load_cluster_distribution('rule', embeddings_dir)
         rule_labels, rule_counts = zip(*rule_dist)
         if args.grey_bars:
             rule_colors = ['#888888'] * len(rule_labels)
@@ -422,18 +434,11 @@ def main():
         logger.info("Adding subplot labels...")
         # Bar plots use axes transform
         for ax, label in zip([ax_sub_bars, ax_rule_bars], ['c', 'd']):
-            ax.text(0.98, 0.02, f'({label})', transform=ax.transAxes,
+            ax.text(0.98, 0.01, f'({label})', transform=ax.transAxes,
                    fontsize=10, verticalalignment='bottom', horizontalalignment='right')
-        # Scatter plots use axes transform at same position
-        # After bar adjustment (y0 + 0.045, height - 0.05), calculate matching position
-        # Bar plot height after adjustment: 0.5 - 0.05 = 0.45
-        # Bar plot at 2% = 0.45 * 0.02 = 0.009
-        # Scatter plot height: 0.5, so 0.009 / 0.5 = 0.018 (1.8% instead of 2%)
-        # But we need to account for the upward shift of 0.045 in the bar plots
-        # Match the bar plot's absolute position: 0.045 + 0.009 for bottom, 0.545 + 0.009 for top
-        # For scatter: (0.045 + 0.009) / 0.5 = 0.108 for bottom, (0.545 + 0.009 - 0.5) / 0.5 = 0.108 for top
+        # Scatter plots use axes transform (0.098 = 0.108 - 0.01 to match bar plot offset)
         for ax, label in zip([ax_sub_scatter, ax_rule_scatter], ['a', 'b']):
-            ax.text(0.96, 0.108, f'({label})', transform=ax.transAxes,
+            ax.text(0.96, 0.098, f'({label})', transform=ax.transAxes,
                    fontsize=10, verticalalignment='bottom', horizontalalignment='right')
 
         # Save combined figure (no gap between subplots)
