@@ -140,7 +140,7 @@ def build_sampling_pool(dataset: Dict) -> Dict[str, List[Dict]]:
             body_clean = mod_comment.get('body_clean', mod_comment.get('body', ''))
 
             # Get answer options (excluding "No rules broken")
-            answer_options = pair.get('moderated_answer_options', [])
+            answer_options = pair.get('violating_answer_options', [])
             rule_options = [opt['rule'] for opt in answer_options if opt['rule'] != 'No rules broken']
 
             candidate = {

@@ -197,7 +197,7 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
         'unique_rules': set(),  # Track unique (subreddit, rule) pairs
         'unique_rule_clusters': set(),  # Track unique rule cluster IDs
         'unique_subreddit_clusters': set(),  # Track unique subreddit cluster IDs
-        'unique_languages': set(),  # Track unique languages
+        'language_counts': Counter(),  # Track thread pairs per language
         'rule_cluster_distribution': Counter(),
         'subreddit_cluster_distribution': Counter(),
         'subreddit_cluster_pair_distribution': Counter()  # Track pairs by subreddit cluster
@@ -207,10 +207,9 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
         subreddit = sub_data['subreddit'].lower()
         stats['total_subreddits'] += 1
 
-        # Track language (normalized)
+        # Get normalized language for this subreddit
         language = sub_data.get('language', 'unknown')
         normalized_lang = normalize_language(language)
-        stats['unique_languages'].add(normalized_lang)
 
         # Count images from submissions
         for sub_id, submission in sub_data.get('submissions', {}).items():
@@ -232,6 +231,9 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
             # Count comments in both threads
             num_comments = len(pair['violating_thread']) + len(pair['compliant_thread'])
             stats['total_comments'] += num_comments
+
+            # Track language counts (per thread pair)
+            stats['language_counts'][normalized_lang] += 1
 
             # Get the matched rule from metadata
             matched_rule = pair['metadata']['rule']
@@ -323,6 +325,10 @@ def generate_latex_table(all_stats: Dict, overall_totals: Dict) -> str:
     def fmt(n):
         return f"{n:,}"
 
+    # Determine qualifying languages (≥10 instances across all splits)
+    all_language_counts = overall_totals.get('language_counts', {})
+    qualifying_languages = {l for l, c in all_language_counts.items() if c >= 10}
+
     lines = [
         r"\begin{table*}[t]",
         r"  \centering",
@@ -344,8 +350,10 @@ def generate_latex_table(all_stats: Dict, overall_totals: Dict) -> str:
         images = fmt(s['total_images'])
         subs_clusters = f"{fmt(s['total_subreddits'])} / {s['unique_subreddit_clusters']}"
         rules_clusters = f"{fmt(s['unique_rules'])} / {s['unique_rule_clusters']}"
-        languages = str(s['unique_languages'])
-        lines.append(f"  {split_name} & {thread_pairs} & {comments} & {images} & {subs_clusters} & {rules_clusters} & {languages} \\\\")
+        # Count qualifying languages present in this split (at least 1 instance)
+        split_lang_counts = s.get('language_counts', {})
+        languages_in_split = sum(1 for l in qualifying_languages if split_lang_counts.get(l, 0) > 0)
+        lines.append(f"  {split_name} & {thread_pairs} & {comments} & {images} & {subs_clusters} & {rules_clusters} & {languages_in_split} \\\\")
 
     # Add totals row
     lines.append(r"  \midrule")
@@ -438,7 +446,9 @@ def main():
             logger.info(f"    Total comments: {stats['total_comments']}")
             logger.info(f"    Total images: {stats['total_images']}")
             logger.info(f"    Unique rules: {len(stats['unique_rules'])}")
-            logger.info(f"    Unique languages: {len(stats['unique_languages'])} ({', '.join(sorted(stats['unique_languages']))})")
+            langs_with_threshold = [l for l, c in stats['language_counts'].items() if c >= 10]
+            logger.info(f"    Languages (≥10 instances): {len(langs_with_threshold)} ({', '.join(sorted(langs_with_threshold))})")
+            logger.info(f"    Total unique languages: {len(stats['language_counts'])}")
             logger.info(f"    ")
             logger.info(f"    Rule Clusters:")
             logger.info(f"      Pairs with rule clusters: {stats['pairs_with_rule_clusters']}")
@@ -484,8 +494,9 @@ def main():
                 'unique_rules': len(stats['unique_rules']),  # Convert set to count
                 'unique_rule_clusters': len(stats['unique_rule_clusters']),  # Convert set to count
                 'unique_subreddit_clusters': len(stats['unique_subreddit_clusters']),  # Convert set to count
-                'unique_languages': len(stats['unique_languages']),  # Convert set to count
-                'languages': sorted(list(stats['unique_languages'])),  # List of languages
+                'unique_languages': len([l for l, c in stats['language_counts'].items() if c >= 10]),  # Languages with ≥10 instances
+                'languages': sorted([l for l, c in stats['language_counts'].items() if c >= 10]),  # List of languages with ≥10 instances
+                'language_counts': dict(stats['language_counts']),  # Full language counts for reference
                 'pairs_with_rule_clusters': stats['pairs_with_rule_clusters'],
                 'subreddits_with_clusters': stats['subreddits_with_clusters'],
                 'top_10_rule_clusters': dict(stats['rule_cluster_distribution'].most_common(10)),
@@ -518,15 +529,20 @@ def main():
         # Get actual cluster counts from the distributions (more accurate)
         all_rule_clusters = set()
         all_subreddit_clusters = set()
-        all_languages = set()
+        all_language_counts = Counter()
         for s in all_stats.values():
             all_rule_clusters.update(s.get('rule_clusters', {}).keys())
             all_subreddit_clusters.update(s.get('subreddit_clusters', {}).keys())
-            all_languages.update(s.get('languages', []))
+            # Aggregate language counts across all splits
+            for lang, count in s.get('language_counts', {}).items():
+                all_language_counts[lang] += count
         overall_totals['total_rule_clusters'] = len(all_rule_clusters)
         overall_totals['total_subreddit_clusters'] = len(all_subreddit_clusters)
-        overall_totals['total_languages'] = len(all_languages)
-        overall_totals['languages'] = sorted(list(all_languages))
+        # Filter languages to those with ≥10 instances across all splits
+        languages_with_threshold = sorted([l for l, c in all_language_counts.items() if c >= 10])
+        overall_totals['total_languages'] = len(languages_with_threshold)
+        overall_totals['languages'] = languages_with_threshold
+        overall_totals['language_counts'] = dict(all_language_counts)  # Full counts for reference
 
         summary_stats = {
             'metadata': {

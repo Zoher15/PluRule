@@ -106,7 +106,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--cuda',
         type=str,
-        default='0',
+        default='1',
         help='CUDA device IDs for vLLM (e.g., "0,1")'
     )
 
