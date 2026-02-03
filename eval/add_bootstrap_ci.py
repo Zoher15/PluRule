@@ -25,7 +25,7 @@ import numpy as np
 from datetime import datetime
 
 # Set CUDA device before importing cupy
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 import cupy as cp
 
@@ -234,8 +234,10 @@ def save_bootstrap_indices(indices: np.ndarray, path: Path,
         n_samples=test_data['n_samples'],
         rule_cluster_ids=test_data['rule_cluster_ids'],
         subreddit_cluster_ids=test_data['subreddit_cluster_ids'],
+        language_ids=test_data['language_ids'],
         rule_cluster_names=np.array(test_data['rule_cluster_names'], dtype=object),
         subreddit_cluster_names=np.array(test_data['subreddit_cluster_names'], dtype=object),
+        language_names=np.array(test_data['language_names'], dtype=object),
         mod_comment_ids=np.array(test_data['mod_comment_ids'], dtype=object),
         seed=42,
         created=datetime.now().isoformat()
@@ -251,8 +253,10 @@ def load_bootstrap_indices(path: Path) -> Tuple[np.ndarray, Dict[str, Any]]:
         'n_samples': int(data['n_samples']),
         'rule_cluster_ids': data['rule_cluster_ids'],
         'subreddit_cluster_ids': data['subreddit_cluster_ids'],
+        'language_ids': data['language_ids'],
         'rule_cluster_names': list(data['rule_cluster_names']),
         'subreddit_cluster_names': list(data['subreddit_cluster_names']),
+        'language_names': list(data['language_names']),
         'mod_comment_ids': list(data['mod_comment_ids'])
     }
 

@@ -28,6 +28,21 @@ import config
 # UTILITY FUNCTIONS
 # =============================================================================
 
+def _normalize_language(lang_code: str) -> str:
+    """
+    Normalize language code by taking root (e.g., en-au → en, pt_BR → pt).
+
+    Args:
+        lang_code: Language code (e.g., 'en-au', 'pt_BR', 'en')
+
+    Returns:
+        Normalized language code (root only)
+    """
+    if not lang_code:
+        return 'unknown'
+    return lang_code.replace('_', '-').split('-')[0]
+
+
 def _format_timestamp(created_utc) -> str:
     """Format Unix timestamp to human-readable date string."""
     # Handle both int and string timestamps
@@ -275,6 +290,7 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
         subreddit_cluster_label = subreddit_data.get('subreddit_cluster_label', 'Other')
         subreddit_title = subreddit_data.get('title', '')
         subreddit_description = subreddit_data.get('description', '')
+        subreddit_language = _normalize_language(subreddit_data.get('language', 'unknown'))
 
         for pair in subreddit_data['thread_pairs']:
             # Get submission data
@@ -287,6 +303,7 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
                 'subreddit_description': subreddit_description,
                 'subreddit_cluster_id': subreddit_cluster_id,
                 'subreddit_cluster_label': subreddit_cluster_label,
+                'subreddit_language': subreddit_language,
                 'mod_comment_id': pair['mod_comment_id'],
                 'submission_id': submission_id,
                 'submission': submission_data,
@@ -1079,7 +1096,8 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
                 'rule_cluster_id': pair['metadata']['rule_cluster_id'],
                 'rule_cluster_label': pair['metadata']['rule_cluster_label'],
                 'subreddit_cluster_id': pair['subreddit_cluster_id'],
-                'subreddit_cluster_label': pair['subreddit_cluster_label']
+                'subreddit_cluster_label': pair['subreddit_cluster_label'],
+                'subreddit_language': pair.get('subreddit_language', 'unknown')
             }
         }
         results.append(result)
@@ -1373,7 +1391,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                 'rule_cluster_id': pair['metadata']['rule_cluster_id'],
                 'rule_cluster_label': pair['metadata']['rule_cluster_label'],
                 'subreddit_cluster_id': pair['subreddit_cluster_id'],
-                'subreddit_cluster_label': pair['subreddit_cluster_label']
+                'subreddit_cluster_label': pair['subreddit_cluster_label'],
+                'subreddit_language': pair.get('subreddit_language', 'unknown')
             }
         }
         results.append(result)
@@ -1455,6 +1474,12 @@ def calculate_metrics(results: List[Dict[str, Any]], logger: logging.Logger) -> 
         cluster_key='subreddit_cluster_label'
     )
 
+    # Per-language accuracy
+    language_stats = _calculate_cluster_accuracy(
+        results,
+        cluster_key='subreddit_language'
+    )
+
     metrics = {
         'overall': {
             'total_pairs': total_pairs,
@@ -1467,7 +1492,8 @@ def calculate_metrics(results: List[Dict[str, Any]], logger: logging.Logger) -> 
             'total_correct': total_correct
         },
         'per_rule_cluster': rule_cluster_stats,
-        'per_subreddit_cluster': subreddit_cluster_stats
+        'per_subreddit_cluster': subreddit_cluster_stats,
+        'per_language': language_stats
     }
 
     logger.info(f"📊 Metrics calculated - Overall: {overall_accuracy:.4f}, Violating: {violating_accuracy:.4f}, Compliant: {compliant_accuracy:.4f}")

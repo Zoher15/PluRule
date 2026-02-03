@@ -8,9 +8,9 @@ Generates consistent two-column figures with:
 - Shared y-axis, no titles, (a)(b) labels only
 
 Usage:
-    python plot_subreddit_rule_bars.py distribution
-    python plot_subreddit_rule_bars.py cluster-analysis --model qwen3-vl-30b --split test --metric overall_accuracy
-    python plot_subreddit_rule_bars.py drilldown --model gpt5.2-high --rule-cluster civility
+    python plot_subreddit_rule_bars.py cluster-forest --model gpt5.2-high --split test --metric overall_accuracy
+    python plot_subreddit_rule_bars.py cluster-stacked --model gpt5.2-high --split test
+    python plot_subreddit_rule_bars.py language-analysis --model gpt5.2-high
 """
 
 import sys
@@ -19,7 +19,6 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
-from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -98,89 +97,6 @@ def load_language_distribution(use_cache: bool = True) -> list:
     print(f"  Saved cache to: {cache_file.name}")
 
     return sorted_data
-
-
-def plot_two_column_bars(ax_left, ax_right, sub_labels, sub_values, rule_labels, rule_values, xlabel, bar_values=None, show_baseline=False, log_scale=False, ci_errors=None):
-    """Standardized two-column horizontal bar plot.
-
-    Args:
-        ci_errors: Optional tuple of (sub_ci_errors, rule_ci_errors) where each is
-                   a 2xN array with [lower_errors, upper_errors] for error bars.
-    """
-    y_sub = np.arange(len(sub_labels))
-    y_rule = np.arange(len(rule_labels))
-
-    # LEFT: Subreddit (Orange Red) - horizontal bars
-    ax_left.barh(y_sub, sub_values, height=0.8, color='#FF4500', edgecolor='none')
-    ax_left.set_xlabel(xlabel, fontsize=8)
-    ax_left.set_yticks(y_sub)
-    ax_left.set_yticklabels(sub_labels, fontsize=7)
-    ax_left.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
-    ax_left.tick_params(axis='y', pad=0.5, length=3, width=0.25)
-    ax_left.grid(axis='x', alpha=0.2, linestyle='--', linewidth=1.0)
-    ax_left.set_ylim(-0.45, len(sub_labels) - 0.2)
-    ax_left.invert_yaxis()  # Highest values at top
-    ax_left.spines['top'].set_visible(False)
-    ax_left.spines['right'].set_visible(False)
-    ax_left.spines['left'].set_linewidth(0.25)
-    ax_left.spines['bottom'].set_linewidth(0.25)
-    if log_scale:
-        ax_left.set_xscale('log')
-        ax_left.set_xlim(left=10, right=10000)
-    elif show_baseline:
-        ax_left.set_xlim(left=25, right=70)
-    else:
-        ax_left.set_xlim(left=10)
-
-    # RIGHT: Rule (Lapis Lazuli) - horizontal bars
-    ax_right.barh(y_rule, rule_values, height=0.8, color='#336699', edgecolor='none')
-    ax_right.set_xlabel(xlabel, fontsize=8)
-    ax_right.set_yticks(y_rule)
-    ax_right.set_yticklabels(rule_labels, fontsize=7)
-    ax_right.tick_params(axis='x', labelsize=7, pad=0.5, length=3, width=0.25)
-    ax_right.tick_params(axis='y', pad=0.5, length=3, width=0.25)
-    ax_right.grid(axis='x', alpha=0.2, linestyle='--', linewidth=1.0)
-    ax_right.set_ylim(-0.45, len(rule_labels) - 0.2)
-    ax_right.invert_yaxis()  # Highest values at top
-    ax_right.spines['top'].set_visible(False)
-    ax_right.spines['right'].set_visible(False)
-    ax_right.spines['left'].set_linewidth(0.25)
-    ax_right.spines['bottom'].set_linewidth(0.25)
-    if log_scale:
-        ax_right.set_xscale('log')
-        ax_right.set_xlim(left=10, right=10000)
-    elif show_baseline:
-        ax_right.set_xlim(left=25, right=70)
-    else:
-        ax_right.set_xlim(left=10)
-
-    # Add baseline if needed
-    if show_baseline:
-        for ax in [ax_left, ax_right]:
-            ax.axvline(x=50, color='lightgray', linestyle='--', alpha=0.9, linewidth=1)
-
-    # Add CI error bars if provided
-    if ci_errors is not None:
-        sub_ci, rule_ci = ci_errors
-        if sub_ci is not None:
-            ax_left.errorbar(sub_values, y_sub, xerr=sub_ci, fmt='none',
-                           ecolor='black', elinewidth=0.5, capsize=1.5, capthick=0.5)
-        if rule_ci is not None:
-            ax_right.errorbar(rule_values, y_rule, xerr=rule_ci, fmt='none',
-                            ecolor='black', elinewidth=0.5, capsize=1.5, capthick=0.5)
-
-    # Add value labels inside bars
-    if bar_values:
-        sub_bar_values, rule_bar_values = bar_values
-        for ax, values in [(ax_left, sub_bar_values), (ax_right, rule_bar_values)]:
-            for bar, val in zip(ax.patches, values):
-                ax.text(bar.get_width() - 0.5, bar.get_y() + bar.get_height()/2.,
-                       f'{val:.0f}', ha='right', va='center', fontsize=5, color='white')
-
-    # Labels in bottom right corner (no bold)
-    for ax, label in zip([ax_left, ax_right], ['a', 'b']):
-        ax.text(0.98, 0.02, f'({label})', transform=ax.transAxes,
-               fontsize=10, verticalalignment='bottom', horizontalalignment='right')
 
 
 def plot_two_column_forest(ax_left, ax_right, sub_labels, sub_values, sub_cis,
@@ -319,103 +235,6 @@ def plot_two_column_stacked(ax_left, ax_right, sub_labels, sub_mod, sub_overall,
     for ax, label in zip([ax_left, ax_right], ['a', 'b']):
         ax.text(0.98, 0.02, f'({label})', transform=ax.transAxes,
                fontsize=10, verticalalignment='bottom', horizontalalignment='right')
-
-
-def plot_distribution():
-    """Plot cluster distribution from stage10 stats."""
-    stats_file = Path(PATHS['data']) / 'stage9_cluster_assignment_stats.json'
-    if not stats_file.exists():
-        print(f"❌ Stats file not found: {stats_file}")
-        return 1
-
-    with open(stats_file) as f:
-        data = json.load(f)
-    all_stats = data.get('cluster_assignment_statistics', {})
-
-    # Extract distributions
-    for cluster_type in ['subreddit', 'rule']:
-        total_counts = Counter()
-        for split, stats in all_stats.items():
-            key = f'{cluster_type}_clusters'
-            if key in stats:
-                for label, count in stats[key].items():
-                    total_counts[label] += count
-
-        sorted_data = sorted(total_counts.items(), key=lambda x: x[1], reverse=True)
-        sorted_data = [('other' if l.lower() == 'other' else l, c) for l, c in sorted_data]
-
-        if cluster_type == 'subreddit':
-            sub_labels, sub_counts = zip(*sorted_data)
-        else:
-            rule_labels, rule_counts = zip(*sorted_data)
-
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
-    plot_two_column_bars(ax_left, ax_right, sub_labels, sub_counts, rule_labels, rule_counts,
-                         'Number of Thread Pairs', log_scale=True)
-
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.99, bottom=0.11, wspace=0.30)
-    save_figure(fig, Path(PATHS['data']) / 'stage9_cluster_distribution', dpi=PUBLICATION_DPI, bbox_inches=None)
-    plt.close(fig)
-    print("✅ Distribution plot saved")
-    return 0
-
-
-def plot_cluster_analysis(model, split, context, metric, phrase='baseline', mode='prefill'):
-    """Plot accuracy by cluster from evaluation results using bar plots."""
-    eval_dir = Path(PATHS['data']).parent / 'output' / 'eval'
-    perf_dir = eval_dir / model / split / context / ('baseline' if phrase == 'baseline' else f'{phrase}_{mode}')
-
-    try:
-        perf_file = get_latest_performance_file(perf_dir)
-    except FileNotFoundError as e:
-        print(f"❌ {e}")
-        return 1
-
-    with open(perf_file) as f:
-        data = json.load(f)
-
-    # Extract metrics
-    for cluster_type in ['subreddit', 'rule']:
-        clusters = data['metrics'][f'per_{cluster_type}_cluster']
-        # Extract (name, accuracy, count) tuples
-        cluster_data = []
-        for name, info in clusters.items():
-            if metric in info:
-                acc = info[metric] * 100
-                count = info.get('count', 0)
-                cluster_data.append((name, acc, count))
-
-        sorted_data = sorted(cluster_data, key=lambda x: x[1], reverse=True)
-        # Lowercase "Other" to "other" for consistency
-        sorted_data = [('other' if n.lower() == 'other' else n, a, c) for n, a, c in sorted_data]
-
-        if cluster_type == 'subreddit':
-            if sorted_data:
-                sub_labels, sub_accs, _ = zip(*sorted_data)
-            else:
-                sub_labels, sub_accs = [], []
-        else:
-            if sorted_data:
-                rule_labels, rule_accs, _ = zip(*sorted_data)
-            else:
-                rule_labels, rule_accs = [], []
-
-    if not (sub_labels and rule_labels):
-        print(f"❌ No cluster metrics found")
-        return 1
-
-    fig, (ax_left, ax_right) = create_two_column_figure(plot_type='barplot')
-    plot_two_column_bars(ax_left, ax_right, sub_labels, sub_accs, rule_labels, rule_accs,
-                         'Accuracy (%)', bar_values=(sub_accs, rule_accs), show_baseline=True)
-
-    fig.subplots_adjust(left=0.13, right=0.98, top=0.99, bottom=0.11, wspace=0.28)
-    filename = f"cluster_analysis_{model}_{split}_{context}_{phrase if phrase=='baseline' else f'{phrase}_{mode}'}_{metric}"
-    plots_dir = eval_dir / 'plots'
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    save_figure(fig, plots_dir / filename, dpi=PUBLICATION_DPI, bbox_inches=None)
-    plt.close(fig)
-    print("✅ Cluster analysis plot saved")
-    return 0
 
 
 def plot_cluster_forest(model, split, context, metric, phrase='baseline', mode='prefill'):
@@ -702,7 +521,7 @@ def plot_language_diverging(model='gpt5.2-high'):
 
 def main():
     parser = argparse.ArgumentParser(description='Generate paper figures (subreddit vs rule bars)')
-    parser.add_argument('type', choices=['distribution', 'cluster-analysis', 'cluster-forest', 'cluster-stacked', 'language-analysis'], help='Plot type')
+    parser.add_argument('type', choices=['cluster-forest', 'cluster-stacked', 'language-analysis'], help='Plot type')
     parser.add_argument('--model', default='gpt5.2-high', help='Model name')
     parser.add_argument('--split', default='test', help='Dataset split')
     parser.add_argument('--context', default='submission-media-discussion-user', help='Context')
@@ -711,16 +530,12 @@ def main():
     parser.add_argument('--mode', default='prefill', help='Mode')
     args = parser.parse_args()
 
-    if args.type == 'distribution':
-        return plot_distribution()
-    elif args.type == 'cluster-forest':
+    if args.type == 'cluster-forest':
         return plot_cluster_forest(args.model, args.split, args.context, args.metric, args.phrase, args.mode)
     elif args.type == 'cluster-stacked':
         return plot_cluster_stacked(args.model, args.split, args.context, args.phrase, args.mode)
     elif args.type == 'language-analysis':
         return plot_language_diverging(args.model)
-    else:
-        return plot_cluster_analysis(args.model, args.split, args.context, args.metric, args.phrase, args.mode)
 
 
 if __name__ == '__main__':
