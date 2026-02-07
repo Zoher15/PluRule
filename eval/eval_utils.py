@@ -141,30 +141,37 @@ def extract_three_metrics(perf_data: dict, cluster_type: str) -> list:
 
 
 def load_cluster_size_stats(split: str = 'all', cluster_type: str = 'rule') -> dict:
-    """Load cached cluster size statistics.
+    """Load cluster size statistics from Stage 10 stats.
 
     Args:
         split: Dataset split (train/val/test/all)
         cluster_type: 'rule' or 'subreddit'
 
     Returns:
-        Dictionary with cluster stats
+        Dictionary with 'cluster_stats' key mapping cluster labels to
+        {n_subreddits, n_rules, n_thread_pairs}.
 
     Raises:
-        FileNotFoundError: If cache file doesn't exist
+        FileNotFoundError: If stage10 stats file doesn't exist
     """
     data_dir = Path(__file__).resolve().parent.parent / 'data'
-    cache_file = data_dir / f'{cluster_type}_cluster_size_stats_{split}.json'
+    stats_file = data_dir / 'stage10_cluster_assignment_stats.json'
 
-    if not cache_file.exists():
+    if not stats_file.exists():
         raise FileNotFoundError(
-            f"Cluster size stats cache not found: {cache_file}\n"
-            f"Please run: python eval/compute_cluster_size_stats.py --cluster-type {cluster_type}"
-            + (f" --split {split}" if split != 'all' else "")
+            f"Stage 10 stats not found: {stats_file}\n"
+            f"Please run: python pipeline/10_assign_cluster_labels.py"
         )
 
-    with open(cache_file) as f:
-        return json.load(f)
+    with open(stats_file) as f:
+        stage10_data = json.load(f)
+
+    if split == 'all':
+        cluster_stats = stage10_data['overall_totals']['cluster_size_stats'][cluster_type]
+    else:
+        cluster_stats = stage10_data['cluster_assignment_statistics'][split]['cluster_size_stats'][cluster_type]
+
+    return {'cluster_stats': cluster_stats}
 
 
 def find_performance_file_by_parts(model_base: str, variant: str,

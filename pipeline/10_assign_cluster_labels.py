@@ -35,7 +35,7 @@ import time
 import json
 import pandas as pd
 from typing import Dict, Tuple
-from collections import Counter
+from collections import Counter, defaultdict
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -200,7 +200,11 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
         'language_counts': Counter(),  # Track thread pairs per language
         'rule_cluster_distribution': Counter(),
         'subreddit_cluster_distribution': Counter(),
-        'subreddit_cluster_pair_distribution': Counter()  # Track pairs by subreddit cluster
+        'subreddit_cluster_pair_distribution': Counter(),  # Track pairs by subreddit cluster
+        'rule_cluster_subreddits': defaultdict(set),
+        'rule_cluster_rules': defaultdict(set),
+        'subreddit_cluster_subreddits': defaultdict(set),
+        'subreddit_cluster_rules': defaultdict(set),
     }
 
     for sub_data in dataset['subreddits']:
@@ -252,9 +256,13 @@ def assign_clusters_to_dataset(dataset: Dict, rule_mapping: Dict[Tuple[str, str]
             stats['pairs_with_rule_clusters'] += 1
             stats['rule_cluster_distribution'][cluster_info['cluster_label']] += 1
             stats['unique_rule_clusters'].add(cluster_info['cluster_id'])
+            stats['rule_cluster_subreddits'][cluster_info['cluster_label']].add(subreddit)
+            stats['rule_cluster_rules'][cluster_info['cluster_label']].add((subreddit, matched_rule))
 
             # Track thread pairs by subreddit cluster label
             stats['subreddit_cluster_pair_distribution'][subreddit_cluster_info['cluster_label']] += 1
+            stats['subreddit_cluster_subreddits'][subreddit_cluster_info['cluster_label']].add(subreddit)
+            stats['subreddit_cluster_rules'][subreddit_cluster_info['cluster_label']].add((subreddit, matched_rule))
 
     return dataset, stats
 
@@ -416,6 +424,10 @@ def main():
         splits = ['test', 'val', 'train']
         all_stats = {}
         output_files = {}
+        global_rule_cluster_subreddits = defaultdict(set)
+        global_rule_cluster_rules = defaultdict(set)
+        global_subreddit_cluster_subreddits = defaultdict(set)
+        global_subreddit_cluster_rules = defaultdict(set)
 
         for split in splits:
             logger.info(f"\n{'='*80}")
@@ -434,6 +446,16 @@ def main():
             # Assign clusters
             logger.info(f"  Assigning cluster labels to {split} dataset...")
             updated_dataset, stats = assign_clusters_to_dataset(dataset, rule_mapping, subreddit_mapping, logger)
+
+            # Union per-split cluster size sets into globals
+            for label, subs in stats['rule_cluster_subreddits'].items():
+                global_rule_cluster_subreddits[label].update(subs)
+            for label, rules in stats['rule_cluster_rules'].items():
+                global_rule_cluster_rules[label].update(rules)
+            for label, subs in stats['subreddit_cluster_subreddits'].items():
+                global_subreddit_cluster_subreddits[label].update(subs)
+            for label, rules in stats['subreddit_cluster_rules'].items():
+                global_subreddit_cluster_rules[label].update(rules)
 
             # Update metadata version
             updated_dataset['metadata']['version'] = '1.1'
@@ -502,7 +524,25 @@ def main():
                 'top_10_rule_clusters': dict(stats['rule_cluster_distribution'].most_common(10)),
                 'rule_clusters': dict(stats['rule_cluster_distribution']),  # Save all clusters for plotting
                 'top_10_subreddit_clusters': dict(stats['subreddit_cluster_distribution'].most_common(10)),
-                'subreddit_clusters': dict(stats['subreddit_cluster_pair_distribution'])  # Save for plotting (by thread pairs)
+                'subreddit_clusters': dict(stats['subreddit_cluster_pair_distribution']),  # Save for plotting (by thread pairs)
+                'cluster_size_stats': {
+                    'rule': {
+                        label: {
+                            'n_subreddits': len(stats['rule_cluster_subreddits'][label]),
+                            'n_rules': len(stats['rule_cluster_rules'][label]),
+                            'n_thread_pairs': stats['rule_cluster_distribution'][label],
+                        }
+                        for label in stats['rule_cluster_distribution']
+                    },
+                    'subreddit': {
+                        label: {
+                            'n_subreddits': len(stats['subreddit_cluster_subreddits'][label]),
+                            'n_rules': len(stats['subreddit_cluster_rules'][label]),
+                            'n_thread_pairs': stats['subreddit_cluster_pair_distribution'][label],
+                        }
+                        for label in stats['subreddit_cluster_pair_distribution']
+                    },
+                },
             }
 
         # Save overall statistics
@@ -530,12 +570,19 @@ def main():
         all_rule_clusters = set()
         all_subreddit_clusters = set()
         all_language_counts = Counter()
+        all_rule_pair_counts = Counter()
+        all_subreddit_pair_counts = Counter()
         for s in all_stats.values():
             all_rule_clusters.update(s.get('rule_clusters', {}).keys())
             all_subreddit_clusters.update(s.get('subreddit_clusters', {}).keys())
             # Aggregate language counts across all splits
             for lang, count in s.get('language_counts', {}).items():
                 all_language_counts[lang] += count
+            # Aggregate pair counts across all splits
+            for label, count in s.get('rule_clusters', {}).items():
+                all_rule_pair_counts[label] += count
+            for label, count in s.get('subreddit_clusters', {}).items():
+                all_subreddit_pair_counts[label] += count
         overall_totals['total_rule_clusters'] = len(all_rule_clusters)
         overall_totals['total_subreddit_clusters'] = len(all_subreddit_clusters)
         # Filter languages to those with ≥10 instances across all splits
@@ -543,6 +590,24 @@ def main():
         overall_totals['total_languages'] = len(languages_with_threshold)
         overall_totals['languages'] = languages_with_threshold
         overall_totals['language_counts'] = dict(all_language_counts)  # Full counts for reference
+        overall_totals['cluster_size_stats'] = {
+            'rule': {
+                label: {
+                    'n_subreddits': len(global_rule_cluster_subreddits[label]),
+                    'n_rules': len(global_rule_cluster_rules[label]),
+                    'n_thread_pairs': all_rule_pair_counts[label],
+                }
+                for label in all_rule_pair_counts
+            },
+            'subreddit': {
+                label: {
+                    'n_subreddits': len(global_subreddit_cluster_subreddits[label]),
+                    'n_rules': len(global_subreddit_cluster_rules[label]),
+                    'n_thread_pairs': all_subreddit_pair_counts[label],
+                }
+                for label in all_subreddit_pair_counts
+            },
+        }
 
         summary_stats = {
             'metadata': {

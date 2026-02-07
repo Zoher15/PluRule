@@ -22,7 +22,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import stats
-from collections import Counter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -190,7 +189,7 @@ def plot_stacked(model, split, context, phrase='baseline', mode='prefill'):
 
 def plot_correlation(model, split, context, metric='overall_accuracy',
                      phrase='baseline', mode='prefill',
-                     show_regression=False, cluster_split='all', cluster_type='rule'):
+                     show_regression=True, cluster_split='all', cluster_type='rule'):
     """Correlation scatter plots: accuracy vs. cluster size metrics."""
     from adjustText import adjust_text
 
@@ -328,46 +327,22 @@ LANGUAGE_NAMES = {
 }
 
 
-def _load_language_distribution(use_cache=True):
-    """Load language distribution from hydrated datasets across all splits."""
-    import zstandard as zstd
-
+def _load_language_distribution():
+    """Load language distribution from Stage 10 stats."""
     data_dir = Path(__file__).resolve().parent.parent / 'data'
-    cache_file = data_dir / 'language_distribution_stats.json'
+    stats_file = data_dir / 'stage10_cluster_assignment_stats.json'
 
-    if use_cache and cache_file.exists():
-        print(f"  Loading from cache: {cache_file.name}")
-        with open(cache_file) as f:
-            cached_data = json.load(f)
-        return [(lang, count) for lang, count in cached_data['language_distribution']]
+    if not stats_file.exists():
+        raise FileNotFoundError(
+            f"Stage 10 stats not found: {stats_file}\n"
+            f"Please run: python pipeline/10_assign_cluster_labels.py"
+        )
 
-    print("  Computing language distribution from datasets...")
-    language_counts = Counter()
+    with open(stats_file) as f:
+        stage10_data = json.load(f)
 
-    for split in ['train', 'val', 'test']:
-        dataset_file = data_dir / f'{split}_hydrated_clustered.json.zst'
-        with open(dataset_file, 'rb') as f:
-            dctx = zstd.ZstdDecompressor()
-            with dctx.stream_reader(f) as reader:
-                dataset = json.loads(reader.read())
-
-        for sub_data in dataset['subreddits']:
-            language = sub_data.get('language', 'unknown')
-            normalized_lang = language.replace('_', '-').split('-')[0]
-            n_pairs = len(sub_data['thread_pairs'])
-            language_counts[normalized_lang] += n_pairs
-
+    language_counts = stage10_data['overall_totals']['language_counts']
     sorted_data = sorted(language_counts.items(), key=lambda x: x[1], reverse=True)
-
-    cache_data = {
-        'language_distribution': sorted_data,
-        'total_pairs': sum(language_counts.values()),
-        'n_languages': len(language_counts)
-    }
-    with open(cache_file, 'w') as f:
-        json.dump(cache_data, f, indent=2)
-    print(f"  Saved cache to: {cache_file.name}")
-
     return sorted_data
 
 
@@ -501,7 +476,7 @@ def main():
     p_corr.add_argument('--metric', default='overall_accuracy', help='Accuracy metric')
     p_corr.add_argument('--cluster-split', default='all', help='Split for cluster sizes')
     p_corr.add_argument('--cluster-type', default='rule', choices=['rule', 'subreddit'])
-    p_corr.add_argument('--show-regression', action='store_true')
+    p_corr.add_argument('--no-regression', action='store_true', help='Disable regression line')
 
     # language
     p_lang = subparsers.add_parser('language', help='Language analysis diverging plot')
@@ -521,7 +496,7 @@ def main():
     elif args.command == 'correlation':
         return plot_correlation(args.model, args.split, args.context, args.metric,
                                 args.phrase, args.mode,
-                                show_regression=args.show_regression,
+                                show_regression=not args.no_regression,
                                 cluster_split=args.cluster_split,
                                 cluster_type=args.cluster_type)
     elif args.command == 'language':
