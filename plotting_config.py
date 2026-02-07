@@ -207,3 +207,39 @@ def add_subplot_labels(axes, labels=None, loc='upper left', fontweight='normal',
         ax.text(0.02, 0.98, f'({label})', transform=ax.transAxes,
                fontsize=fontsize, fontweight=fontweight,
                verticalalignment='top', horizontalalignment='left')
+
+
+def style_clean_axis(ax, grid_axis='x', hide_top=True, hide_right=True,
+                     tick_labelsize=7, tick_pad=0.5, tick_length=3, spine_width=0.25,
+                     grid_alpha=0.2, grid_style='--', grid_width=0.5):
+    """Apply standard clean axis styling used across all evaluation plots.
+
+    Removes top/right spines, sets thin remaining spines, configures ticks and grid.
+
+    Args:
+        ax: Matplotlib axes
+        grid_axis: Axis for grid lines ('x', 'y', 'both', or None to disable)
+        hide_top: Hide top spine
+        hide_right: Hide right spine
+        tick_labelsize: Font size for tick labels
+        tick_pad: Padding between tick and label
+        tick_length: Tick mark length
+        spine_width: Width of visible spines
+        grid_alpha: Grid line transparency
+        grid_style: Grid line style
+        grid_width: Grid line width
+    """
+    if hide_top:
+        ax.spines['top'].set_visible(False)
+    if hide_right:
+        ax.spines['right'].set_visible(False)
+    for spine in ['left', 'bottom']:
+        if ax.spines[spine].get_visible():
+            ax.spines[spine].set_linewidth(spine_width)
+    ax.tick_params(axis='x', labelsize=tick_labelsize, pad=tick_pad,
+                   length=tick_length, width=spine_width)
+    ax.tick_params(axis='y', labelsize=tick_labelsize, pad=tick_pad,
+                   length=tick_length, width=spine_width)
+    if grid_axis:
+        ax.grid(axis=grid_axis, alpha=grid_alpha, linestyle=grid_style,
+                linewidth=grid_width)
