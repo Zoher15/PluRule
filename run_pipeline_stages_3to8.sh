@@ -1,46 +1,46 @@
 #!/bin/bash
 # Pipeline stages 3-8: Rule matching, comment collection, tree building, submission collection, media collection, and dataset creation
 
-set -e  # Exit on any error
+# set -e  # Exit on any error
 
-echo "=================================="
-echo "Running Pipeline Stages 3-8"
-echo "=================================="
-echo ""
+# echo "=================================="
+# echo "Running Pipeline Stages 3-8"
+# echo "=================================="
+# echo ""
 
-echo "Stage 3: Matching rules (phase 2 only)..."
-python pipeline/3_match_rules.py --phase2-only
-echo "Stage 3 complete"
-echo ""
+# echo "Stage 3: Matching rules (phase 2 only)..."
+# python pipeline/3_match_rules.py --phase2-only
+# echo "Stage 3 complete"
+# echo ""
 
-echo "Stage 4: Collecting submission comments..."
-python pipeline/4_collect_submission_comments.py
-echo "Stage 4 complete"
-echo ""
+# echo "Stage 4: Collecting submission comments..."
+# python pipeline/4_collect_submission_comments.py
+# echo "Stage 4 complete"
+# echo ""
 
-echo "Stage 5: Building trees and threads..."
-python pipeline/5_build_trees_and_threads.py
-echo "Stage 5 complete"
-echo ""
+# echo "Stage 5: Building trees and threads..."
+# python pipeline/5_build_trees_and_threads.py
+# echo "Stage 5 complete"
+# echo ""
 
-echo "Stage 6: Collecting submissions..."
-python pipeline/6_collect_submissions.py
-echo "Stage 6 complete"
-echo ""
+# echo "Stage 6: Collecting submissions..."
+# python pipeline/6_collect_submissions.py
+# echo "Stage 6 complete"
+# echo ""
 
-echo "Stage 7: Collecting media..."
-python pipeline/7_collect_media.py
-echo "Stage 7 complete"
-echo ""
+# echo "Stage 7: Collecting media..."
+# python pipeline/7_collect_media.py
+# echo "Stage 7 complete"
+# echo ""
 
-echo "Stage 8: Creating final datasets..."
-python pipeline/8_create_dehydrated_dataset.py
-echo "Stage 8 complete"
-echo ""
+# echo "Stage 8: Creating final datasets..."
+# python pipeline/8_create_dehydrated_dataset.py
+# echo "Stage 8 complete"
+# echo ""
 
-echo "=================================="
-echo "Pipeline stages 3-8 completed successfully!"
-echo "=================================="
+# echo "=================================="
+# echo "Pipeline stages 3-8 completed successfully!"
+# echo "=================================="
 
 
 # Full Analysis Pipeline: Embed -> Cluster -> Label -> Plot

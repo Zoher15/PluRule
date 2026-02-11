@@ -361,7 +361,22 @@ def main():
         logger.info("🚀 Phase 2: Loading similarity matrices and computing global thresholds...")
 
         output_dir = PATHS.get('matched_comments')
-        matrix_files = glob.glob(os.path.join(output_dir, '*_similarity_matrix.pt'))
+
+        # Pre-cleanup: Remove stale match files from previous runs
+        # This prevents downstream stages from consuming outdated data
+        old_match_files = glob.glob(os.path.join(output_dir, '*_match.jsonl.zst'))
+        if old_match_files:
+            logger.info(f"🧹 Pre-cleanup: Removing {len(old_match_files)} existing match files from previous runs...")
+            for old_file in old_match_files:
+                os.remove(old_file)
+            logger.info(f"🧹 Removed {len(old_match_files)} stale match files")
+
+        # Only process similarity matrices for subreddits in the current Stage 2 manifest
+        matrix_files = []
+        for subreddit_name in subreddit_names:
+            matrix_path = os.path.join(output_dir, f'{subreddit_name}_similarity_matrix.pt')
+            if os.path.exists(matrix_path):
+                matrix_files.append(matrix_path)
         logger.info(f"Found {len(matrix_files)} similarity matrices")
 
         # Load all matrices

@@ -779,11 +779,27 @@ def main():
             log_stage_end(logger, 5, success=False, elapsed_time=time.time() - start_time)
             return 1
 
-        # Find subreddits with required input files
+        # Load Stage 3 manifest to determine which subreddits have valid matches
+        stage3_summary_file = os.path.join(PATHS['data'], 'stage3_matching_summary.json')
+        stage3_manifest_subreddits = set()
+        if os.path.exists(stage3_summary_file):
+            stage3_summary = read_json_file(stage3_summary_file)
+            for stats in stage3_summary.get('subreddit_stats', []):
+                if stats.get('matched_comments', 0) > 0:
+                    stage3_manifest_subreddits.add(stats['subreddit'])
+            logger.info(f"📋 Stage 3 manifest: {len(stage3_manifest_subreddits)} subreddits with matches")
+        else:
+            logger.warning("⚠️  Stage 3 summary not found, falling back to file existence checks")
+
+        # Find subreddits with required input files, using manifest when available
         subreddits_to_process = []
         for subreddit in subreddit_languages.keys():
             submission_comments_dir = os.path.join(PATHS['organized_comments'], subreddit)
             match_file = os.path.join(PATHS['matched_comments'], f"{subreddit}_match.jsonl.zst")
+
+            # Use manifest to validate: subreddit must be in Stage 3 manifest (if available)
+            if stage3_manifest_subreddits and subreddit not in stage3_manifest_subreddits:
+                continue
 
             if os.path.exists(submission_comments_dir) and os.path.isdir(submission_comments_dir) and os.path.exists(match_file):
                 subreddits_to_process.append((subreddit, subreddit_rules.get(subreddit, {})))
@@ -794,6 +810,20 @@ def main():
             return 1
 
         logger.info(f"Found {len(subreddits_to_process)} subreddits to process")
+
+        # Pre-cleanup: Remove stale tree/thread files not in current processing set
+        subreddits_to_process_names = {s[0] for s in subreddits_to_process}
+        for output_dir, suffix in [(PATHS['comment_trees'], '_comment_trees.pkl'),
+                                    (PATHS['discussion_threads'], '_discussion_threads.pkl')]:
+            if os.path.exists(output_dir):
+                existing_files = [f for f in os.listdir(output_dir) if f.endswith(suffix)]
+                stale_files = [f for f in existing_files
+                              if f.replace(suffix, '') not in subreddits_to_process_names]
+                if stale_files:
+                    logger.info(f"🧹 Pre-cleanup: Removing {len(stale_files)} stale files from {os.path.basename(output_dir)}/")
+                    for stale_file in stale_files:
+                        os.remove(os.path.join(output_dir, stale_file))
+
         logger.info(f"Using {PROCESSES} parallel processes")
 
         # Process subreddits in parallel

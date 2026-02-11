@@ -57,7 +57,7 @@ import hdbscan
 from hdbscan import validity_index
 
 # Default static parameters - single source of truth for reproducibility
-DEFAULT_UMAP_STATIC_PARAMS = {'metric': 'cosine', 'random_state': 0, 'verbose': False}
+DEFAULT_UMAP_STATIC_PARAMS = {'metric': 'cosine', 'random_state': 15, 'verbose': False}
 DEFAULT_HDBSCAN_STATIC_PARAMS = {'cluster_selection_method': 'eom'}
 
 
@@ -411,7 +411,7 @@ def main():
         # Note: UMAP uses cosine on original 4096D, HDBSCAN uses euclidean on reduced space
         param_grids = {
             'subreddit': {
-                'n_neighbors': [10, 15, 20, 30],
+                'n_neighbors': [5, 10, 15, 20, 30],
                 'n_components': [5, 10, 15, 20, 25, 30],
                 'min_dist': [0.0],
                 'min_cluster_size': [15, 20, 25, 30],
@@ -419,7 +419,7 @@ def main():
                 'metric': ['euclidean']
             },
             'rule': {
-                'n_neighbors': [10, 15, 20, 30],
+                'n_neighbors': [5, 10, 15, 20, 30],
                 'n_components': [5, 10, 15, 20, 25, 30],
                 'min_dist': [0.0],
                 'min_cluster_size': [15, 20, 25, 30],

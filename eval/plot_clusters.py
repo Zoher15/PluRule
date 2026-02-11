@@ -164,11 +164,12 @@ def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, l
     Returns:
         2D coordinates
     """
-    min_dist = 2.0
+    min_dist = 1.25 if entity_type == 'subreddit' else 2.0
     n_neighbors = umap_params['n_neighbors']
 
     # Cache file based on parameters (rotation applied after UMAP, so not in cache key)
-    cache_file = cache_dir / f'{entity_type}_umap_2d_n{n_neighbors}_d{min_dist}_rs42.npy'
+    spread = 1.25 if entity_type == 'subreddit' else 2.0
+    cache_file = cache_dir / f'{entity_type}_umap_2d_n{n_neighbors}_d{min_dist}_s{spread}_rs42.npy'
 
     # Try to load from cache
     if cache_file.exists():
@@ -183,7 +184,7 @@ def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, l
 
     # Compute UMAP
     logger.info(f"Reducing to 2D with UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, n_jobs={PROCESSES})...")
-    reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=2, min_dist=min_dist, spread=2.0,
+    reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=2, min_dist=min_dist, spread=spread,
                         metric='cosine', random_state=42, n_jobs=PROCESSES)
     coords_2d = reducer.fit_transform(embeddings)
     logger.info(f"  ✅ Reduced to shape {coords_2d.shape}")
@@ -345,8 +346,8 @@ def main():
     """Main execution function."""
     # Parse arguments
     parser = argparse.ArgumentParser(description='Plot cluster visualizations (two-column ACL format)')
-    parser.add_argument('--rotate-sub', type=float, default=240, help='Rotation angle for subreddit clusters (default: 240)')
-    parser.add_argument('--rotate-rule', type=float, default=310, help='Rotation angle for rule clusters (default: 310)')
+    parser.add_argument('--rotate-sub', type=float, default=0, help='Rotation angle for subreddit clusters (default: 240)')
+    parser.add_argument('--rotate-rule', type=float, default=190, help='Rotation angle for rule clusters (default: 310)')
     parser.add_argument('--grey-bars', action='store_true', help='Use grey bars instead of cluster colors')
     args = parser.parse_args()
 
