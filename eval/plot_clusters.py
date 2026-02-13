@@ -151,7 +151,8 @@ def plot_distribution_bars(ax, labels: list, counts: list, colors: list, xlabel:
     ax.set_xlim(left=10, right=1000)
 
 
-def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, logger, cache_dir: Path) -> np.ndarray:
+def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, logger, cache_dir: Path,
+                  cluster_labels: np.ndarray = None, target_weight: float = 0.5) -> np.ndarray:
     """Apply UMAP reduction to 2D for visualization with caching.
 
     Args:
@@ -160,16 +161,20 @@ def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, l
         entity_type: 'subreddit' or 'rule'
         logger: Logger instance
         cache_dir: Directory to store cached results
+        cluster_labels: Cluster label array for supervised UMAP (optional)
+        target_weight: How much to weight the labels vs structure (0.0=unsupervised, 1.0=fully supervised)
+        repulsion_strength: How strongly non-neighbors are pushed apart (default: 1.0)
 
     Returns:
         2D coordinates
     """
-    min_dist = 1.25 if entity_type == 'subreddit' else 2.0
+    min_dist = 1.0
+    spread = 1.0
+    repulsion_strength = 3.0
     n_neighbors = umap_params['n_neighbors']
-
-    # Cache file based on parameters (rotation applied after UMAP, so not in cache key)
-    spread = 1.25 if entity_type == 'subreddit' else 2.0
-    cache_file = cache_dir / f'{entity_type}_umap_2d_n{n_neighbors}_d{min_dist}_s{spread}_rs42.npy'
+    tw_tag = f'_tw{target_weight}' if cluster_labels is not None and target_weight > 0.0 else ''
+    rs_tag = f'_rep{repulsion_strength}' if repulsion_strength != 1.0 else ''
+    cache_file = cache_dir / f'{entity_type}_umap_2d_n{n_neighbors}_d{min_dist}_s{spread}_rs42{tw_tag}{rs_tag}.npy'
 
     # Try to load from cache
     if cache_file.exists():
@@ -182,11 +187,23 @@ def apply_umap_2d(embeddings: np.ndarray, umap_params: dict, entity_type: str, l
             logger.info(f"  ✅ Loaded shape {coords_2d.shape}")
             return coords_2d
 
+    # Build UMAP kwargs
+    umap_kwargs = dict(n_neighbors=n_neighbors, n_components=2, min_dist=min_dist, spread=spread,
+                       repulsion_strength=repulsion_strength, metric='cosine', random_state=42, n_jobs=PROCESSES)
+
+    # Enable supervised UMAP if labels provided and weight > 0
+    supervised = cluster_labels is not None and target_weight > 0.0
+    if supervised:
+        umap_kwargs['target_metric'] = 'categorical'
+        umap_kwargs['target_weight'] = target_weight
+        logger.info(f"Reducing to 2D with supervised UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, "
+                    f"target_weight={target_weight}, n_jobs={PROCESSES})...")
+    else:
+        logger.info(f"Reducing to 2D with UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, n_jobs={PROCESSES})...")
+
     # Compute UMAP
-    logger.info(f"Reducing to 2D with UMAP (n_neighbors={n_neighbors}, min_dist={min_dist}, n_jobs={PROCESSES})...")
-    reducer = umap.UMAP(n_neighbors=n_neighbors, n_components=2, min_dist=min_dist, spread=spread,
-                        metric='cosine', random_state=42, n_jobs=PROCESSES)
-    coords_2d = reducer.fit_transform(embeddings)
+    reducer = umap.UMAP(**umap_kwargs)
+    coords_2d = reducer.fit_transform(embeddings, y=cluster_labels if supervised else None)
     logger.info(f"  ✅ Reduced to shape {coords_2d.shape}")
 
     # Save to cache
@@ -346,9 +363,11 @@ def main():
     """Main execution function."""
     # Parse arguments
     parser = argparse.ArgumentParser(description='Plot cluster visualizations (two-column ACL format)')
-    parser.add_argument('--rotate-sub', type=float, default=0, help='Rotation angle for subreddit clusters (default: 240)')
-    parser.add_argument('--rotate-rule', type=float, default=190, help='Rotation angle for rule clusters (default: 310)')
+    parser.add_argument('--rotate-sub', type=float, default=121.52, help='Rotation angle for subreddit clusters (default: 240)')
+    parser.add_argument('--rotate-rule', type=float, default=62, help='Rotation angle for rule clusters (default: 310)')
     parser.add_argument('--grey-bars', action='store_true', help='Use grey bars instead of cluster colors')
+    parser.add_argument('--target-weight', type=float, default=1.0,
+                        help='Supervised UMAP target weight: 0.0=unsupervised, 1.0=fully supervised (default: 1.0)')
     args = parser.parse_args()
 
     # Create directories
@@ -395,7 +414,9 @@ def main():
         with open(clustering_dir / 'subreddit_grid_search_results.json') as f:
             sub_params = json.load(f)['best_params']['umap']
         sub_umap_params = {'n_neighbors': sub_params['n_neighbors'], 'min_dist': sub_params['min_dist']}
-        sub_coords = apply_umap_2d(sub_embeddings, sub_umap_params, 'subreddit', logger, clustering_dir)
+        sub_coords = apply_umap_2d(sub_embeddings, sub_umap_params, 'subreddit', logger, clustering_dir,
+                                    cluster_labels=sub_metadata['cluster_id'].values, target_weight=args.target_weight,
+)
         logger.info("Plotting subreddit clusters (top-left)...")
         plot_cluster_on_axes(ax_sub_scatter, sub_coords, sub_metadata, 'subreddit', clustering_dir, logger, args.rotate_sub)
 
@@ -416,7 +437,9 @@ def main():
         with open(clustering_dir / 'rule_grid_search_results.json') as f:
             rule_params = json.load(f)['best_params']['umap']
         rule_umap_params = {'n_neighbors': rule_params['n_neighbors'], 'min_dist': rule_params['min_dist']}
-        rule_coords = apply_umap_2d(rule_embeddings, rule_umap_params, 'rule', logger, clustering_dir)
+        rule_coords = apply_umap_2d(rule_embeddings, rule_umap_params, 'rule', logger, clustering_dir,
+                                     cluster_labels=rule_metadata['cluster_id'].values, target_weight=args.target_weight,
+)
         logger.info("Plotting rule clusters (bottom-left)...")
         plot_cluster_on_axes(ax_rule_scatter, rule_coords, rule_metadata, 'rule', clustering_dir, logger, args.rotate_rule)
 

@@ -468,9 +468,6 @@ def main():
             logger.info(f"    Total comments: {stats['total_comments']}")
             logger.info(f"    Total images: {stats['total_images']}")
             logger.info(f"    Unique rules: {len(stats['unique_rules'])}")
-            langs_with_threshold = [l for l, c in stats['language_counts'].items() if c >= 10]
-            logger.info(f"    Languages (≥10 instances): {len(langs_with_threshold)} ({', '.join(sorted(langs_with_threshold))})")
-            logger.info(f"    Total unique languages: {len(stats['language_counts'])}")
             logger.info(f"    ")
             logger.info(f"    Rule Clusters:")
             logger.info(f"      Pairs with rule clusters: {stats['pairs_with_rule_clusters']}")
@@ -516,9 +513,7 @@ def main():
                 'unique_rules': len(stats['unique_rules']),  # Convert set to count
                 'unique_rule_clusters': len(stats['unique_rule_clusters']),  # Convert set to count
                 'unique_subreddit_clusters': len(stats['unique_subreddit_clusters']),  # Convert set to count
-                'unique_languages': len([l for l, c in stats['language_counts'].items() if c >= 10]),  # Languages with ≥10 instances
-                'languages': sorted([l for l, c in stats['language_counts'].items() if c >= 10]),  # List of languages with ≥10 instances
-                'language_counts': dict(stats['language_counts']),  # Full language counts for reference
+                'language_counts': dict(stats['language_counts']),  # Full language counts; unique_languages/languages added after global threshold
                 'pairs_with_rule_clusters': stats['pairs_with_rule_clusters'],
                 'subreddits_with_clusters': stats['subreddits_with_clusters'],
                 'top_10_rule_clusters': dict(stats['rule_cluster_distribution'].most_common(10)),
@@ -590,6 +585,16 @@ def main():
         overall_totals['total_languages'] = len(languages_with_threshold)
         overall_totals['languages'] = languages_with_threshold
         overall_totals['language_counts'] = dict(all_language_counts)  # Full counts for reference
+
+        # Update per-split language stats using global qualifying languages
+        qualifying_languages_set = set(languages_with_threshold)
+        for split, s in all_stats.items():
+            split_lang_counts = s.get('language_counts', {})
+            langs_in_split = sorted(l for l in qualifying_languages_set if split_lang_counts.get(l, 0) > 0)
+            s['unique_languages'] = len(langs_in_split)
+            s['languages'] = langs_in_split
+            logger.info(f"  {split}: Languages (≥10 globally, ≥1 in split): {len(langs_in_split)} ({', '.join(langs_in_split)})")
+            logger.info(f"  {split}: Total unique languages: {len(split_lang_counts)}")
         overall_totals['cluster_size_stats'] = {
             'rule': {
                 label: {

@@ -22,14 +22,14 @@ INTERPRETER = "python"
 # Model configurations: name -> {ncudas, priority}
 # Priority: 0 is highest, higher numbers are lower priority
 MODELS = {
-    # 'qwen3-vl-4b-instruct': {'ncudas': 1, 'priority': 0},
-    # 'qwen3-vl-8b-instruct': {'ncudas': 1, 'priority': 1},
-    # 'qwen3-vl-30b-instruct': {'ncudas': 1, 'priority': 2},
-    # 'qwen3-vl-4b-thinking': {'ncudas': 1, 'priority': 0},
-    # 'qwen3-vl-8b-thinking': {'ncudas': 1, 'priority': 1},
-    # 'qwen3-vl-30b-thinking': {'ncudas': 1, 'priority': 2},
-    'gpt5.2-low': {'ncudas': 1, 'priority': 0},
-    'gpt5.2-high': {'ncudas': 1, 'priority': 1},
+    'qwen3-vl-4b-instruct': {'ncudas': 1, 'priority': 0},
+    'qwen3-vl-8b-instruct': {'ncudas': 1, 'priority': 1},
+    'qwen3-vl-30b-instruct': {'ncudas': 1, 'priority': 2},
+    'qwen3-vl-4b-thinking': {'ncudas': 1, 'priority': 0},
+    'qwen3-vl-8b-thinking': {'ncudas': 1, 'priority': 1},
+    'qwen3-vl-30b-thinking': {'ncudas': 1, 'priority': 2},
+    # 'gpt5.2-low': {'ncudas': 1, 'priority': 0},
+    # 'gpt5.2-high': {'ncudas': 1, 'priority': 1},
 }
 
 SPLITS = [

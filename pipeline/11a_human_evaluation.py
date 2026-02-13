@@ -3,8 +3,9 @@
 Stage 11a: Human Evaluation from Final Dataset
 
 Creates Google Forms for human evaluation of rule matching quality using the
-Stage 10 clustered test dataset. Samples 100 moderator comments from 100 unique
-subreddits, stratified uniformly across rule clusters (best effort on subreddit clusters).
+full Stage 10 clustered dataset (train+val+test). Samples 100 moderator comments
+from 100 unique subreddits, stratified uniformly across rule clusters (best effort
+on subreddit clusters).
 
 Each form question shows:
 - Subreddit name, title, description
@@ -35,7 +36,7 @@ from googleapiclient.discovery import build
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import PATHS
-from utils.files import write_json_file
+from utils.files import write_json_file, read_compressed_json
 from utils.logging import get_stage_logger, log_stage_start, log_stage_end
 
 # ============================================================================
@@ -88,21 +89,28 @@ def authenticate():
 # Data Loading
 # ============================================================================
 
-def load_test_dataset(logger) -> Dict[str, Any]:
-    """Load the clustered test dataset from Stage 10."""
-    dataset_file = os.path.join(PATHS['data'], 'test_hydrated_clustered.json')
+def load_full_dataset(logger) -> Dict[str, Any]:
+    """Load and merge all clustered splits (train/val/test) from Stage 10."""
+    all_subreddits = []
 
-    if not os.path.exists(dataset_file):
-        logger.error(f"Test dataset not found: {dataset_file}")
+    for split in ['train', 'val', 'test']:
+        compressed_file = os.path.join(PATHS['data'], f'{split}_hydrated_clustered.json.zst')
+        if not os.path.exists(compressed_file):
+            logger.warning(f"{split} dataset not found: {compressed_file}, skipping...")
+            continue
+
+        logger.info(f"Loading {split} dataset from: {compressed_file}")
+        dataset = read_compressed_json(compressed_file, logger)
+        split_subreddits = dataset.get('subreddits', [])
+        logger.info(f"  {split}: {len(split_subreddits)} subreddits")
+        all_subreddits.extend(split_subreddits)
+
+    if not all_subreddits:
+        logger.error("No datasets found!")
         return None
 
-    logger.info(f"Loading test dataset from: {dataset_file}")
-
-    with open(dataset_file, 'r') as f:
-        dataset = json.load(f)
-
-    logger.info(f"Loaded dataset with {len(dataset.get('subreddits', []))} subreddits")
-    return dataset
+    logger.info(f"Total subreddits across all splits: {len(all_subreddits)}")
+    return {'subreddits': all_subreddits}
 
 
 # ============================================================================
@@ -476,13 +484,13 @@ def main():
         print(f"  Questions per form: {QUESTIONS_PER_FORM}")
         print(f"  Random seed: {RANDOM_SEED}")
 
-        # Load test dataset
+        # Load full dataset (train+val+test)
         print(f"\n{'='*60}")
         print("LOADING DATA")
         print("=" * 60)
-        dataset = load_test_dataset(logger)
+        dataset = load_full_dataset(logger)
         if not dataset:
-            logger.error("Failed to load test dataset!")
+            logger.error("Failed to load datasets!")
             return 1
 
         # Build sampling pool
