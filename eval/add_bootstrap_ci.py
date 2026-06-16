@@ -134,7 +134,11 @@ def find_all_result_dirs(eval_dir: Path) -> List[Path]:
     """Find all directories containing evaluation results."""
     result_dirs = []
 
-    for perf_file in eval_dir.glob("*/test/*/*/performance_*.json"):
+    for perf_file in eval_dir.rglob("performance_*.json"):
+        rel_parts = perf_file.relative_to(eval_dir).parts
+        if len(rel_parts) < 5 or rel_parts[1] != "test":
+            continue
+
         result_dir = perf_file.parent
         if result_dir not in result_dirs:
             if list(result_dir.glob("reasoning_*.json")):

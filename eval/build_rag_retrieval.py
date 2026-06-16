@@ -244,6 +244,8 @@ def main() -> int:
     import torch
 
     torch.save(artifact, output)
+    artifact_sha256 = helpers.file_sha256(output)
+    artifact_size_bytes = output.stat().st_size
     summary_path = output.with_suffix(".summary.json")
     summary = {
         "query_split": args.query_split,
@@ -255,6 +257,8 @@ def main() -> int:
         "dtype": args.dtype,
         "max_model_len": max_model_len,
         "output": str(output),
+        "artifact_sha256": artifact_sha256,
+        "artifact_size_bytes": artifact_size_bytes,
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Saved retrieval artifact to {output}")

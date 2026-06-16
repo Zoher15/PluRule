@@ -252,7 +252,7 @@ def get_dir(base_dir: Path, split: str, model: str, context: str, phrase: str,
         context: Context type
         phrase: Phrase name
         mode: Phrase mode
-        run_suffix: Optional suffix for variants such as RAG settings
+        run_suffix: Optional child run directory for variants such as RAG settings
 
     Returns:
         Directory path (created if doesn't exist)
@@ -264,10 +264,10 @@ def get_dir(base_dir: Path, split: str, model: str, context: str, phrase: str,
     # For baseline phrase, all modes are equivalent, so use just 'baseline'
     dir_name = 'baseline' if phrase == 'baseline' else f'{phrase}_{mode}'
 
-    if run_suffix:
-        dir_name = f"{dir_name}_{run_suffix}"
-
     dir_path = base_dir / model / split / context / dir_name
+    if run_suffix:
+        dir_path = dir_path / run_suffix
+
     dir_path.mkdir(parents=True, exist_ok=True)
     return dir_path
 

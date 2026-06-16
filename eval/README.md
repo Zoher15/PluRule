@@ -26,16 +26,21 @@ PluRule/
 │       └── {model}/
 │           └── {split}/
 │               └── {context}/
-│                   └── {phrase}_{mode}[_rag-kK-filter-balance]/
+│                   └── {phrase}_{mode}/
 │                       ├── reasoning_TIMESTAMP.json
-│                       └── performance_TIMESTAMP.json
+│                       ├── performance_TIMESTAMP.json
+│                       └── rag-kK-filter-balance-src-SPLIT-art-HASH/
+│                           ├── reasoning_TIMESTAMP.json
+│                           └── performance_TIMESTAMP.json
 └── logs/
     └── eval/               # Evaluation logs
         └── {model}/
             └── {split}/
                 └── {context}/
-                    └── {phrase}_{mode}[_rag-kK-filter-balance]/
-                        └── evaluation_TIMESTAMP.log
+                    └── {phrase}_{mode}/
+                        ├── evaluation_TIMESTAMP.log
+                        └── rag-kK-filter-balance-src-SPLIT-art-HASH/
+                            └── evaluation_TIMESTAMP.log
 ```
 
 ## Installation
@@ -208,7 +213,8 @@ Each thread pair produces two predictions (violating and compliant):
     "balance": "mixed",
     "source_split": "train",
     "retrieval_path": "output/eval/rag/test_to_train_target_comment_similarity.pt",
-    "run_suffix": "rag-k4-rule-cluster-mixed"
+    "retrieval_artifact_sha256": "abc123...",
+    "run_suffix": "rag-k4-rule-cluster-mixed-src-train-art-abc123def456"
   },
 
   "metrics": {
@@ -290,5 +296,6 @@ PHRASES = {
 - API evaluation currently uses OpenAI Flex for Stage 1 reasoning and a local
   Qwen3-VL model for Stage 2 answer extraction.
 - Results and logs are grouped by `{model}/{split}/{context}/{phrase}_{mode}`;
+  RAG variants are stored in child run directories under that phrase/mode path.
   baseline runs always use a `baseline/` directory because `--mode` is ignored
   for the empty baseline phrase.

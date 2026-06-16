@@ -13,6 +13,7 @@ This module contains all utility functions for the evaluation system, including:
 import json
 import logging
 import base64
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -332,11 +333,81 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
 # RAG RETRIEVAL FUNCTIONS
 # =============================================================================
 
-def build_rag_run_suffix(k: int, filter_mode: str, balance: str) -> Optional[str]:
-    """Build an output-directory suffix for RAG settings."""
+def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """Calculate the SHA-256 digest for a file."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sanitize_run_component(value: Any) -> str:
+    """Make a stable, filesystem-safe run-id component."""
+    text = str(value).strip().lower()
+    chars = []
+    previous_dash = False
+    for char in text:
+        if "a" <= char <= "z" or "0" <= char <= "9":
+            chars.append(char)
+            previous_dash = False
+        elif not previous_dash:
+            chars.append("-")
+            previous_dash = True
+    return "".join(chars).strip("-") or "unknown"
+
+
+def rag_artifact_summary_path(retrieval_path: Path) -> Path:
+    """Return the sidecar summary path for a RAG retrieval artifact."""
+    return Path(retrieval_path).with_suffix(".summary.json")
+
+
+def rag_artifact_sha256(retrieval_path: Path) -> str:
+    """Get the retrieval artifact digest, using the sidecar summary when current."""
+    retrieval_path = Path(retrieval_path)
+    if not retrieval_path.exists():
+        raise FileNotFoundError(f"RAG retrieval artifact not found: {retrieval_path}")
+
+    summary_path = rag_artifact_summary_path(retrieval_path)
+    artifact_stat = retrieval_path.stat()
+
+    if summary_path.exists():
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            summary = {}
+
+        summary_digest = summary.get("artifact_sha256")
+        summary_size = summary.get("artifact_size_bytes")
+        if summary_digest:
+            size_matches = summary_size is None or summary_size == artifact_stat.st_size
+            summary_is_current = summary_path.stat().st_mtime_ns >= artifact_stat.st_mtime_ns
+            if size_matches and summary_is_current:
+                return summary_digest
+
+    return file_sha256(retrieval_path)
+
+
+def build_rag_run_suffix(k: int,
+                         filter_mode: str,
+                         balance: str,
+                         source_split: str = None,
+                         artifact_sha256: str = None) -> Optional[str]:
+    """Build an output-directory run id for RAG settings."""
     if not k or k <= 0:
         return None
-    return f"rag-k{k}-{filter_mode}-{balance}"
+
+    parts = [
+        f"rag-k{k}",
+        _sanitize_run_component(filter_mode),
+        _sanitize_run_component(balance),
+    ]
+    if source_split:
+        parts.append(f"src-{_sanitize_run_component(source_split)}")
+    if artifact_sha256:
+        parts.append(f"art-{_sanitize_run_component(artifact_sha256[:12])}")
+    return "-".join(parts)
 
 
 def default_rag_retrieval_path(query_split: str, candidate_split: str) -> Path:

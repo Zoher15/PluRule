@@ -230,7 +230,26 @@ def main():
     if args.phrase == 'baseline':
         args.mode = 'prefill'  # Normalize to prefill to avoid duplicate processing
 
-    run_suffix = helpers.build_rag_run_suffix(args.rag_k, args.rag_filter, args.rag_balance)
+    rag_retrieval_path = None
+    rag_artifact_sha256 = None
+    if args.rag_k > 0:
+        rag_retrieval_path = args.rag_retrieval_path or helpers.default_rag_retrieval_path(
+            args.split,
+            args.rag_source_split
+        )
+        try:
+            rag_artifact_sha256 = helpers.rag_artifact_sha256(rag_retrieval_path)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Invalid RAG retrieval artifact: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    run_suffix = helpers.build_rag_run_suffix(
+        args.rag_k,
+        args.rag_filter,
+        args.rag_balance,
+        source_split=args.rag_source_split,
+        artifact_sha256=rag_artifact_sha256
+    )
 
     # Create logger
     logger, log_path = helpers.create_logger(
@@ -261,7 +280,8 @@ def main():
     if args.rag_k > 0:
         logger.info(
             f"RAG: k={args.rag_k}, filter={args.rag_filter}, "
-            f"balance={args.rag_balance}, source_split={args.rag_source_split}"
+            f"balance={args.rag_balance}, source_split={args.rag_source_split}, "
+            f"artifact={rag_artifact_sha256[:12]}"
         )
     else:
         logger.info("RAG: disabled")
@@ -331,16 +351,13 @@ def main():
         rag_config = None
         if args.rag_k > 0:
             _log_section(logger, "STEP 2A: PREPARING RAG EXAMPLES")
-            rag_retrieval_path = args.rag_retrieval_path or helpers.default_rag_retrieval_path(
-                args.split,
-                args.rag_source_split
-            )
             rag_config = {
                 'k': args.rag_k,
                 'filter': args.rag_filter,
                 'balance': args.rag_balance,
                 'source_split': args.rag_source_split,
                 'retrieval_path': str(rag_retrieval_path),
+                'retrieval_artifact_sha256': rag_artifact_sha256,
                 'run_suffix': run_suffix
             }
             logger.info(f"RAG retrieval artifact: {rag_retrieval_path}")
