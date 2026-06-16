@@ -363,6 +363,35 @@ def plot_cluster_on_axes(ax, coords_2d: np.ndarray, metadata: pd.DataFrame, enti
                     ax=ax)
 
 
+def save_individual_cluster_plot(entity_type: str, coords_2d: np.ndarray, metadata: pd.DataFrame,
+                                 labels: list, counts: list, colors: list, rotation_angle: float,
+                                 clustering_dir: Path, logger, output_base: Path) -> None:
+    """Save a single entity's scatter + distribution panels."""
+    fig = plt.figure(figsize=(TWO_COLUMN_WIDTH, FIGURE_HEIGHT_SCATTER / 2))
+    gs = gridspec.GridSpec(1, 2, figure=fig, width_ratios=[2, 1], wspace=0)
+    ax_scatter = fig.add_subplot(gs[0, 0])
+    ax_bars = fig.add_subplot(gs[0, 1])
+
+    plot_cluster_on_axes(ax_scatter, coords_2d, metadata, entity_type, clustering_dir, logger, rotation_angle)
+    plot_distribution_bars(ax_bars, labels, counts, colors)
+
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0)
+    pos = ax_bars.get_position()
+    ax_bars.set_position([pos.x0 + 0.10, pos.y0 + 0.05, pos.width - 0.115, pos.height - 0.05])
+
+    bars_pos = ax_bars.get_position()
+    scatter_pos = ax_scatter.get_position()
+    label_y = bars_pos.y0 + bars_pos.height * 0.01
+    scatter_label_y = (label_y - scatter_pos.y0) / scatter_pos.height
+    ax_scatter.text(0.96, scatter_label_y, '(a)', transform=ax_scatter.transAxes,
+                    fontsize=10, verticalalignment='bottom', horizontalalignment='right')
+    ax_bars.text(0.98, 0.01, '(b)', transform=ax_bars.transAxes,
+                 fontsize=10, verticalalignment='bottom', horizontalalignment='right')
+
+    save_figure(fig, output_base, dpi=300, bbox_inches=None)
+    plt.close(fig)
+
+
 def main():
     """Main execution function."""
     # Parse arguments
@@ -489,6 +518,14 @@ def main():
         save_figure(fig, output_base, dpi=300, bbox_inches=None)
 
         plt.close(fig)
+
+        logger.info("Saving individual subreddit and rule figures...")
+        save_individual_cluster_plot('subreddit', sub_coords, sub_metadata, sub_labels, sub_counts, sub_colors,
+                                     args.rotate_sub, clustering_dir, logger,
+                                     clustering_dir / f'clusters_2d_subreddits{output_suffix}')
+        save_individual_cluster_plot('rule', rule_coords, rule_metadata, rule_labels, rule_counts, rule_colors,
+                                     args.rotate_rule, clustering_dir, logger,
+                                     clustering_dir / f'clusters_2d_rules{output_suffix}')
 
         logger.info("\n" + "="*80)
         logger.info("✅ COMPLETE")
