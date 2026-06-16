@@ -129,6 +129,44 @@ def parse_arguments() -> argparse.Namespace:
         help='Maximum tokens for response generation (default: 2048)'
     )
 
+    parser.add_argument(
+        '--rag-k',
+        type=int,
+        default=0,
+        help='Number of retrieved few-shot examples to prepend per target thread'
+    )
+
+    parser.add_argument(
+        '--rag-retrieval-path',
+        type=Path,
+        default=None,
+        help='Path to a precomputed RAG target-comment similarity artifact'
+    )
+
+    parser.add_argument(
+        '--rag-filter',
+        type=str,
+        default='none',
+        choices=['none', 'subreddit', 'subreddit-cluster', 'rule-cluster'],
+        help='Filter retrieved examples before selecting top matches'
+    )
+
+    parser.add_argument(
+        '--rag-balance',
+        type=str,
+        default='mixed',
+        choices=['mixed', 'top'],
+        help='Few-shot selection policy: mixed balances violating/compliant, top uses nearest neighbors'
+    )
+
+    parser.add_argument(
+        '--rag-source-split',
+        type=str,
+        default='train',
+        choices=list(config.DATASET_FILES.keys()),
+        help='Candidate split used by the RAG retrieval artifact'
+    )
+
     return parser.parse_args()
 
 
@@ -170,17 +208,9 @@ def main():
     # Parse arguments
     args = parse_arguments()
 
-    # Create logger
-    logger, log_path = helpers.create_logger(
-        args.split,
-        args.model,
-        args.context,
-        args.phrase,
-        args.mode
-    )
-
-    # Log CUDA setup (already set at module import time)
-    logger.info(f"🖥️  CUDA_VISIBLE_DEVICES set to '{args.cuda}'")
+    if args.rag_k < 0:
+        print("--rag-k must be non-negative", file=sys.stderr)
+        sys.exit(2)
 
     # Validate arguments
     try:
@@ -192,17 +222,34 @@ def main():
             args.mode
         )
     except ValueError as e:
-        logger.error(f"❌ Invalid configuration: {e}")
+        print(f"Invalid configuration: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Normalize mode for baseline phrase (mode is ignored for baseline)
+    baseline_mode_normalized = args.phrase == 'baseline' and args.mode != 'prefill'
     if args.phrase == 'baseline':
-        if args.mode != 'prefill':
-            logger.warning(
-                f"⚠️  --mode is ignored for baseline phrase. "
-                f"Normalizing to 'prefill' mode. Output will be in baseline/ directory."
-            )
         args.mode = 'prefill'  # Normalize to prefill to avoid duplicate processing
+
+    run_suffix = helpers.build_rag_run_suffix(args.rag_k, args.rag_filter, args.rag_balance)
+
+    # Create logger
+    logger, log_path = helpers.create_logger(
+        args.split,
+        args.model,
+        args.context,
+        args.phrase,
+        args.mode,
+        run_suffix=run_suffix
+    )
+
+    # Log CUDA setup (already set at module import time)
+    logger.info(f"🖥️  CUDA_VISIBLE_DEVICES set to '{args.cuda}'")
+
+    if baseline_mode_normalized:
+        logger.warning(
+            f"⚠️  --mode is ignored for baseline phrase. "
+            f"Normalizing to 'prefill' mode. Output will be in baseline/ directory."
+        )
 
     logger.info("="*80)
     logger.info("🚀 REDDIT MODERATION EVALUATION")
@@ -211,6 +258,13 @@ def main():
     logger.info(f"Split: {args.split}")
     logger.info(f"Context: {args.context}")
     logger.info(f"Phrase: {args.phrase} (mode: {args.mode})")
+    if args.rag_k > 0:
+        logger.info(
+            f"RAG: k={args.rag_k}, filter={args.rag_filter}, "
+            f"balance={args.rag_balance}, source_split={args.rag_source_split}"
+        )
+    else:
+        logger.info("RAG: disabled")
     logger.info(f"Debug mode: {args.debug}")
     logger.info("="*80)
 
@@ -222,7 +276,8 @@ def main():
             args.model,
             args.context,
             args.phrase,
-            args.mode
+            args.mode,
+            run_suffix=run_suffix
         )
 
         # If checkpoint has failed entries, clear stale results so retry flows naturally
@@ -272,15 +327,45 @@ def main():
         _log_section(logger, "STEP 1: LOADING DATASET")
         thread_pairs = helpers.load_dataset(args.split, logger, debug=args.debug)
 
+        rag_examples_by_target = None
+        rag_config = None
+        if args.rag_k > 0:
+            _log_section(logger, "STEP 2A: PREPARING RAG EXAMPLES")
+            rag_retrieval_path = args.rag_retrieval_path or helpers.default_rag_retrieval_path(
+                args.split,
+                args.rag_source_split
+            )
+            rag_config = {
+                'k': args.rag_k,
+                'filter': args.rag_filter,
+                'balance': args.rag_balance,
+                'source_split': args.rag_source_split,
+                'retrieval_path': str(rag_retrieval_path),
+                'run_suffix': run_suffix
+            }
+            logger.info(f"RAG retrieval artifact: {rag_retrieval_path}")
+            rag_examples_by_target = helpers.prepare_rag_examples(
+                thread_pairs=thread_pairs,
+                split=args.split,
+                retrieval_path=rag_retrieval_path,
+                k=args.rag_k,
+                filter_mode=args.rag_filter,
+                balance=args.rag_balance,
+                source_split=args.rag_source_split,
+                logger=logger
+            )
+
         # 2. Build prompts
-        _log_section(logger, "STEP 2: BUILDING PROMPTS")
+        _log_section(logger, "STEP 2B: BUILDING PROMPTS" if args.rag_k > 0 else "STEP 2: BUILDING PROMPTS")
         thread_pairs = helpers.build_prompts_for_thread_pairs(
             thread_pairs,
             args.context,
             args.phrase,
             args.model,
             args.mode,
-            logger
+            logger,
+            split=args.split,
+            rag_examples_by_target=rag_examples_by_target
         )
 
         # 3. Process evaluation
@@ -350,7 +435,8 @@ def main():
             args.context,
             args.phrase,
             args.mode,
-            logger
+            logger,
+            rag_config=rag_config
         )
 
         # 7. Display final results

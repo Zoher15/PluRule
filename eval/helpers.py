@@ -16,7 +16,7 @@ import base64
 import os
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -327,6 +327,262 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
 
     return thread_pairs
 
+
+# =============================================================================
+# RAG RETRIEVAL FUNCTIONS
+# =============================================================================
+
+def build_rag_run_suffix(k: int, filter_mode: str, balance: str) -> Optional[str]:
+    """Build an output-directory suffix for RAG settings."""
+    if not k or k <= 0:
+        return None
+    return f"rag-k{k}-{filter_mode}-{balance}"
+
+
+def default_rag_retrieval_path(query_split: str, candidate_split: str) -> Path:
+    """Default path for a precomputed RAG retrieval artifact."""
+    return (
+        config.OUTPUT_DIR
+        / "rag"
+        / f"{query_split}_to_{candidate_split}_target_comment_similarity.pt"
+    )
+
+
+def _thread_target_key(split: str, pair: Dict[str, Any], thread_type: str) -> str:
+    return f"{split}:{pair['mod_comment_id']}:{thread_type}"
+
+
+def _correct_rule_from_options(pair: Dict[str, Any], thread_type: str) -> str:
+    correct_answer = pair[f"{thread_type}_correct_answer"]
+    for option in pair.get(f"{thread_type}_answer_options", []):
+        if option.get("label") == correct_answer:
+            return option.get("rule", "")
+    return ""
+
+
+def _rag_target_metadata(split: str, pair: Dict[str, Any], thread_type: str) -> Dict[str, Any]:
+    metadata = pair.get("metadata", {})
+    thread = pair.get(f"{thread_type}_thread", [])
+    leaf = thread[-1] if thread else {}
+    comment_id = metadata.get(f"{thread_type}_comment_id") or leaf.get("id", "")
+    return {
+        "target_key": _thread_target_key(split, pair, thread_type),
+        "split": split,
+        "comment_id": comment_id,
+        "thread_type": thread_type,
+        "mod_comment_id": pair.get("mod_comment_id", ""),
+        "submission_id": pair.get("submission_id", ""),
+        "subreddit": pair.get("subreddit", ""),
+        "subreddit_cluster_id": pair.get("subreddit_cluster_id", -1),
+        "subreddit_cluster_label": pair.get("subreddit_cluster_label", "Other"),
+        "rule_cluster_id": metadata.get("rule_cluster_id", -1),
+        "rule_cluster_label": metadata.get("rule_cluster_label", "Other"),
+        "rule": metadata.get("rule", ""),
+        "correct_answer": pair.get(f"{thread_type}_correct_answer"),
+        "correct_rule": _correct_rule_from_options(pair, thread_type),
+    }
+
+
+def _build_candidate_lookup(split: str, pairs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    lookup = {}
+    for pair in pairs:
+        for thread_type in ("violating", "compliant"):
+            metadata = _rag_target_metadata(split, pair, thread_type)
+            lookup[metadata["target_key"]] = {
+                "pair": pair,
+                "thread_type": thread_type,
+                "metadata": metadata,
+            }
+    return lookup
+
+
+def _candidate_matches_filter(candidate: Dict[str, Any],
+                              target: Dict[str, Any],
+                              filter_mode: str) -> bool:
+    if filter_mode == "none":
+        return True
+    if filter_mode == "subreddit":
+        return candidate.get("subreddit") == target.get("subreddit")
+    if filter_mode == "subreddit-cluster":
+        return candidate.get("subreddit_cluster_id") == target.get("subreddit_cluster_id")
+    if filter_mode == "rule-cluster":
+        return candidate.get("rule_cluster_id") == target.get("rule_cluster_id")
+    raise ValueError(f"Unknown RAG filter mode: {filter_mode}")
+
+
+def _top_indices_from_pool(scores, pool: List[int], limit: int, used: set) -> List[int]:
+    if limit <= 0:
+        return []
+    filtered = [idx for idx in pool if idx not in used]
+    if not filtered:
+        return []
+
+    import torch
+
+    index_tensor = torch.tensor(filtered, dtype=torch.long)
+    values = scores.index_select(0, index_tensor)
+    top_n = min(limit, len(filtered))
+    top_positions = torch.topk(values, top_n).indices.tolist()
+    return [filtered[pos] for pos in top_positions]
+
+
+def _serialize_rag_example(example: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = example["metadata"]
+    return {
+        "target_key": metadata["target_key"],
+        "mod_comment_id": metadata["mod_comment_id"],
+        "submission_id": metadata["submission_id"],
+        "comment_id": metadata["comment_id"],
+        "subreddit": metadata["subreddit"],
+        "thread_type": metadata["thread_type"],
+        "correct_answer": metadata["correct_answer"],
+        "correct_rule": metadata["correct_rule"],
+        "rule_cluster_id": metadata["rule_cluster_id"],
+        "rule_cluster_label": metadata["rule_cluster_label"],
+        "subreddit_cluster_id": metadata["subreddit_cluster_id"],
+        "subreddit_cluster_label": metadata["subreddit_cluster_label"],
+        "score": example["score"],
+    }
+
+
+def _rag_provenance(pair: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    violating = pair.get("violating_rag_examples", [])
+    compliant = pair.get("compliant_rag_examples", [])
+    if not violating and not compliant:
+        return None
+    return {
+        "violating": violating,
+        "compliant": compliant,
+    }
+
+
+def _select_rag_examples_for_target(scores,
+                                    candidates: List[Dict[str, Any]],
+                                    candidate_lookup: Dict[str, Dict[str, Any]],
+                                    target: Dict[str, Any],
+                                    k: int,
+                                    filter_mode: str,
+                                    balance: str) -> List[Dict[str, Any]]:
+    eligible = []
+    eligible_by_type = {"violating": [], "compliant": []}
+
+    for idx, candidate in enumerate(candidates):
+        target_key = candidate.get("target_key")
+        lookup = candidate_lookup.get(target_key)
+        if not lookup:
+            continue
+        if target_key == target["target_key"]:
+            continue
+        if not _candidate_matches_filter(candidate, target, filter_mode):
+            continue
+        eligible.append(idx)
+        thread_type = candidate.get("thread_type")
+        if thread_type in eligible_by_type:
+            eligible_by_type[thread_type].append(idx)
+
+    selected_indices = []
+    used = set()
+    if balance == "mixed":
+        violating_quota = (k + 1) // 2
+        compliant_quota = k // 2
+        for idx in _top_indices_from_pool(scores, eligible_by_type["violating"], violating_quota, used):
+            selected_indices.append(idx)
+            used.add(idx)
+        for idx in _top_indices_from_pool(scores, eligible_by_type["compliant"], compliant_quota, used):
+            selected_indices.append(idx)
+            used.add(idx)
+        for idx in _top_indices_from_pool(scores, eligible, k - len(selected_indices), used):
+            selected_indices.append(idx)
+            used.add(idx)
+    elif balance == "top":
+        selected_indices = _top_indices_from_pool(scores, eligible, k, used)
+    else:
+        raise ValueError(f"Unknown RAG balance mode: {balance}")
+
+    examples = []
+    for idx in selected_indices:
+        record = candidates[idx]
+        lookup = candidate_lookup[record["target_key"]]
+        examples.append({
+            "pair": lookup["pair"],
+            "thread_type": lookup["thread_type"],
+            "metadata": lookup["metadata"],
+            "score": float(scores[idx].item()),
+        })
+    return examples
+
+
+def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
+                         split: str,
+                         retrieval_path: Path,
+                         k: int,
+                         filter_mode: str,
+                         balance: str,
+                         source_split: str,
+                         logger: logging.Logger) -> Dict[str, List[Dict[str, Any]]]:
+    """Load a retrieval artifact and select RAG examples for every target thread."""
+    if k <= 0:
+        return {}
+
+    import torch
+
+    retrieval_path = Path(retrieval_path)
+    if not retrieval_path.exists():
+        raise FileNotFoundError(f"RAG retrieval artifact not found: {retrieval_path}")
+
+    logger.info(f"Loading RAG retrieval artifact: {retrieval_path}")
+    artifact = torch.load(retrieval_path, map_location="cpu", weights_only=False)
+    if artifact.get("query_split") != split:
+        raise ValueError(
+            f"RAG artifact query split {artifact.get('query_split')} does not match eval split {split}"
+        )
+    if artifact.get("candidate_split") != source_split:
+        raise ValueError(
+            f"RAG artifact candidate split {artifact.get('candidate_split')} does not match source split {source_split}"
+        )
+
+    candidates = artifact["candidates"]
+    queries = artifact["queries"]
+    similarity_matrix = artifact["similarity_matrix"]
+    expected_shape = (len(queries), len(candidates))
+    if tuple(similarity_matrix.shape) != expected_shape:
+        raise ValueError(
+            f"RAG similarity matrix shape {tuple(similarity_matrix.shape)} "
+            f"does not match query/candidate metadata {expected_shape}"
+        )
+    query_index = {query["target_key"]: idx for idx, query in enumerate(queries)}
+
+    logger.info(f"Loading RAG source split: {source_split}")
+    source_pairs = load_dataset(source_split, logger, debug=False)
+    candidate_lookup = _build_candidate_lookup(source_split, source_pairs)
+
+    examples_by_target = {}
+    missing_queries = 0
+    for pair in thread_pairs:
+        for thread_type in ("violating", "compliant"):
+            target = _rag_target_metadata(split, pair, thread_type)
+            row_idx = query_index.get(target["target_key"])
+            if row_idx is None:
+                missing_queries += 1
+                examples_by_target[target["target_key"]] = []
+                continue
+            scores = similarity_matrix[row_idx].float()
+            examples_by_target[target["target_key"]] = _select_rag_examples_for_target(
+                scores,
+                candidates,
+                candidate_lookup,
+                target,
+                k,
+                filter_mode,
+                balance,
+            )
+
+    if missing_queries:
+        logger.warning(f"RAG artifact missing {missing_queries} target query rows")
+    logger.info(f"Prepared RAG examples for {len(examples_by_target)} target threads")
+    return examples_by_target
+
+
 # =============================================================================
 # PROMPT BUILDING FUNCTIONS
 # =============================================================================
@@ -336,7 +592,9 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
                                    phrase_name: str,
                                    model_name: str,
                                    mode: str,
-                                   logger: logging.Logger) -> List[Dict[str, Any]]:
+                                   logger: logging.Logger,
+                                   split: str = None,
+                                   rag_examples_by_target: Dict[str, List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """
     Build prompts for all thread pairs (both violating and compliant).
 
@@ -347,6 +605,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
         model_name: Model name
         mode: Phrase mode ('prefill' or 'prompt')
         logger: Logger instance
+        split: Dataset split, required for RAG target keys
+        rag_examples_by_target: Optional mapping from target key to examples
 
     Returns:
         List of thread pairs with prompts added
@@ -357,6 +617,11 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
 
     processed_pairs = []
     for pair in thread_pairs:
+        violating_target_key = _thread_target_key(split, pair, "violating") if split else None
+        compliant_target_key = _thread_target_key(split, pair, "compliant") if split else None
+        violating_rag_examples = (rag_examples_by_target or {}).get(violating_target_key, [])
+        compliant_rag_examples = (rag_examples_by_target or {}).get(compliant_target_key, [])
+
         # Build prompts for both violating and compliant threads
         violating_prompt = _build_single_prompt(
             pair,
@@ -364,7 +629,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             context_config=context_config,
             phrase_text=phrase_text,
             model_config=model_config,
-            mode=mode
+            mode=mode,
+            few_shot_examples=violating_rag_examples
         )
 
         compliant_prompt = _build_single_prompt(
@@ -373,13 +639,16 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             context_config=context_config,
             phrase_text=phrase_text,
             model_config=model_config,
-            mode=mode
+            mode=mode,
+            few_shot_examples=compliant_rag_examples
         )
 
         processed_pair = {
             **pair,
             'violating_prompt': violating_prompt,
             'compliant_prompt': compliant_prompt,
+            'violating_rag_examples': [_serialize_rag_example(ex) for ex in violating_rag_examples],
+            'compliant_rag_examples': [_serialize_rag_example(ex) for ex in compliant_rag_examples],
             'phrase_text': phrase_text if mode == 'prefill' else None,
             'mode': mode
         }
@@ -393,7 +662,8 @@ def _build_single_prompt(pair: Dict[str, Any],
                         context_config: Dict[str, Any],
                         phrase_text: str,
                         model_config: Dict[str, Any],
-                        mode: str) -> Dict[str, Any]:
+                        mode: str,
+                        few_shot_examples: List[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Build prompt for a single thread (violating or compliant).
 
@@ -404,6 +674,7 @@ def _build_single_prompt(pair: Dict[str, Any],
         phrase_text: Phrase text to apply
         model_config: Model configuration
         mode: Phrase mode ('prefill' or 'prompt')
+        few_shot_examples: Optional list of rendered example source records
 
     Returns:
         Dictionary with 'messages' key
@@ -420,17 +691,64 @@ def _build_single_prompt(pair: Dict[str, Any],
         prompt_phrase = None
     question_text = _build_question_text(pair, thread_type, context_config, prompt_phrase)
 
+    content = []
+    if few_shot_examples:
+        content.extend(_build_few_shot_content(few_shot_examples, context_config, model_config))
+        content.append({"type": "text", "text": "Now answer the target case.\n\n"})
+
     # Build user content with multimodal data
-    content = _build_multimodal_content(
+    content.extend(_build_multimodal_content(
         pair,
         question_text,
         context_config,
         model_config
-    )
+    ))
 
     messages.append({"role": "user", "content": content})
 
     return {'messages': messages}
+
+
+def _format_few_shot_answer(pair: Dict[str, Any], thread_type: str) -> str:
+    correct_answer = pair[f"{thread_type}_correct_answer"]
+    correct_rule = _correct_rule_from_options(pair, thread_type)
+    if thread_type == "compliant" or correct_rule == "No rules broken":
+        return (
+            "Answer: The target comment does not violate any listed rule. "
+            f"The correct answer is {correct_answer}."
+        )
+    return (
+        f"Answer: The target comment violates rule \"{correct_rule}\". "
+        f"The correct answer is {correct_answer}."
+    )
+
+
+def _build_few_shot_content(few_shot_examples: List[Dict[str, Any]],
+                            context_config: Dict[str, Any],
+                            model_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    content = [{"type": "text", "text": "Here are labeled examples.\n\n"}]
+    for idx, example in enumerate(few_shot_examples, start=1):
+        example_pair = example["pair"]
+        example_thread_type = example["thread_type"]
+        example_text = _build_question_text(
+            example_pair,
+            example_thread_type,
+            context_config,
+            prompt_phrase=None
+        )
+        content.append({"type": "text", "text": f"Example {idx}:\n"})
+        content.extend(_build_multimodal_content(
+            example_pair,
+            example_text,
+            context_config,
+            model_config
+        ))
+        content.append({
+            "type": "text",
+            "text": f"\n{_format_few_shot_answer(example_pair, example_thread_type)}\n\n"
+        })
+    return content
+
 
 def _build_question_text(pair: Dict[str, Any],
                         thread_type: str,
@@ -728,9 +1046,9 @@ def _build_multimodal_content(pair: Dict[str, Any],
                     if model_config['hf_path'].startswith('Qwen'):
                         content.append({"type": "image", "image": media_path})
                     else:  # LLaVA, Llama
-                        content.append({"type": "image"})
+                        content.append({"type": "image", "image": media_path})
                 else:  # API models
-                    content.append({"type": "image"})
+                    content.append({"type": "image", "image": media_path})
 
             # Add text after images (submission body + rest of prompt)
             content.append({"type": "text", "text": after_body})
@@ -746,6 +1064,14 @@ def _build_multimodal_content(pair: Dict[str, Any],
 # =============================================================================
 # CHAT TEMPLATE APPLICATION
 # =============================================================================
+
+def _extract_image_paths_from_content(content: List[Dict[str, Any]]) -> List[str]:
+    paths = []
+    for item in content:
+        if isinstance(item, dict) and item.get('type') == 'image' and item.get('image'):
+            paths.append(item['image'])
+    return paths
+
 
 def apply_chat_template(thread_pairs: List[Dict[str, Any]],
                        model_name: str,
@@ -791,6 +1117,10 @@ def apply_chat_template(thread_pairs: List[Dict[str, Any]],
             content = messages[0]['content']
             num_images = sum(1 for item in content if isinstance(item, dict) and item.get('type') == 'image')
             max_images_per_prompt = max(max_images_per_prompt, num_images)
+            prompt_media_files = _extract_image_paths_from_content(content)
+            if not prompt_media_files:
+                prompt_media_files = pair.get('submission', {}).get('media_files', [])
+            pair[f'{thread_type}_prompt_media_files'] = prompt_media_files
 
             # Generate prompt text (for vLLM)
             prompt_text = processor.apply_chat_template(
@@ -955,16 +1285,16 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
 
     # Prepare inputs (flatten violating + compliant)
     inputs = []
-    for pair in thread_pairs:
+    for idx, pair in enumerate(thread_pairs):
         # Build inputs for both violating and compliant threads
         for thread_type, prompts in [('violating', violating_prompts), ('compliant', compliant_prompts)]:
-            idx = thread_pairs.index(pair)
-
             # Only load and pass images if media flag is set in context
             images = []
             if include_media:
-                submission = pair.get('submission', {})
-                media_files = submission.get('media_files', [])
+                media_files = pair.get(f'{thread_type}_prompt_media_files')
+                if media_files is None:
+                    submission = pair.get('submission', {})
+                    media_files = submission.get('media_files', [])
 
                 # Load images separately for each thread to avoid sharing image objects
                 for media_path in media_files:
@@ -1100,6 +1430,9 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
                 'subreddit_language': pair.get('subreddit_language', 'unknown')
             }
         }
+        rag_provenance = _rag_provenance(pair)
+        if rag_provenance:
+            result['few_shot'] = rag_provenance
         results.append(result)
 
     logger.info(f"Generated {len(results)} × 2 Stage 2 clean answers")
@@ -1425,6 +1758,9 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                 'subreddit_language': pair.get('subreddit_language', 'unknown')
             }
         }
+        rag_provenance = _rag_provenance(pair)
+        if rag_provenance:
+            result['few_shot'] = rag_provenance
         results.append(result)
 
     # Save results to batch output directory for caching
@@ -1584,7 +1920,8 @@ def save_results(results: List[Dict[str, Any]],
                 context: str,
                 phrase: str,
                 mode: str,
-                logger: logging.Logger) -> Tuple[Path, Path]:
+                logger: logging.Logger,
+                rag_config: Optional[Dict[str, Any]] = None) -> Tuple[Path, Path]:
     """
     Save evaluation results and metrics.
 
@@ -1598,6 +1935,7 @@ def save_results(results: List[Dict[str, Any]],
         phrase: Phrase name
         mode: Phrase mode
         logger: Logger instance
+        rag_config: Optional RAG configuration to record in performance output
 
     Returns:
         Tuple of (reasoning_path, performance_path)
@@ -1620,6 +1958,8 @@ def save_results(results: List[Dict[str, Any]],
         'mode': mode,
         'metrics': metrics
     }
+    if rag_config:
+        performance_data['rag'] = rag_config
 
     performance_path = output_dir / f"performance_{timestamp}.json"
     with open(performance_path, 'w', encoding='utf-8') as f:
@@ -1634,7 +1974,12 @@ def save_results(results: List[Dict[str, Any]],
 # LOGGING
 # =============================================================================
 
-def create_logger(split: str, model: str, context: str, phrase: str, mode: str) -> Tuple[logging.Logger, Path]:
+def create_logger(split: str,
+                  model: str,
+                  context: str,
+                  phrase: str,
+                  mode: str,
+                  run_suffix: str = None) -> Tuple[logging.Logger, Path]:
     """
     Create logger with file and console handlers.
 
@@ -1644,13 +1989,14 @@ def create_logger(split: str, model: str, context: str, phrase: str, mode: str) 
         context: Context type
         phrase: Phrase name
         mode: Phrase mode
+        run_suffix: Optional suffix for variants such as RAG settings
 
     Returns:
         Tuple of (logger, log_file_path)
     """
     import sys
 
-    logs_dir = config.get_dir(config.LOGS_DIR, split, model, context, phrase, mode)
+    logs_dir = config.get_dir(config.LOGS_DIR, split, model, context, phrase, mode, run_suffix=run_suffix)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = logs_dir / f"evaluation_{timestamp}.log"
 

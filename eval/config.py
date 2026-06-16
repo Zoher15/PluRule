@@ -220,7 +220,10 @@ PHRASES = {
     'cot': 'Let\'s think step by step',
     'analyze': 'Let\'s carefully analyze this content',
     'artifacts': 'Let\'s look for rule violations',
-    'rules': 'Let\'s compare this against the subreddit rules'
+    'rules': 'Let\'s compare this against the subreddit rules',
+    'grounded_choice': 'Let\'s first examine the context around the target comment, then compare it with the subreddit rules and listed answer options',
+    'grounded_target': 'Let\'s first examine the subreddit, rules, submission, and discussion only insofar as they clarify the target comment, then choose from the listed options',
+    'grounded_context': 'Let\'s first examine the context that grounds the target comment: the subreddit, its rules, the submission, and the discussion, before choosing from the listed options'
 }
 
 # Phrase modes (how to inject the phrase)
@@ -237,7 +240,8 @@ def get_supported_phrases() -> List[str]:
 # PATH UTILITIES
 # =============================================================================
 
-def get_dir(base_dir: Path, split: str, model: str, context: str, phrase: str, mode: str) -> Path:
+def get_dir(base_dir: Path, split: str, model: str, context: str, phrase: str,
+            mode: str, run_suffix: str = None) -> Path:
     """
     Get directory path for results or logs.
 
@@ -248,6 +252,7 @@ def get_dir(base_dir: Path, split: str, model: str, context: str, phrase: str, m
         context: Context type
         phrase: Phrase name
         mode: Phrase mode
+        run_suffix: Optional suffix for variants such as RAG settings
 
     Returns:
         Directory path (created if doesn't exist)
@@ -258,6 +263,9 @@ def get_dir(base_dir: Path, split: str, model: str, context: str, phrase: str, m
     """
     # For baseline phrase, all modes are equivalent, so use just 'baseline'
     dir_name = 'baseline' if phrase == 'baseline' else f'{phrase}_{mode}'
+
+    if run_suffix:
+        dir_name = f"{dir_name}_{run_suffix}"
 
     dir_path = base_dir / model / split / context / dir_name
     dir_path.mkdir(parents=True, exist_ok=True)

@@ -18,13 +18,15 @@ PluRule/
 ├── eval/
 │   ├── config.py           # Model, context, and phrase configurations
 │   ├── helpers.py          # Utility functions for data loading, prompting, evaluation
-│   └── evaluate.py         # Main evaluation script
+│   ├── evaluate.py         # Main evaluation script
+│   └── build_rag_retrieval.py
 ├── output/
 │   └── eval/               # Evaluation results (reasoning + performance JSONs)
+│       ├── rag/            # Precomputed target-comment similarity artifacts
 │       └── {model}/
 │           └── {split}/
 │               └── {context}/
-│                   └── {phrase}_{mode}/
+│                   └── {phrase}_{mode}[_rag-kK-filter-balance]/
 │                       ├── reasoning_TIMESTAMP.json
 │                       └── performance_TIMESTAMP.json
 └── logs/
@@ -32,7 +34,7 @@ PluRule/
         └── {model}/
             └── {split}/
                 └── {context}/
-                    └── {phrase}_{mode}/
+                    └── {phrase}_{mode}[_rag-kK-filter-balance]/
                         └── evaluation_TIMESTAMP.log
 ```
 
@@ -68,6 +70,35 @@ python eval/evaluate.py \
     --debug
 ```
 
+### RAG Few-Shot Retrieval
+
+Build the dense target-comment similarity artifact once:
+
+```bash
+python eval/build_rag_retrieval.py \
+    --query-split test \
+    --candidate-split train \
+    --cuda 0
+```
+
+Then enable retrieved few-shot examples during eval:
+
+```bash
+python eval/evaluate.py \
+    --model qwen3-vl-8b-instruct \
+    --split test \
+    --context submission-discussion \
+    --phrase grounded_context \
+    --mode prefill \
+    --rag-k 4 \
+    --rag-filter rule-cluster \
+    --rag-balance mixed
+```
+
+Few-shot examples use the same prompt context as the target eval case. Retrieval
+is scored only on target-comment text; examples include their question, MCQ
+options, and a generic labeled answer.
+
 ### Arguments
 
 - `--model, -m`: Model to evaluate
@@ -91,6 +122,9 @@ python eval/evaluate.py \
   - `analyze`: "Let's carefully analyze this content"
   - `artifacts`: "Let's look for rule violations"
   - `rules`: "Let's compare this against the subreddit rules"
+  - `grounded_choice`: "Let's first examine the context around the target comment, then compare it with the subreddit rules and listed answer options"
+  - `grounded_target`: "Let's first examine the subreddit, rules, submission, and discussion only insofar as they clarify the target comment, then choose from the listed options"
+  - `grounded_context`: "Let's first examine the context that grounds the target comment: the subreddit, its rules, the submission, and the discussion, before choosing from the listed options"
 
 - `--mode`: Phrase injection mode
   - `prefill`: Append phrase after chat template (default)
@@ -100,6 +134,11 @@ python eval/evaluate.py \
 - `--debug`: Run with only 5 thread pairs for testing
 - `--override`: Overwrite existing results
 - `--max-response-tokens`: Maximum generation length for Stage 1 responses (default: 2048)
+- `--rag-k`: Number of retrieved few-shot examples per target thread. `0` disables RAG.
+- `--rag-retrieval-path`: Optional path to the `.pt` retrieval artifact. Defaults to `output/eval/rag/{split}_to_{rag-source-split}_target_comment_similarity.pt`.
+- `--rag-filter`: Retrieval filter: `none`, `subreddit`, `subreddit-cluster`, or `rule-cluster`.
+- `--rag-balance`: `mixed` balances violating/compliant examples before filling from nearest neighbors; `top` uses nearest neighbors only.
+- `--rag-source-split`: Candidate split used by the retrieval artifact. Defaults to `train`.
 
 ## Output Format
 
@@ -137,6 +176,19 @@ Each thread pair produces two predictions (violating and compliant):
     "rule_cluster_label": "civility rules",
     "subreddit_cluster_id": 2,
     "subreddit_cluster_label": "tech communities"
+  },
+
+  "few_shot": {
+    "violating": [
+      {
+        "target_key": "train:abc123:violating",
+        "subreddit": "excel",
+        "thread_type": "violating",
+        "correct_answer": "(b)",
+        "score": 0.83
+      }
+    ],
+    "compliant": []
   }
 }
 ```
@@ -150,6 +202,14 @@ Each thread pair produces two predictions (violating and compliant):
   "context": "submission-discussion",
   "phrase": "cot",
   "mode": "prefill",
+  "rag": {
+    "k": 4,
+    "filter": "rule-cluster",
+    "balance": "mixed",
+    "source_split": "train",
+    "retrieval_path": "output/eval/rag/test_to_train_target_comment_similarity.pt",
+    "run_suffix": "rag-k4-rule-cluster-mixed"
+  },
 
   "metrics": {
     "overall": {
