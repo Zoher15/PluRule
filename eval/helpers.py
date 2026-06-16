@@ -344,17 +344,8 @@ def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 def _sanitize_run_component(value: Any) -> str:
     """Make a stable, filesystem-safe run-id component."""
-    text = str(value).strip().lower()
-    chars = []
-    previous_dash = False
-    for char in text:
-        if "a" <= char <= "z" or "0" <= char <= "9":
-            chars.append(char)
-            previous_dash = False
-        elif not previous_dash:
-            chars.append("-")
-            previous_dash = True
-    return "".join(chars).strip("-") or "unknown"
+    import re
+    return re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-") or "unknown"
 
 
 def rag_artifact_summary_path(retrieval_path: Path) -> Path:
@@ -467,18 +458,40 @@ def _build_candidate_lookup(split: str, pairs: List[Dict[str, Any]]) -> Dict[str
     return lookup
 
 
-def _candidate_matches_filter(candidate: Dict[str, Any],
-                              target: Dict[str, Any],
-                              filter_mode: str) -> bool:
+def _rag_filter_key(record: Dict[str, Any], filter_mode: str) -> Any:
+    """Bucket key for RAG filtering; a candidate matches a target iff their keys are equal."""
     if filter_mode == "none":
-        return True
+        return None
     if filter_mode == "subreddit":
-        return candidate.get("subreddit") == target.get("subreddit")
+        return record.get("subreddit")
     if filter_mode == "subreddit-cluster":
-        return candidate.get("subreddit_cluster_id") == target.get("subreddit_cluster_id")
+        return record.get("subreddit_cluster_id")
     if filter_mode == "rule-cluster":
-        return candidate.get("rule_cluster_id") == target.get("rule_cluster_id")
+        return record.get("rule_cluster_id")
     raise ValueError(f"Unknown RAG filter mode: {filter_mode}")
+
+
+def _build_candidate_buckets(candidates: List[Dict[str, Any]],
+                             candidate_lookup: Dict[str, Dict[str, Any]],
+                             filter_mode: str) -> Dict[Any, Dict[str, List[int]]]:
+    """Group eligible candidate indices by filter key once, preserving candidate order.
+
+    Selecting examples for a target then becomes a bucket lookup plus a top-k,
+    instead of re-scanning and re-filtering every candidate for every target.
+    """
+    buckets: Dict[Any, Dict[str, List[int]]] = {}
+    for idx, candidate in enumerate(candidates):
+        if candidate.get("target_key") not in candidate_lookup:
+            continue
+        bucket = buckets.setdefault(
+            _rag_filter_key(candidate, filter_mode),
+            {"all": [], "violating": [], "compliant": []},
+        )
+        bucket["all"].append(idx)
+        thread_type = candidate.get("thread_type")
+        if thread_type in ("violating", "compliant"):
+            bucket[thread_type].append(idx)
+    return buckets
 
 
 def _top_indices_from_pool(scores, pool: List[int], limit: int, used: set) -> List[int]:
@@ -530,43 +543,29 @@ def _rag_provenance(pair: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def _select_rag_examples_for_target(scores,
                                     candidates: List[Dict[str, Any]],
                                     candidate_lookup: Dict[str, Dict[str, Any]],
-                                    target: Dict[str, Any],
                                     k: int,
-                                    filter_mode: str,
-                                    balance: str) -> List[Dict[str, Any]]:
-    eligible = []
-    eligible_by_type = {"violating": [], "compliant": []}
-
-    for idx, candidate in enumerate(candidates):
-        target_key = candidate.get("target_key")
-        lookup = candidate_lookup.get(target_key)
-        if not lookup:
-            continue
-        if target_key == target["target_key"]:
-            continue
-        if not _candidate_matches_filter(candidate, target, filter_mode):
-            continue
-        eligible.append(idx)
-        thread_type = candidate.get("thread_type")
-        if thread_type in eligible_by_type:
-            eligible_by_type[thread_type].append(idx)
+                                    balance: str,
+                                    bucket: Dict[str, List[int]],
+                                    self_index: Optional[int] = None) -> List[Dict[str, Any]]:
+    used = set()
+    if self_index is not None:
+        used.add(self_index)  # never retrieve the target's own thread as an example
 
     selected_indices = []
-    used = set()
     if balance == "mixed":
         violating_quota = (k + 1) // 2
         compliant_quota = k // 2
-        for idx in _top_indices_from_pool(scores, eligible_by_type["violating"], violating_quota, used):
+        for idx in _top_indices_from_pool(scores, bucket["violating"], violating_quota, used):
             selected_indices.append(idx)
             used.add(idx)
-        for idx in _top_indices_from_pool(scores, eligible_by_type["compliant"], compliant_quota, used):
+        for idx in _top_indices_from_pool(scores, bucket["compliant"], compliant_quota, used):
             selected_indices.append(idx)
             used.add(idx)
-        for idx in _top_indices_from_pool(scores, eligible, k - len(selected_indices), used):
+        for idx in _top_indices_from_pool(scores, bucket["all"], k - len(selected_indices), used):
             selected_indices.append(idx)
             used.add(idx)
     elif balance == "top":
-        selected_indices = _top_indices_from_pool(scores, eligible, k, used)
+        selected_indices = _top_indices_from_pool(scores, bucket["all"], k, used)
     else:
         raise ValueError(f"Unknown RAG balance mode: {balance}")
 
@@ -626,26 +625,33 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
     logger.info(f"Loading RAG source split: {source_split}")
     source_pairs = load_dataset(source_split, logger, debug=False)
     candidate_lookup = _build_candidate_lookup(source_split, source_pairs)
+    candidate_buckets = _build_candidate_buckets(candidates, candidate_lookup, filter_mode)
+    candidate_index_by_key = {
+        candidate.get("target_key"): idx for idx, candidate in enumerate(candidates)
+    }
+    empty_bucket = {"all": [], "violating": [], "compliant": []}
 
     examples_by_target = {}
     missing_queries = 0
     for pair in thread_pairs:
         for thread_type in ("violating", "compliant"):
             target = _rag_target_metadata(split, pair, thread_type)
-            row_idx = query_index.get(target["target_key"])
+            target_key = target["target_key"]
+            row_idx = query_index.get(target_key)
             if row_idx is None:
                 missing_queries += 1
-                examples_by_target[target["target_key"]] = []
+                examples_by_target[target_key] = []
                 continue
             scores = similarity_matrix[row_idx].float()
-            examples_by_target[target["target_key"]] = _select_rag_examples_for_target(
+            bucket = candidate_buckets.get(_rag_filter_key(target, filter_mode), empty_bucket)
+            examples_by_target[target_key] = _select_rag_examples_for_target(
                 scores,
                 candidates,
                 candidate_lookup,
-                target,
                 k,
-                filter_mode,
                 balance,
+                bucket,
+                self_index=candidate_index_by_key.get(target_key),
             )
 
     if missing_queries:
@@ -686,12 +692,14 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
     phrase_text = config.PHRASES.get(phrase_name, '')
     model_config = config.get_model_config(model_name)
 
+    rag_examples = rag_examples_by_target or {}
+
     processed_pairs = []
     for pair in thread_pairs:
         violating_target_key = _thread_target_key(split, pair, "violating") if split else None
         compliant_target_key = _thread_target_key(split, pair, "compliant") if split else None
-        violating_rag_examples = (rag_examples_by_target or {}).get(violating_target_key, [])
-        compliant_rag_examples = (rag_examples_by_target or {}).get(compliant_target_key, [])
+        violating_rag_examples = rag_examples.get(violating_target_key, [])
+        compliant_rag_examples = rag_examples.get(compliant_target_key, [])
 
         # Build prompts for both violating and compliant threads
         violating_prompt = _build_single_prompt(
@@ -1111,15 +1119,10 @@ def _build_multimodal_content(pair: Dict[str, Any],
             # Add text before images (submission header)
             content.append({"type": "text", "text": before_body})
 
-            # Add images
+            # Add images (path carried for every model type so downstream stages
+            # and few-shot extraction can recover the prompt's media)
             for media_path in media_files:
-                if model_config['type'] == 'vllm':
-                    if model_config['hf_path'].startswith('Qwen'):
-                        content.append({"type": "image", "image": media_path})
-                    else:  # LLaVA, Llama
-                        content.append({"type": "image", "image": media_path})
-                else:  # API models
-                    content.append({"type": "image", "image": media_path})
+                content.append({"type": "image", "image": media_path})
 
             # Add text after images (submission body + rest of prompt)
             content.append({"type": "text", "text": after_body})

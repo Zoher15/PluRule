@@ -158,14 +158,22 @@ def get_latest_files(result_dir: Path) -> Tuple[Path, Path]:
     return reasoning_files[-1], performance_files[-1]
 
 
-def parse_result_dir(result_dir: Path) -> Dict[str, str]:
-    """Parse result directory path into config components."""
-    parts = result_dir.parts
+def parse_result_dir(result_dir: Path, eval_dir: Path) -> Dict[str, str]:
+    """Parse a result directory into its config components.
+
+    Directory scheme (see config.get_dir):
+        {model}/{split}/{context}/{phrase}_{mode}[/{run_suffix}]
+    RAG variants add a trailing run-suffix directory, so anchor on the
+    eval_dir-relative position instead of fixed offsets from the end.
+    """
+    parts = result_dir.relative_to(eval_dir).parts
+    model, split, context, phrase = parts[:4]
     return {
-        'model': parts[-4],
-        'split': parts[-3],
-        'context': parts[-2],
-        'phrase': parts[-1]
+        'model': model,
+        'split': split,
+        'context': context,
+        'phrase': phrase,
+        'run_suffix': parts[4] if len(parts) > 4 else None
     }
 
 
@@ -509,8 +517,10 @@ def main():
     errors = 0
 
     for result_dir in result_dirs:
-        config = parse_result_dir(result_dir)
+        config = parse_result_dir(result_dir, args.eval_dir)
         config_str = f"{config['model']}/{config['context']}/{config['phrase']}"
+        if config['run_suffix']:
+            config_str += f"/{config['run_suffix']}"
 
         try:
             reasoning_path, performance_path = get_latest_files(result_dir)

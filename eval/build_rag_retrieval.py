@@ -13,7 +13,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -74,46 +74,19 @@ def _quiet_logger():
     return Logger()
 
 
-def _correct_rule(pair: Dict[str, Any], thread_type: str) -> str:
-    correct = pair[f"{thread_type}_correct_answer"]
-    for option in pair.get(f"{thread_type}_answer_options", []):
-        if option.get("label") == correct:
-            return option.get("rule", "")
-    return ""
-
-
 def flatten_targets(split: str, limit: int = None) -> List[Dict[str, Any]]:
     pairs = helpers.load_dataset(split, _quiet_logger(), debug=False)
     targets = []
     for pair_index, pair in enumerate(pairs):
         for thread_type in ("violating", "compliant"):
-            thread = pair[f"{thread_type}_thread"]
+            # Reuse the shared target-record builder so the artifact's target_key
+            # and metadata stay identical to the eval-time consumer in helpers.py.
+            record = helpers._rag_target_metadata(split, pair, thread_type)
+            thread = pair.get(f"{thread_type}_thread", [])
             leaf = thread[-1] if thread else {}
-            metadata = pair.get("metadata", {})
-            comment_id = metadata.get(f"{thread_type}_comment_id") or leaf.get("id", "")
-            target_key = f"{split}:{pair['mod_comment_id']}:{thread_type}"
-            body = leaf.get("body", "") or ""
-            rule_cluster_id = metadata.get("rule_cluster_id", -1)
-            rule_cluster_label = metadata.get("rule_cluster_label", "Other")
-
-            targets.append({
-                "target_key": target_key,
-                "split": split,
-                "pair_index": pair_index,
-                "comment_id": comment_id,
-                "thread_type": thread_type,
-                "mod_comment_id": pair["mod_comment_id"],
-                "submission_id": pair["submission_id"],
-                "subreddit": pair["subreddit"],
-                "subreddit_cluster_id": pair.get("subreddit_cluster_id", -1),
-                "subreddit_cluster_label": pair.get("subreddit_cluster_label", "Other"),
-                "rule_cluster_id": rule_cluster_id,
-                "rule_cluster_label": rule_cluster_label,
-                "rule": metadata.get("rule", ""),
-                "correct_answer": pair[f"{thread_type}_correct_answer"],
-                "correct_rule": _correct_rule(pair, thread_type),
-                "body": body,
-            })
+            record["pair_index"] = pair_index
+            record["body"] = leaf.get("body", "") or ""
+            targets.append(record)
             if limit is not None and len(targets) >= limit:
                 return targets
     return targets
