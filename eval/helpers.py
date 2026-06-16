@@ -504,7 +504,10 @@ def _top_indices_from_pool(scores, pool: List[int], limit: int, used: set) -> Li
     import torch
 
     index_tensor = torch.tensor(filtered, dtype=torch.long)
-    values = scores.index_select(0, index_tensor)
+    # Cast only the gathered bucket slice to fp32; with a filter the bucket is a
+    # small fraction of the (possibly fp16) candidate row, so up-casting the whole
+    # row before filtering would be wasted work.
+    values = scores.index_select(0, index_tensor).float()
     top_n = min(limit, len(filtered))
     top_positions = torch.topk(values, top_n).indices.tolist()
     return [filtered[pos] for pos in top_positions]
@@ -538,6 +541,13 @@ def _rag_provenance(pair: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "violating": violating,
         "compliant": compliant,
     }
+
+
+def _attach_rag_provenance(result: Dict[str, Any], pair: Dict[str, Any]) -> None:
+    """Attach the few-shot RAG provenance for a pair to its result record, if any."""
+    provenance = _rag_provenance(pair)
+    if provenance:
+        result['few_shot'] = provenance
 
 
 def _select_rag_examples_for_target(scores,
@@ -642,7 +652,7 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
                 missing_queries += 1
                 examples_by_target[target_key] = []
                 continue
-            scores = similarity_matrix[row_idx].float()
+            scores = similarity_matrix[row_idx]
             bucket = candidate_buckets.get(_rag_filter_key(target, filter_mode), empty_bucket)
             examples_by_target[target_key] = _select_rag_examples_for_target(
                 scores,
@@ -670,7 +680,7 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
                                    model_name: str,
                                    mode: str,
                                    logger: logging.Logger,
-                                   split: str = None,
+                                   split: str,
                                    rag_examples_by_target: Dict[str, List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """
     Build prompts for all thread pairs (both violating and compliant).
@@ -682,7 +692,7 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
         model_name: Model name
         mode: Phrase mode ('prefill' or 'prompt')
         logger: Logger instance
-        split: Dataset split, required for RAG target keys
+        split: Dataset split (used to build RAG target keys)
         rag_examples_by_target: Optional mapping from target key to examples
 
     Returns:
@@ -696,8 +706,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
 
     processed_pairs = []
     for pair in thread_pairs:
-        violating_target_key = _thread_target_key(split, pair, "violating") if split else None
-        compliant_target_key = _thread_target_key(split, pair, "compliant") if split else None
+        violating_target_key = _thread_target_key(split, pair, "violating")
+        compliant_target_key = _thread_target_key(split, pair, "compliant")
         violating_rag_examples = rag_examples.get(violating_target_key, [])
         compliant_rag_examples = rag_examples.get(compliant_target_key, [])
 
@@ -788,10 +798,10 @@ def _build_single_prompt(pair: Dict[str, Any],
     return {'messages': messages}
 
 
-def _format_few_shot_answer(pair: Dict[str, Any], thread_type: str) -> str:
-    correct_answer = pair[f"{thread_type}_correct_answer"]
-    correct_rule = _correct_rule_from_options(pair, thread_type)
-    if thread_type == "compliant" or correct_rule == "No rules broken":
+def _format_few_shot_answer(metadata: Dict[str, Any]) -> str:
+    correct_answer = metadata["correct_answer"]
+    correct_rule = metadata["correct_rule"]
+    if metadata["thread_type"] == "compliant" or correct_rule == "No rules broken":
         return (
             "Answer: The target comment does not violate any listed rule. "
             f"The correct answer is {correct_answer}."
@@ -824,7 +834,7 @@ def _build_few_shot_content(few_shot_examples: List[Dict[str, Any]],
         ))
         content.append({
             "type": "text",
-            "text": f"\n{_format_few_shot_answer(example_pair, example_thread_type)}\n\n"
+            "text": f"\n{_format_few_shot_answer(example['metadata'])}\n\n"
         })
     return content
 
@@ -1504,9 +1514,7 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
                 'subreddit_language': pair.get('subreddit_language', 'unknown')
             }
         }
-        rag_provenance = _rag_provenance(pair)
-        if rag_provenance:
-            result['few_shot'] = rag_provenance
+        _attach_rag_provenance(result, pair)
         results.append(result)
 
     logger.info(f"Generated {len(results)} × 2 Stage 2 clean answers")
@@ -1832,9 +1840,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                 'subreddit_language': pair.get('subreddit_language', 'unknown')
             }
         }
-        rag_provenance = _rag_provenance(pair)
-        if rag_provenance:
-            result['few_shot'] = rag_provenance
+        _attach_rag_provenance(result, pair)
         results.append(result)
 
     # Save results to batch output directory for caching

@@ -17,8 +17,7 @@ def get_eval_dir() -> Path:
 
 
 def get_perf_dir(model: str, split: str, context: str,
-                 phrase: str = 'baseline', mode: str = 'prefill',
-                 run_suffix: str = None) -> Path:
+                 phrase: str = 'baseline', mode: str = 'prefill') -> Path:
     """Build the performance directory path for a given configuration.
 
     Args:
@@ -27,16 +26,12 @@ def get_perf_dir(model: str, split: str, context: str,
         context: Context type (e.g. 'submission-media-discussion-user')
         phrase: Phrase type ('baseline' or other)
         mode: Mode type (e.g. 'prefill')
-        run_suffix: Optional child run directory for variants such as RAG
 
     Returns:
         Path to the performance directory
     """
     subdir = 'baseline' if phrase == 'baseline' else f'{phrase}_{mode}'
-    perf_dir = get_eval_dir() / model / split / context / subdir
-    if run_suffix:
-        perf_dir = perf_dir / run_suffix
-    return perf_dir
+    return get_eval_dir() / model / split / context / subdir
 
 
 def get_latest_performance_file(perf_dir: Path) -> Path:
