@@ -78,7 +78,7 @@ python hydrate/2_download_media.py
 After step 1 the Pushshift subset lives under the path configured in
 `config.PUSHSHIFT_DATA`. After step 2 you have
 `data/{train,val,test}_hydrated_clustered.json.zst`. After step 3 those same
-files have their `media_files` arrays populated with local paths.
+files have their `media_files` arrays populated with media-root-relative paths.
 
 ---
 
@@ -208,8 +208,8 @@ of aborting.
 
 For each hydrated submission, follows the priority hierarchy
 (`media_metadata` → `url` → `oembed` → `preview`), validates Content-Type,
-caps files at 50 MB, and writes actual local paths into each submission's
-`media_files` array in the hydrated JSON.
+caps files at 50 MB, and writes media-root-relative paths into each
+submission's `media_files` array in the hydrated JSON.
 
 This step reuses the same extraction + download logic as
 `pipeline/7_collect_media.py` via `utils/media.py`.
@@ -235,7 +235,7 @@ python hydrate/2_download_media.py --skip-existing
 | `--media-dir` | `./data/media` | where images land (per-subreddit subdirs) |
 | `--splits` | all | subset of {train, val, test} |
 | `--num-workers` | 16 | HTTP threads (I/O-bound; threads, not processes) |
-| `--skip-existing` | off | keep existing `media_files` paths that still exist on disk |
+| `--skip-existing` | off | keep existing `media_files` paths that still exist under `--media-dir` |
 
 ### What to expect
 
@@ -250,7 +250,7 @@ python hydrate/2_download_media.py --skip-existing
 ### Output
 
 - `./data/media/<subreddit>/<submission_id>_*.{jpg,png,gif,webp,bmp}`
-- Each `submission.media_files` array in the hydrated JSON now holds real paths
+- Each `submission.media_files` array in the hydrated JSON now holds paths relative to `--media-dir`, e.g. `excel/<id>_direct.png`
 - `./data/hydrate_media_summary.json` — per-split status / error counts
 
 ---
@@ -276,7 +276,7 @@ schema produced by `pipeline/10_assign_cluster_labels.py`:
         "<submission_id>": {
           "submission_object": { /* full submission JSON */ },
           "num_media": 1,
-          "media_files": ["data/media/excel/<id>_direct.png"]
+          "media_files": ["excel/<id>_direct.png"]
         }
       },
       "thread_pairs": [

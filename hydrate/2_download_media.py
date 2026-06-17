@@ -4,7 +4,7 @@ PluRule Hydrate Step 2: Download media for hydrated submissions.
 
 Iterates the hydrated JSON.zst files produced by hydrate/1_hydrate_dataset.py,
 downloads each submission's media via the shared `utils.media` helper, and
-writes the actual local file paths back into each submission's `media_files`
+writes media-root-relative paths back into each submission's `media_files`
 (replacing the `[NEEDS_HYDRATION]` placeholders).
 
 Priority hierarchy and filtering rules match pipeline/7_collect_media.py
@@ -69,6 +69,22 @@ def _thread_local_session():
     return s
 
 
+def _disk_media_path(media_path: str, media_root: Path) -> Path:
+    """Return the on-disk path for stored media paths from old or new datasets."""
+    path = Path(media_path)
+    if path.is_absolute():
+        return path
+    rooted = media_root / path
+    if rooted.exists():
+        return rooted
+    return path
+
+
+def _stored_media_path(disk_path: Path, media_root: Path) -> str:
+    """Store media paths relative to --media-dir for portable hydrated datasets."""
+    return disk_path.resolve().relative_to(media_root.resolve()).as_posix()
+
+
 # ---------------------------------------------------------------------------
 # Split driver
 # ---------------------------------------------------------------------------
@@ -110,10 +126,24 @@ def hydrate_split_media(
                 continue
 
             existing = entry.get("media_files") or []
-            already_on_disk = [p for p in existing if isinstance(p, str) and os.path.exists(p)]
+            already_on_disk = []
+            for p in existing:
+                if not isinstance(p, str) or p == "[NEEDS_HYDRATION]":
+                    continue
+                disk_path = _disk_media_path(p, media_root)
+                if not disk_path.exists():
+                    continue
+                try:
+                    _stored_media_path(disk_path, media_root)
+                except ValueError:
+                    continue
+                already_on_disk.append(disk_path)
             expected = entry.get("num_media", 0)
             if skip_existing and len(already_on_disk) >= expected > 0:
-                entry["media_files"] = already_on_disk
+                entry["media_files"] = [
+                    _stored_media_path(path, media_root)
+                    for path in already_on_disk
+                ]
                 skipped_cached += 1
                 continue
 
@@ -163,7 +193,10 @@ def hydrate_split_media(
 
             # Update media_files paths in place
             entry = data["subreddits"][sub_idx]["submissions"][sub_id]
-            entry["media_files"] = result["file_paths"]
+            entry["media_files"] = [
+                _stored_media_path(Path(path), media_root)
+                for path in result["file_paths"]
+            ]
 
             pbar.update(1)
 
@@ -173,6 +206,7 @@ def hydrate_split_media(
     # Write updated hydrated JSON
     data.setdefault("metadata", {})
     data["metadata"]["media_hydrated_date"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    data["metadata"]["media_path_format"] = "relative_to_media_dir"
     out_path = dataset_dir / f"{split}_hydrated_clustered.json.zst"
     size_mb = write_compressed_json(data, str(out_path))
     logger.info(f"💾 {out_path} ({size_mb:.1f} MB)")

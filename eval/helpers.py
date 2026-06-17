@@ -285,6 +285,7 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
 
     # Extract thread pairs
     thread_pairs = []
+    media_total = 0
     for subreddit_data in data['subreddits']:
         subreddit = subreddit_data['subreddit']
         subreddit_cluster_id = subreddit_data.get('subreddit_cluster_id', -1)
@@ -297,6 +298,14 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
             # Get submission data
             submission_id = pair['metadata']['submission_id']
             submission_data = subreddit_data['submissions'].get(submission_id, {})
+            submission_data = dict(submission_data)
+            media_files = [
+                str(config.MEDIA_DIR / media_file)
+                for media_file in submission_data.get('media_files', [])
+                if isinstance(media_file, str) and media_file != "[NEEDS_HYDRATION]"
+            ]
+            media_total += len(media_files)
+            submission_data['media_files'] = media_files
 
             thread_pair = {
                 'subreddit': subreddit,
@@ -325,6 +334,8 @@ def load_dataset(split: str, logger: logging.Logger, debug: bool = False) -> Lis
         logger.info(f"🐛 Debug mode: Using only {len(thread_pairs)} thread pairs")
     else:
         logger.info(f"✅ Loaded {len(thread_pairs)} thread pairs from {split} split")
+    if media_total:
+        logger.info(f"🖼️  Media paths loaded: {media_total:,}")
 
     return thread_pairs
 
@@ -1277,7 +1288,7 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
     Returns:
         Evaluation results
     """
-    from vllm import LLM
+    from vllm import LLM, SamplingParams
 
     # Initialize LLM engine
     logger.info(f"🚀 Initializing vLLM engine for {model_name}...")
@@ -1324,7 +1335,25 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
 
     # Stage 1: Generate reasoning for all threads (violating + compliant)
     logger.info("📝 Stage 1: Generating reasoning responses...")
-    stage1_responses = _generate_stage1_vllm(thread_pairs, llm_engine, max_response_tokens, context, logger)
+    stage1_sampling_kwargs = {
+        'temperature': 0.0,
+        'max_tokens': max_response_tokens,
+        'stop': None,
+        **model_config.get('sampling_params', {}),
+    }
+    if model_config.get('sampling_params') and model_config.get('sampling_seed') is not None:
+        stage1_sampling_kwargs['seed'] = model_config['sampling_seed']
+    if model_config.get('sampling_params'):
+        logger.info(f"🎛️  Stage 1 sampling params: {stage1_sampling_kwargs}")
+    stage1_sampling_params = SamplingParams(**stage1_sampling_kwargs)
+    stage1_responses = _generate_stage1_vllm(
+        thread_pairs,
+        llm_engine,
+        max_response_tokens,
+        context,
+        logger,
+        sampling_params=stage1_sampling_params
+    )
     logger.info(f"✅ Generated {len(stage1_responses)} × 2 Stage 1 reasoning responses")
 
     # Stage 2: Extract clean answers

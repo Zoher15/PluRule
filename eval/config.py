@@ -6,6 +6,7 @@ moderation tasks, including model configurations, context types, phrases,
 and path utilities.
 """
 
+import os
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -15,6 +16,7 @@ from typing import Dict, Any, List
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
+MEDIA_DIR = Path(os.environ.get("PLURULE_EVAL_MEDIA_DIR", DATA_DIR / "media")).expanduser()
 OUTPUT_DIR = PROJECT_ROOT / "output" / "eval"
 LOGS_DIR = PROJECT_ROOT / "logs" / "eval"
 
@@ -45,6 +47,41 @@ def get_dataset_path(split: str) -> Path:
 # =============================================================================
 
 # vLLM Model Configurations
+QWEN35_SAMPLING_PRESETS = {
+    'thinking_general': {
+        'temperature': 1.0,
+        'top_p': 0.95,
+        'top_k': 20,
+        'min_p': 0.0,
+        'presence_penalty': 1.5,
+        'repetition_penalty': 1.0,
+    },
+    'thinking_precise_coding': {
+        'temperature': 0.6,
+        'top_p': 0.95,
+        'top_k': 20,
+        'min_p': 0.0,
+        'presence_penalty': 0.0,
+        'repetition_penalty': 1.0,
+    },
+    'instruct_general': {
+        'temperature': 0.7,
+        'top_p': 0.8,
+        'top_k': 20,
+        'min_p': 0.0,
+        'presence_penalty': 1.5,
+        'repetition_penalty': 1.0,
+    },
+    'instruct_reasoning': {
+        'temperature': 1.0,
+        'top_p': 0.95,
+        'top_k': 20,
+        'min_p': 0.0,
+        'presence_penalty': 1.5,
+        'repetition_penalty': 1.0,
+    },
+}
+
 VLLM_MODELS = {
     'qwen3-vl-4b-instruct': {
         'hf_path': 'Qwen/Qwen3-VL-4B-Instruct',
@@ -74,7 +111,9 @@ VLLM_MODELS = {
         'hf_path': 'Qwen/Qwen3.5-35B-A3B-FP8',
         'gpu_memory_utilization': 0.95,
         'trust_remote_code': True,
-        'max_model_len': 131072
+        'max_model_len': 131072,
+        'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
+        'sampling_seed': 0,
     }
 }
 

@@ -54,6 +54,22 @@ conda activate plurule-eval
 
 ## Usage
 
+### Media paths
+
+For `submission-media` contexts, `submission.media_files` should contain paths
+relative to the media root, using this layout:
+
+```text
+<subreddit>/<image-file>
+```
+
+Eval resolves those paths under `data/media` by default. To use another media
+directory:
+
+```bash
+export PLURULE_EVAL_MEDIA_DIR=/path/to/media
+```
+
 ### Basic Usage
 
 ```bash
