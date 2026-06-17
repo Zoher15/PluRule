@@ -387,36 +387,24 @@ def main():
 
         # 3. Process evaluation
         model_config = config.get_model_config(args.model)
-        batch_size = 275  # Batch size for local vLLM processing
         results = []
 
         if model_config['type'] == 'vllm':
-            # vLLM models: Process in batches for GPU memory efficiency
-            num_batches = (len(thread_pairs) + batch_size - 1) // batch_size
-            logger.info(f"\nProcessing {len(thread_pairs)} pairs in {num_batches} batch(es) of {batch_size}")
+            # Let vLLM handle request scheduling via max_num_seqs instead of reloading per outer batch.
+            logger.info(f"\nProcessing {len(thread_pairs)} pairs with one vLLM engine")
             logger.info("="*80)
 
-            for i in range(num_batches):
-                start, end = i * batch_size, min((i + 1) * batch_size, len(thread_pairs))
-                batch = thread_pairs[start:end]
+            _log_section(logger, "STEP 3: APPLYING CHAT TEMPLATES")
+            thread_pairs, resource_stats = helpers.apply_chat_template(thread_pairs, args.model, logger)
 
-                logger.info(f"\nBatch {i+1}/{num_batches}: pairs {start}-{end-1} ({len(batch)} pairs)")
-
-                # Apply chat templates
-                _log_section(logger, f"STEP 3.{i+1}: APPLYING CHAT TEMPLATES")
-                batch, resource_stats = helpers.apply_chat_template(batch, args.model, logger)
-
-                # Two-stage evaluation
-                _log_section(logger, f"STEP 4.{i+1}: TWO-STAGE EVALUATION")
-                num_gpus = len(args.cuda.split(','))
-                batch_results = helpers.evaluate_two_stage_vllm(
-                    batch, args.model, model_config, num_gpus,
-                    resource_stats, args.max_response_tokens, args.context, logger
-                )
-
-                results.extend(batch_results)
-                logger.info(f"✓ Batch {i+1}/{num_batches} complete ({len(results)}/{len(thread_pairs)} pairs)")
+            _log_section(logger, "STEP 4: TWO-STAGE EVALUATION")
+            num_gpus = len(args.cuda.split(','))
+            results = helpers.evaluate_two_stage_vllm(
+                thread_pairs, args.model, model_config, num_gpus,
+                resource_stats, args.max_response_tokens, args.context, logger
+            )
         else:
+            batch_size = 256  # Stage 2 batch size for local vLLM answer extraction.
             # API models: Send all data at once for Stage 1 (OpenAI handles 190MB/50K limits)
             # Stage 2 uses batch_size for local vLLM processing
             logger.info(f"\nProcessing {len(thread_pairs)} pairs via API (Stage 2 batch_size={batch_size})")
@@ -434,7 +422,7 @@ def main():
             )
 
         logger.info("\n" + "="*80)
-        logger.info(f"✓ All batches complete! Total results: {len(results)}")
+        logger.info(f"✓ Evaluation complete! Total results: {len(results)}")
         logger.info("="*80)
 
         # 5. Calculate metrics

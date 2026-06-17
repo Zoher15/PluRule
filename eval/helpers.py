@@ -1313,7 +1313,7 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
         max_model_len = max_model_len + max_response_tokens + 50
         logger.info(f"📊 Using calculated max_model_len: {max_model_len} (including {max_response_tokens} token buffer + 50 token safety margin)")
 
-    # Set max_num_seqs conservatively if media is included (images cause memory pressure)
+    # Let model configs opt into explicit request scheduling limits.
     llm_kwargs = {
         'model': model_config['hf_path'],
         'tensor_parallel_size': num_gpus,
@@ -1324,11 +1324,11 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
         'seed': 0
     }
 
-    if 'media' in context.split('-'):
-        llm_kwargs['max_num_seqs'] = 32
-        logger.info(f"📊 Setting max_num_seqs=32 due to media in context")
+    if model_config.get('max_num_seqs') is not None:
+        llm_kwargs['max_num_seqs'] = model_config['max_num_seqs']
+        logger.info(f"📊 Setting max_num_seqs={model_config['max_num_seqs']} from model config")
     else:
-        logger.info(f"📊 Using vLLM auto max_num_seqs (no media in context)")
+        logger.info(f"📊 Using vLLM auto max_num_seqs")
 
     llm_engine = LLM(**llm_kwargs)
     logger.info(f"✅ LLM engine initialized with tensor_parallel_size={num_gpus}")
@@ -1403,49 +1403,57 @@ def _generate_stage1_vllm(thread_pairs: List[Dict[str, Any]],
 
     # Check if media should be included based on context flags
     include_media = 'media' in context.split('-')
+    generation_batch_size = 256
 
-    # Prepare inputs (flatten violating + compliant)
-    inputs = []
-    for idx, pair in enumerate(thread_pairs):
-        # Build inputs for both violating and compliant threads
-        for thread_type, prompts in [('violating', violating_prompts), ('compliant', compliant_prompts)]:
-            # Only load and pass images if media flag is set in context
-            images = []
-            if include_media:
-                media_files = pair.get(f'{thread_type}_prompt_media_files')
-                if media_files is None:
-                    submission = pair.get('submission', {})
-                    media_files = submission.get('media_files', [])
-
-                # Load images separately for each thread to avoid sharing image objects
-                for media_path in media_files:
-                    try:
-                        img = Image.open(media_path).convert('RGB')
-                        images.append(img)
-                    except Exception as e:
-                        logger.warning(f"⚠️  Failed to load image {media_path}: {e}")
-
-            input_dict = {
-                "prompt": prompts[idx],
-                "multi_modal_data": {"image": images} if images else {},
-                "multi_modal_uuids": {"image": [f"uuid_{thread_type}{uuid_suffix}_{pair['mod_comment_id']}_{j}"
-                                                for j in range(len(images))]} if images else {}
-            }
-            inputs.append(input_dict)
-
-    # Generate responses
-    outputs = llm_engine.generate(inputs, sampling_params=sampling_params)
-
-    # Unflatten responses back to pairs
     responses = []
-    for i in range(0, len(outputs), 2):
-        violating_response = outputs[i].outputs[0].text
-        compliant_response = outputs[i + 1].outputs[0].text
+    for start in range(0, len(thread_pairs), generation_batch_size):
+        end = min(start + generation_batch_size, len(thread_pairs))
+        batch_pairs = thread_pairs[start:end]
 
-        responses.append({
-            'violating': violating_response,
-            'compliant': compliant_response
-        })
+        # Prepare inputs for only this batch so media objects are not kept for the full split.
+        inputs = []
+        for local_idx, pair in enumerate(batch_pairs):
+            pair_idx = start + local_idx
+            # Build inputs for both violating and compliant threads
+            for thread_type, prompts in [('violating', violating_prompts), ('compliant', compliant_prompts)]:
+                # Only load and pass images if media flag is set in context
+                images = []
+                if include_media:
+                    media_files = pair.get(f'{thread_type}_prompt_media_files')
+                    if media_files is None:
+                        submission = pair.get('submission', {})
+                        media_files = submission.get('media_files', [])
+
+                    # Load images separately for each thread to avoid sharing image objects
+                    for media_path in media_files:
+                        try:
+                            img = Image.open(media_path).convert('RGB')
+                            images.append(img)
+                        except Exception as e:
+                            logger.warning(f"⚠️  Failed to load image {media_path}: {e}")
+
+                input_dict = {
+                    "prompt": prompts[pair_idx],
+                    "multi_modal_data": {"image": images} if images else {},
+                    "multi_modal_uuids": {"image": [f"uuid_{thread_type}{uuid_suffix}_{pair['mod_comment_id']}_{j}"
+                                                    for j in range(len(images))]} if images else {}
+                }
+                inputs.append(input_dict)
+
+        # Generate responses
+        outputs = llm_engine.generate(inputs, sampling_params=sampling_params)
+
+        # Unflatten responses back to pairs
+        for i in range(0, len(outputs), 2):
+            violating_response = outputs[i].outputs[0].text
+            compliant_response = outputs[i + 1].outputs[0].text
+
+            responses.append({
+                'violating': violating_response,
+                'compliant': compliant_response
+            })
+
+        del inputs, outputs
 
     return responses
 
@@ -1564,7 +1572,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                            max_response_tokens: int,
                            logger: logging.Logger,
                            override: bool = False,
-                           stage2_batch_size: int = 275) -> List[Dict[str, Any]]:
+                           stage2_batch_size: int = 256) -> List[Dict[str, Any]]:
     """
     Two-stage evaluation using OpenAI Flex API (Stage 1) + local vLLM (Stage 2).
 
@@ -1581,7 +1589,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
         max_response_tokens: Max tokens for Stage 1 response
         logger: Logger instance
         override: If True, re-run even if results exist
-        stage2_batch_size: Batch size for Stage 2 local vLLM processing (default: 275)
+        stage2_batch_size: Batch size for Stage 2 local vLLM processing (default: 256)
 
     Returns:
         Evaluation results list

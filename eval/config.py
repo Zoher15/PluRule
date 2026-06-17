@@ -112,6 +112,7 @@ VLLM_MODELS = {
         'gpu_memory_utilization': 0.95,
         'trust_remote_code': True,
         'max_model_len': 131072,
+        'max_num_seqs': 256,
         'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
         'sampling_seed': 0,
     }
@@ -264,8 +265,7 @@ PHRASES = {
     'baseline': '',
     'cot': 'Let\'s think step by step',
     'analyze': 'Let\'s carefully analyze this content',
-    'artifacts': 'Let\'s look for rule violations',
-    'rules': 'Let\'s compare this against the subreddit rules',
+    'rules': 'Let\'s compare this against the subreddit\'s rules',
     'grounded_choice': 'Let\'s first examine the context around the target comment, then compare it with the subreddit rules and listed answer options',
     'grounded_target': 'Let\'s first examine the subreddit, rules, submission, and discussion only insofar as they clarify the target comment, then choose from the listed options',
     'grounded_context': 'Let\'s first examine the context that grounds the target comment: the subreddit, its rules, the submission, and the discussion, before choosing from the listed options'
