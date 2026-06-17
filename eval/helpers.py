@@ -1277,12 +1277,14 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
     logger.info(f"🚀 Initializing vLLM engine for {model_name}...")
     logger.info(f"📊 Using {num_gpus} GPU(s) for tensor parallelism")
 
-    # For Qwen3-VL models, set multimodal limits based on actual data
+    # For Qwen multimodal models, set multimodal limits based on actual data.
     limit_mm_per_prompt = None
-    if 'Qwen3-VL' in model_config['hf_path'] or 'Qwen/Qwen3-VL' in model_config['hf_path']:
+    hf_path = model_config['hf_path']
+    is_qwen_multimodal = 'Qwen3-VL' in hf_path or 'Qwen/Qwen3-VL' in hf_path or 'Qwen3.5' in hf_path
+    if is_qwen_multimodal:
         max_images = resource_stats.get('max_images_per_prompt', 50)
         limit_mm_per_prompt = {'image': max_images, 'video': 0}
-        logger.info(f"📊 Setting limit_mm_per_prompt for Qwen3-VL: {limit_mm_per_prompt}")
+        logger.info(f"📊 Setting limit_mm_per_prompt for Qwen multimodal model: {limit_mm_per_prompt}")
 
     # Use actual max token length if available, otherwise fall back to config
     max_model_len = resource_stats.get('max_model_len', 0)
@@ -1870,16 +1872,38 @@ def _extract_answer_choice(text: str) -> str:
     """
     import re
 
-    text = text.strip().lower()
+    text = _strip_thinking_content(text).strip().lower()
 
-    # Look for patterns like "(a)", "(b)", "a)", "a.", "option a", etc.
-    # Match single letter a-z
-    match = re.search(r'\(?([a-z])\)?', text)
-    if match:
-        letter = match.group(1)
-        return f"({letter})"
+    # Prefer explicit answer formats. Avoid matching arbitrary letters in
+    # prose or partial thinking tags such as "<think>".
+    patterns = [
+        r'\(([a-z])\)',
+        r'\b(?:answer|choice|option)\s*[:\-]\s*\(?([a-z])\)?\b',
+        r'\b(?:answer|choice)\s+(?:is\s+)?(?:option\s+)?\(?([a-z])\)?\b',
+        r'\boption\s+([a-z])\b',
+        r'^\s*([a-z])\)',
+        r'^\s*([a-z])\.',
+        r'^\s*([a-z])\s*$',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            letter = match.group(1)
+            return f"({letter})"
 
     return ""
+
+
+def _strip_thinking_content(text: str) -> str:
+    """Remove Qwen-style thinking blocks before parsing final answers."""
+    import re
+
+    text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL | re.IGNORECASE)
+    if '<think>' in text.lower():
+        # In short-answer continuations a thinking block may be truncated.
+        # Treat that as no parseable answer rather than extracting "t".
+        return ''
+    return text
 
 # =============================================================================
 # METRICS CALCULATION

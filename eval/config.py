@@ -69,6 +69,12 @@ VLLM_MODELS = {
     'qwen3-vl-30b-thinking': {
         'hf_path': 'Qwen/Qwen3-VL-30B-A3B-Thinking',
         'gpu_memory_utilization': 0.95
+    },
+    'qwen3.5-35b-a3b-fp8': {
+        'hf_path': 'Qwen/Qwen3.5-35B-A3B-FP8',
+        'gpu_memory_utilization': 0.95,
+        'trust_remote_code': True,
+        'max_model_len': 131072
     }
 }
 
