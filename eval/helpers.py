@@ -414,6 +414,13 @@ def _thread_target_key(split: str, pair: Dict[str, Any], thread_type: str) -> st
     return f"{split}:{pair['mod_comment_id']}:{thread_type}"
 
 
+def _rag_thread_leaf(pair: Dict[str, Any], thread_type: str) -> Dict[str, Any]:
+    thread = pair.get(f"{thread_type}_thread", [])
+    if isinstance(thread, list) and thread and isinstance(thread[-1], dict):
+        return thread[-1]
+    return {}
+
+
 def _correct_rule_from_options(pair: Dict[str, Any], thread_type: str) -> str:
     correct_answer = pair[f"{thread_type}_correct_answer"]
     for option in pair.get(f"{thread_type}_answer_options", []):
@@ -424,8 +431,7 @@ def _correct_rule_from_options(pair: Dict[str, Any], thread_type: str) -> str:
 
 def _rag_target_metadata(split: str, pair: Dict[str, Any], thread_type: str) -> Dict[str, Any]:
     metadata = pair.get("metadata", {})
-    thread = pair.get(f"{thread_type}_thread", [])
-    leaf = thread[-1] if thread else {}
+    leaf = _rag_thread_leaf(pair, thread_type)
     comment_id = metadata.get(f"{thread_type}_comment_id") or leaf.get("id", "")
     return {
         "target_key": _thread_target_key(split, pair, thread_type),
@@ -1438,11 +1444,11 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
 
     # Prepare Stage 2 prompts (append reasoning + answer phrase)
     violating_prompts = [
-        pair['violating_prompt_text'] + stage1['violating'] + config.ANSWER_PHRASE
+        pair['violating_prompt_text'] + _close_unfinished_thinking(pair['violating_prompt_text'], stage1['violating']) + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_responses)
     ]
     compliant_prompts = [
-        pair['compliant_prompt_text'] + stage1['compliant'] + config.ANSWER_PHRASE
+        pair['compliant_prompt_text'] + _close_unfinished_thinking(pair['compliant_prompt_text'], stage1['compliant']) + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_responses)
     ]
 
@@ -1710,11 +1716,11 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     # Build Stage 2 prompts FIRST (Stage 1 content only + answer phrase as prefill)
     # NOTE: We use 'content' (output text), not 'reasoning_summary' for Stage 2
     violating_prompts = [
-        pair['violating_prompt_text'] + stage1['violating_content'] + config.ANSWER_PHRASE
+        pair['violating_prompt_text'] + _close_unfinished_thinking(pair['violating_prompt_text'], stage1['violating_content']) + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_by_pair)
     ]
     compliant_prompts = [
-        pair['compliant_prompt_text'] + stage1['compliant_content'] + config.ANSWER_PHRASE
+        pair['compliant_prompt_text'] + _close_unfinished_thinking(pair['compliant_prompt_text'], stage1['compliant_content']) + config.ANSWER_PHRASE
         for pair, stage1 in zip(thread_pairs, stage1_by_pair)
     ]
 
@@ -1904,6 +1910,18 @@ def _strip_thinking_content(text: str) -> str:
         # Treat that as no parseable answer rather than extracting "t".
         return ''
     return text
+
+
+def _close_unfinished_thinking(prompt_text: str, generated_text: str) -> str:
+    """Close a dangling Qwen thinking block before answer-extraction prefill."""
+    if not generated_text:
+        return generated_text
+
+    combined = (prompt_text or '') + generated_text
+    lowered = combined.lower()
+    if '<think>' in lowered and '</think>' not in lowered:
+        return generated_text.rstrip() + '\n</think>\n\n'
+    return generated_text
 
 # =============================================================================
 # METRICS CALCULATION

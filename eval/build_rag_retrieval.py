@@ -39,6 +39,7 @@ def _load_root_config() -> Any:
 
 ROOT_CONFIG = _load_root_config()
 DEFAULT_TASK_DESCRIPTION = "Retrieve similar Reddit target comments for moderation examples"
+NEEDS_HYDRATION_MARKER = "[NEEDS_HYDRATION]"
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,18 +78,46 @@ def _quiet_logger():
 def flatten_targets(split: str, limit: int = None) -> List[Dict[str, Any]]:
     pairs = helpers.load_dataset(split, _quiet_logger(), debug=False)
     targets = []
+    marker_skipped = 0
+    malformed_skipped = 0
+
+    def warn_skips():
+        if marker_skipped:
+            print(
+                f"WARNING: Skipped {marker_skipped} {split} targets with "
+                f"{NEEDS_HYDRATION_MARKER} leaf comments"
+            )
+        if malformed_skipped:
+            print(
+                f"WARNING: Skipped {malformed_skipped} {split} targets without "
+                "valid leaf comment objects"
+            )
+
     for pair_index, pair in enumerate(pairs):
         for thread_type in ("violating", "compliant"):
             # Reuse the shared target-record builder so the artifact's target_key
             # and metadata stay identical to the eval-time consumer in helpers.py.
             record = helpers._rag_target_metadata(split, pair, thread_type)
             thread = pair.get(f"{thread_type}_thread", [])
-            leaf = thread[-1] if thread else {}
+            raw_leaf = thread[-1] if isinstance(thread, list) and thread else None
+            if raw_leaf == NEEDS_HYDRATION_MARKER:
+                marker_skipped += 1
+                continue
+            if not isinstance(raw_leaf, dict):
+                malformed_skipped += 1
+                continue
+            leaf = raw_leaf
+            body = leaf.get("body", "") or ""
+            if body.strip() == NEEDS_HYDRATION_MARKER:
+                marker_skipped += 1
+                continue
             record["pair_index"] = pair_index
-            record["body"] = leaf.get("body", "") or ""
+            record["body"] = body
             targets.append(record)
             if limit is not None and len(targets) >= limit:
+                warn_skips()
                 return targets
+    warn_skips()
     return targets
 
 
@@ -101,6 +130,7 @@ def build_embedding_texts(records: List[Dict[str, Any]], task_description: str) 
 
 
 def embed_texts(texts: List[str], model_name: str, args: argparse.Namespace):
+    import inspect
     from transformers import AutoTokenizer
     from vllm import LLM
     from vllm.inputs import TokensPrompt
@@ -116,14 +146,22 @@ def embed_texts(texts: List[str], model_name: str, args: argparse.Namespace):
     max_len = max((len(tokens) for tokens in tokenized), default=16)
     max_model_len = max(16, max_len)
     print(f"Loading embedding model {model_name} with max_model_len={max_model_len}")
-    model = LLM(
-        model=model_name,
-        task="embed",
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        enforce_eager=True,
-        max_model_len=max_model_len,
-        seed=0,
-    )
+    llm_kwargs = {
+        "model": model_name,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "enforce_eager": True,
+        "max_model_len": max_model_len,
+        "seed": 0,
+    }
+    llm_params = inspect.signature(LLM.__init__).parameters
+    if "task" in llm_params:
+        llm_kwargs["task"] = "embed"
+    else:
+        if "runner" in llm_params:
+            llm_kwargs["runner"] = "pooling"
+        if "convert" in llm_params:
+            llm_kwargs["convert"] = "embed"
+    model = LLM(**llm_kwargs)
 
     embeddings = []
     for start in range(0, len(tokenized), args.embed_batch_size):
