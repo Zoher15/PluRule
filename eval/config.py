@@ -114,6 +114,7 @@ VLLM_MODELS = {
         'max_model_len': 131072,
         'max_num_seqs': 256,
         'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
+        'instruct_sampling_params': QWEN35_SAMPLING_PRESETS['instruct_reasoning'],
         'sampling_seed': 0,
     }
 }

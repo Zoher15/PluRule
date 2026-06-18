@@ -130,6 +130,12 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--instruct',
+        action='store_true',
+        help='Render chat templates in instruct mode by disabling/stripping Qwen thinking tokens'
+    )
+
+    parser.add_argument(
         '--rag-k',
         type=int,
         default=0,
@@ -175,6 +181,10 @@ def _log_section(logger, title: str) -> None:
     logger.info("\n" + "="*80)
     logger.info(title)
     logger.info("="*80)
+
+
+def _append_run_suffix(run_suffix: str, child: str) -> str:
+    return f"{run_suffix}/{child}" if run_suffix else child
 
 
 def _display_top_clusters(logger, metrics: dict, cluster_type: str, n: int = 5) -> None:
@@ -250,6 +260,8 @@ def main():
         source_split=args.rag_source_split,
         artifact_sha256=rag_artifact_sha256
     )
+    if args.instruct:
+        run_suffix = _append_run_suffix(run_suffix, "instruct")
 
     # Create logger
     logger, log_path = helpers.create_logger(
@@ -277,6 +289,7 @@ def main():
     logger.info(f"Split: {args.split}")
     logger.info(f"Context: {args.context}")
     logger.info(f"Phrase: {args.phrase} (mode: {args.mode})")
+    logger.info(f"Instruct mode: {args.instruct}")
     if args.rag_k > 0:
         logger.info(
             f"RAG: k={args.rag_k}, filter={args.rag_filter}, "
@@ -395,13 +408,19 @@ def main():
             logger.info("="*80)
 
             _log_section(logger, "STEP 3: APPLYING CHAT TEMPLATES")
-            thread_pairs, resource_stats = helpers.apply_chat_template(thread_pairs, args.model, logger)
+            thread_pairs, resource_stats = helpers.apply_chat_template(
+                thread_pairs,
+                args.model,
+                logger,
+                instruct=args.instruct
+            )
 
             _log_section(logger, "STEP 4: TWO-STAGE EVALUATION")
             num_gpus = len(args.cuda.split(','))
             results = helpers.evaluate_two_stage_vllm(
                 thread_pairs, args.model, model_config, num_gpus,
-                resource_stats, args.max_response_tokens, args.context, logger
+                resource_stats, args.max_response_tokens, args.context, logger,
+                instruct=args.instruct
             )
         else:
             batch_size = 256  # Stage 2 batch size for local vLLM answer extraction.
@@ -418,7 +437,8 @@ def main():
                 thread_pairs, model_config, output_dir,
                 args.context, args.max_response_tokens, logger,
                 override=args.override,
-                stage2_batch_size=batch_size
+                stage2_batch_size=batch_size,
+                instruct=args.instruct
             )
 
         logger.info("\n" + "="*80)
@@ -441,7 +461,8 @@ def main():
             args.phrase,
             args.mode,
             logger,
-            rag_config=rag_config
+            rag_config=rag_config,
+            instruct=args.instruct
         )
 
         # 7. Display final results

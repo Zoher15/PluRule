@@ -567,6 +567,22 @@ def _attach_rag_provenance(result: Dict[str, Any], pair: Dict[str, Any]) -> None
         result['few_shot'] = provenance
 
 
+def _apply_chat_template(processor, messages: List[Dict[str, Any]], instruct: bool = False, **kwargs):
+    if instruct:
+        kwargs['enable_thinking'] = False
+    try:
+        rendered = processor.apply_chat_template(messages, **kwargs)
+    except TypeError:
+        kwargs.pop('enable_thinking', None)
+        rendered = processor.apply_chat_template(messages, **kwargs)
+
+    if instruct and isinstance(rendered, str):
+        for suffix in ('<think>\n\n</think>\n\n', '<think>\n</think>\n\n', '<think>\n', '<think>'):
+            if rendered.endswith(suffix):
+                return rendered[:-len(suffix)]
+    return rendered
+
+
 def _select_rag_examples_for_target(scores,
                                     candidates: List[Dict[str, Any]],
                                     candidate_lookup: Dict[str, Dict[str, Any]],
@@ -1176,7 +1192,8 @@ def _extract_image_paths_from_content(content: List[Dict[str, Any]]) -> List[str
 
 def apply_chat_template(thread_pairs: List[Dict[str, Any]],
                        model_name: str,
-                       logger: logging.Logger) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                       logger: logging.Logger,
+                       instruct: bool = False) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Apply model-specific chat template to all prompts and calculate resource requirements.
 
@@ -1184,6 +1201,7 @@ def apply_chat_template(thread_pairs: List[Dict[str, Any]],
         thread_pairs: List of thread pairs with prompts
         model_name: Model name
         logger: Logger instance
+        instruct: Whether to disable/strip Qwen thinking tokens in the chat template
 
     Returns:
         Tuple of (thread_pairs with formatted prompts, resource_stats dict)
@@ -1223,9 +1241,12 @@ def apply_chat_template(thread_pairs: List[Dict[str, Any]],
                 prompt_media_files = pair.get('submission', {}).get('media_files', [])
             pair[f'{thread_type}_prompt_media_files'] = prompt_media_files
 
-            # Generate prompt text (for vLLM)
-            prompt_text = processor.apply_chat_template(
+            # Generate prompt text (for vLLM). --instruct uses instruct-style
+            # rendering so prefills are not placed inside a Qwen <think> block.
+            prompt_text = _apply_chat_template(
+                processor,
                 messages,
+                instruct=instruct,
                 tokenize=False,
                 add_generation_prompt=True
             )
@@ -1238,8 +1259,10 @@ def apply_chat_template(thread_pairs: List[Dict[str, Any]],
 
             # Tokenize with images to get accurate token count
             try:
-                inputs = processor.apply_chat_template(
+                inputs = _apply_chat_template(
+                    processor,
                     messages,
+                    instruct=instruct,
                     tokenize=True,
                     add_generation_prompt=True,
                     return_dict=True,
@@ -1271,7 +1294,8 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
                              resource_stats: Dict[str, Any],
                              max_response_tokens: int,
                              context: str,
-                             logger: logging.Logger) -> List[Dict[str, Any]]:
+                             logger: logging.Logger,
+                             instruct: bool = False) -> List[Dict[str, Any]]:
     """
     Two-stage evaluation using vLLM.
 
@@ -1284,6 +1308,7 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
         max_response_tokens: Maximum tokens for response generation
         context: Context string (e.g., "submission-media")
         logger: Logger instance
+        instruct: Whether to use instruct rendering and sampling config
 
     Returns:
         Evaluation results
@@ -1335,15 +1360,18 @@ def evaluate_two_stage_vllm(thread_pairs: List[Dict[str, Any]],
 
     # Stage 1: Generate reasoning for all threads (violating + compliant)
     logger.info("📝 Stage 1: Generating reasoning responses...")
+    sampling_profile = 'instruct_sampling_params' if instruct and model_config.get('instruct_sampling_params') else 'sampling_params'
+    sampling_params_config = model_config.get(sampling_profile, {})
     stage1_sampling_kwargs = {
         'temperature': 0.0,
         'max_tokens': max_response_tokens,
         'stop': None,
-        **model_config.get('sampling_params', {}),
+        **sampling_params_config,
     }
-    if model_config.get('sampling_params') and model_config.get('sampling_seed') is not None:
+    if sampling_params_config and model_config.get('sampling_seed') is not None:
         stage1_sampling_kwargs['seed'] = model_config['sampling_seed']
-    if model_config.get('sampling_params'):
+    if sampling_params_config:
+        logger.info(f"🎛️  Stage 1 sampling profile: {sampling_profile}")
         logger.info(f"🎛️  Stage 1 sampling params: {stage1_sampling_kwargs}")
     stage1_sampling_params = SamplingParams(**stage1_sampling_kwargs)
     stage1_responses = _generate_stage1_vllm(
@@ -1572,7 +1600,8 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                            max_response_tokens: int,
                            logger: logging.Logger,
                            override: bool = False,
-                           stage2_batch_size: int = 256) -> List[Dict[str, Any]]:
+                           stage2_batch_size: int = 256,
+                           instruct: bool = False) -> List[Dict[str, Any]]:
     """
     Two-stage evaluation using OpenAI Flex API (Stage 1) + local vLLM (Stage 2).
 
@@ -1590,6 +1619,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
         logger: Logger instance
         override: If True, re-run even if results exist
         stage2_batch_size: Batch size for Stage 2 local vLLM processing (default: 256)
+        instruct: Whether local Stage 2 should disable/strip Qwen thinking tokens
 
     Returns:
         Evaluation results list
@@ -1748,7 +1778,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
     stage2_config = config.get_model_config(stage2_model)
 
     # Apply chat template for Stage 2 model (gets base prompt with assistant turn prefix)
-    thread_pairs, _ = apply_chat_template(thread_pairs, stage2_model, logger)
+    thread_pairs, _ = apply_chat_template(thread_pairs, stage2_model, logger, instruct=instruct)
 
     # Build Stage 2 prompts FIRST (Stage 1 content only + answer phrase as prefill)
     # NOTE: We use 'content' (output text), not 'reasoning_summary' for Stage 2
@@ -2080,7 +2110,8 @@ def save_results(results: List[Dict[str, Any]],
                 phrase: str,
                 mode: str,
                 logger: logging.Logger,
-                rag_config: Optional[Dict[str, Any]] = None) -> Tuple[Path, Path]:
+                rag_config: Optional[Dict[str, Any]] = None,
+                instruct: bool = False) -> Tuple[Path, Path]:
     """
     Save evaluation results and metrics.
 
@@ -2095,6 +2126,7 @@ def save_results(results: List[Dict[str, Any]],
         mode: Phrase mode
         logger: Logger instance
         rag_config: Optional RAG configuration to record in performance output
+        instruct: Whether this run used instruct-style chat template rendering
 
     Returns:
         Tuple of (reasoning_path, performance_path)
@@ -2115,6 +2147,7 @@ def save_results(results: List[Dict[str, Any]],
         'context': context,
         'phrase': phrase,
         'mode': mode,
+        'instruct': instruct,
         'metrics': metrics
     }
     if rag_config:
