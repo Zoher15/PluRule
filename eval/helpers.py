@@ -475,6 +475,17 @@ def _build_candidate_lookup(split: str, pairs: List[Dict[str, Any]]) -> Dict[str
     return lookup
 
 
+def _pair_has_media(pair: Dict[str, Any]) -> bool:
+    """Return whether a thread pair's source submission has media."""
+    submission = pair.get("submission") or {}
+    if submission.get("media_files"):
+        return True
+    try:
+        return int(submission.get("num_media") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _rag_filter_key(record: Dict[str, Any], filter_mode: str) -> Any:
     """Bucket key for RAG filtering; a candidate matches a target iff their keys are equal."""
     if filter_mode == "none":
@@ -567,6 +578,48 @@ def _attach_rag_provenance(result: Dict[str, Any], pair: Dict[str, Any]) -> None
         result['few_shot'] = provenance
 
 
+def _trace_rationale(row: Dict[str, Any]) -> str:
+    trace_reasoning = row.get("trace_reasoning") or ""
+    if trace_reasoning.strip():
+        return trace_reasoning.strip()
+
+    completion = row.get("completion") or ""
+    if "</think>" in completion:
+        return completion.split("</think>", 1)[0].strip()
+
+    raw_content = row.get("raw_content") or ""
+    if "<reasoning>" in raw_content and "</reasoning>" in raw_content:
+        return raw_content.split("<reasoning>", 1)[1].split("</reasoning>", 1)[0].strip()
+
+    return raw_content.strip()
+
+
+def load_rag_trace_lookup(trace_path: Optional[Path], logger: logging.Logger) -> Dict[str, Dict[str, Any]]:
+    if not trace_path:
+        return {}
+
+    trace_lookup = {}
+    with open(trace_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("trace_is_empty"):
+                continue
+            rationale = _trace_rationale(row)
+            if not rationale:
+                continue
+            trace_lookup[row["thread_id"]] = {
+                "rationale": rationale,
+                "response": (row.get("trace_response") or "").strip(),
+                "letter": row.get("letter"),
+                "submission_id": row.get("submission_id"),
+            }
+
+    logger.info(f"Loaded {len(trace_lookup)} RAG trace rationale(s) from {trace_path}")
+    return trace_lookup
+
+
 def _apply_chat_template(processor, messages: List[Dict[str, Any]], instruct: bool = False, **kwargs):
     if instruct:
         kwargs['enable_thinking'] = False
@@ -589,6 +642,7 @@ def _select_rag_examples_for_target(scores,
                                     k: int,
                                     balance: str,
                                     bucket: Dict[str, List[int]],
+                                    trace_lookup: Dict[str, Dict[str, Any]],
                                     self_index: Optional[int] = None) -> List[Dict[str, Any]]:
     used = set()
     if self_index is not None:
@@ -616,12 +670,22 @@ def _select_rag_examples_for_target(scores,
     for idx in selected_indices:
         record = candidates[idx]
         lookup = candidate_lookup[record["target_key"]]
-        examples.append({
+        metadata = lookup["metadata"]
+        example = {
             "pair": lookup["pair"],
             "thread_type": lookup["thread_type"],
-            "metadata": lookup["metadata"],
+            "metadata": metadata,
             "score": float(scores[idx].item()),
-        })
+        }
+        trace_key = f"{metadata['mod_comment_id']}__{metadata['thread_type']}"
+        trace = trace_lookup.get(trace_key)
+        if (
+            trace
+            and trace.get("letter") == metadata["correct_answer"]
+            and trace.get("submission_id") == metadata["submission_id"]
+        ):
+            example["trace"] = trace
+        examples.append(example)
     return examples
 
 
@@ -632,6 +696,7 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
                          filter_mode: str,
                          balance: str,
                          source_split: str,
+                         trace_path: Optional[Path],
                          logger: logging.Logger) -> Dict[str, List[Dict[str, Any]]]:
     """Load a retrieval artifact and select RAG examples for every target thread."""
     if k <= 0:
@@ -667,11 +732,17 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
 
     logger.info(f"Loading RAG source split: {source_split}")
     source_pairs = load_dataset(source_split, logger, debug=False)
+    original_source_count = len(source_pairs)
+    source_pairs = [pair for pair in source_pairs if not _pair_has_media(pair)]
+    skipped_pairs = original_source_count - len(source_pairs)
+    if skipped_pairs:
+        logger.info(f"RAG media filter: excluded {skipped_pairs} source pair(s)")
     candidate_lookup = _build_candidate_lookup(source_split, source_pairs)
     candidate_buckets = _build_candidate_buckets(candidates, candidate_lookup, filter_mode)
     candidate_index_by_key = {
         candidate.get("target_key"): idx for idx, candidate in enumerate(candidates)
     }
+    trace_lookup = load_rag_trace_lookup(trace_path, logger)
     empty_bucket = {"all": [], "violating": [], "compliant": []}
 
     examples_by_target = {}
@@ -694,6 +765,7 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
                 k,
                 balance,
                 bucket,
+                trace_lookup,
                 self_index=candidate_index_by_key.get(target_key),
             )
 
@@ -714,7 +786,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
                                    mode: str,
                                    logger: logging.Logger,
                                    split: str,
-                                   rag_examples_by_target: Dict[str, List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+                                   rag_examples_by_target: Dict[str, List[Dict[str, Any]]] = None,
+                                   instruct: bool = False) -> List[Dict[str, Any]]:
     """
     Build prompts for all thread pairs (both violating and compliant).
 
@@ -752,7 +825,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             phrase_text=phrase_text,
             model_config=model_config,
             mode=mode,
-            few_shot_examples=violating_rag_examples
+            few_shot_examples=violating_rag_examples,
+            instruct=instruct
         )
 
         compliant_prompt = _build_single_prompt(
@@ -762,7 +836,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             phrase_text=phrase_text,
             model_config=model_config,
             mode=mode,
-            few_shot_examples=compliant_rag_examples
+            few_shot_examples=compliant_rag_examples,
+            instruct=instruct
         )
 
         processed_pair = {
@@ -785,7 +860,8 @@ def _build_single_prompt(pair: Dict[str, Any],
                         phrase_text: str,
                         model_config: Dict[str, Any],
                         mode: str,
-                        few_shot_examples: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+                        few_shot_examples: List[Dict[str, Any]] = None,
+                        instruct: bool = False) -> Dict[str, Any]:
     """
     Build prompt for a single thread (violating or compliant).
 
@@ -813,27 +889,37 @@ def _build_single_prompt(pair: Dict[str, Any],
         prompt_phrase = None
     question_text = _build_question_text(pair, thread_type, context_config, prompt_phrase)
 
-    content = []
     if few_shot_examples:
-        content.extend(_build_few_shot_content(few_shot_examples, context_config, model_config))
-        content.append({"type": "text", "text": "Now answer the target case.\n\n"})
+        messages.extend(_build_few_shot_messages(few_shot_examples, context_config, model_config, instruct))
 
     # Build user content with multimodal data
-    content.extend(_build_multimodal_content(
+    content = _build_multimodal_content(
         pair,
         question_text,
         context_config,
         model_config
-    ))
+    )
 
     messages.append({"role": "user", "content": content})
 
     return {'messages': messages}
 
 
-def _format_few_shot_answer(metadata: Dict[str, Any]) -> str:
+def _format_few_shot_answer(metadata: Dict[str, Any],
+                            trace: Optional[Dict[str, Any]] = None,
+                            instruct: bool = False) -> str:
     correct_answer = metadata["correct_answer"]
     correct_rule = metadata["correct_rule"]
+    if trace and trace.get("rationale"):
+        response = trace.get("response")
+        if not response:
+            response = f"Answer: {correct_answer} {correct_rule}."
+        if instruct:
+            return f"{trace['rationale']}\n\n{response}"
+        return (
+            f"<think>\n{trace['rationale']}\n</think>\n\n"
+            f"{response}"
+        )
     if metadata["thread_type"] == "compliant" or correct_rule == "No rules broken":
         return (
             "Answer: The target comment does not violate any listed rule. "
@@ -845,11 +931,12 @@ def _format_few_shot_answer(metadata: Dict[str, Any]) -> str:
     )
 
 
-def _build_few_shot_content(few_shot_examples: List[Dict[str, Any]],
-                            context_config: Dict[str, Any],
-                            model_config: Dict[str, Any]) -> List[Dict[str, Any]]:
-    content = [{"type": "text", "text": "Here are labeled examples.\n\n"}]
-    for idx, example in enumerate(few_shot_examples, start=1):
+def _build_few_shot_messages(few_shot_examples: List[Dict[str, Any]],
+                             context_config: Dict[str, Any],
+                             model_config: Dict[str, Any],
+                             instruct: bool = False) -> List[Dict[str, Any]]:
+    messages = []
+    for example in few_shot_examples:
         example_pair = example["pair"]
         example_thread_type = example["thread_type"]
         example_text = _build_question_text(
@@ -858,18 +945,20 @@ def _build_few_shot_content(few_shot_examples: List[Dict[str, Any]],
             context_config,
             prompt_phrase=None
         )
-        content.append({"type": "text", "text": f"Example {idx}:\n"})
-        content.extend(_build_multimodal_content(
-            example_pair,
-            example_text,
-            context_config,
-            model_config
-        ))
-        content.append({
-            "type": "text",
-            "text": f"\n{_format_few_shot_answer(example['metadata'])}\n\n"
+        messages.append({
+            "role": "user",
+            "content": _build_multimodal_content(
+                example_pair,
+                example_text,
+                context_config,
+                model_config
+            )
         })
-    return content
+        messages.append({
+            "role": "assistant",
+            "content": _format_few_shot_answer(example['metadata'], example.get('trace'), instruct)
+        })
+    return messages
 
 
 def _build_question_text(pair: Dict[str, Any],
@@ -1190,6 +1279,15 @@ def _extract_image_paths_from_content(content: List[Dict[str, Any]]) -> List[str
     return paths
 
 
+def _extract_image_paths_from_messages(messages: List[Dict[str, Any]]) -> List[str]:
+    paths = []
+    for message in messages:
+        content = message.get('content')
+        if isinstance(content, list):
+            paths.extend(_extract_image_paths_from_content(content))
+    return paths
+
+
 def apply_chat_template(thread_pairs: List[Dict[str, Any]],
                        model_name: str,
                        logger: logging.Logger,
@@ -1233,10 +1331,8 @@ def apply_chat_template(thread_pairs: List[Dict[str, Any]],
             messages = pair[f'{thread_type}_prompt']['messages']
 
             # Count images actually in the content (not just in media_files)
-            content = messages[0]['content']
-            num_images = sum(1 for item in content if isinstance(item, dict) and item.get('type') == 'image')
-            max_images_per_prompt = max(max_images_per_prompt, num_images)
-            prompt_media_files = _extract_image_paths_from_content(content)
+            prompt_media_files = _extract_image_paths_from_messages(messages)
+            max_images_per_prompt = max(max_images_per_prompt, len(prompt_media_files))
             if not prompt_media_files:
                 prompt_media_files = pair.get('submission', {}).get('media_files', [])
             pair[f'{thread_type}_prompt_media_files'] = prompt_media_files

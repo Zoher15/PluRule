@@ -117,8 +117,11 @@ python eval/evaluate.py \
 ```
 
 Few-shot examples use the same prompt context as the target eval case. Retrieval
-is scored only on target-comment text; examples include their question, MCQ
-options, and a generic labeled answer.
+is scored only on target-comment text. Retrieved cases are rendered as prior
+user/assistant turns when a matching discloze trace is available: the assistant
+turn contains `<think>{trace_reasoning}</think>` followed by `trace_response`.
+With `--instruct`, the example assistant turn omits the `<think>` wrapper.
+Source examples whose submissions contain media are skipped by default.
 
 ### Arguments
 
@@ -160,6 +163,7 @@ options, and a generic labeled answer.
 - `--rag-filter`: Retrieval filter: `none`, `subreddit`, `subreddit-cluster`, or `rule-cluster`.
 - `--rag-balance`: `mixed` balances violating/compliant examples before filling from nearest neighbors; `top` uses nearest neighbors only.
 - `--rag-source-split`: Candidate split used by the retrieval artifact. Defaults to `train`.
+- `--rag-trace-path`: Discloze trace JSONL used to add teacher rationales to matched retrieved examples. Defaults to `/home/exouser/discloze/data/traces/train/full.jsonl`; override with `PLURULE_RAG_TRACE_PATH`.
 
 ## Output Format
 

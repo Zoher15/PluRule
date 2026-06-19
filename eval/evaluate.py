@@ -173,6 +173,16 @@ def parse_arguments() -> argparse.Namespace:
         help='Candidate split used by the RAG retrieval artifact'
     )
 
+    parser.add_argument(
+        '--rag-trace-path',
+        type=Path,
+        default=Path(os.environ.get(
+            'PLURULE_RAG_TRACE_PATH',
+            '/home/exouser/discloze/data/traces/train/full.jsonl'
+        )),
+        help='Discloze trace JSONL whose rationales should be used for retrieved few-shot examples'
+    )
+
     return parser.parse_args()
 
 
@@ -371,6 +381,7 @@ def main():
                 'source_split': args.rag_source_split,
                 'retrieval_path': str(rag_retrieval_path),
                 'retrieval_artifact_sha256': rag_artifact_sha256,
+                'trace_path': str(args.rag_trace_path) if args.rag_trace_path else None,
                 'run_suffix': run_suffix
             }
             logger.info(f"RAG retrieval artifact: {rag_retrieval_path}")
@@ -382,6 +393,7 @@ def main():
                 filter_mode=args.rag_filter,
                 balance=args.rag_balance,
                 source_split=args.rag_source_split,
+                trace_path=args.rag_trace_path,
                 logger=logger
             )
 
@@ -395,7 +407,8 @@ def main():
             args.mode,
             logger,
             split=args.split,
-            rag_examples_by_target=rag_examples_by_target
+            rag_examples_by_target=rag_examples_by_target,
+            instruct=args.instruct
         )
 
         # 3. Process evaluation
