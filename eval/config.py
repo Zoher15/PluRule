@@ -151,7 +151,9 @@ API_MODELS = {
 BASELINE_MODELS = {
     'rag-vote': {
         'baseline_type': 'rag_vote',
-        # RAG settings this baseline is defined for; applied to args at startup.
+        # Settings this baseline is defined for; applied to args at startup.
+        # context/phrase/mode don't affect the vote (no prompt is built), so they
+        # are pinned to a canonical value to keep all runs in one output folder.
         'forced_args': {
             'rag_k': 4,
             'rag_filter': 'subreddit',
@@ -159,6 +161,9 @@ BASELINE_MODELS = {
             'rag_trace_path': None,
             'rag_trace_style': None,
             'instruct': False,
+            'context': 'none',
+            'phrase': 'baseline',
+            'mode': 'prefill',
         },
     }
 }
