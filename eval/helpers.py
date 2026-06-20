@@ -581,6 +581,18 @@ def _attach_rag_provenance(result: Dict[str, Any], pair: Dict[str, Any]) -> None
         result['few_shot'] = provenance
 
 
+def _build_result_metadata(pair: Dict[str, Any]) -> Dict[str, Any]:
+    """Assemble the shared per-pair metadata block for a result record."""
+    return {
+        'rule': pair['metadata']['rule'],
+        'rule_cluster_id': pair['metadata']['rule_cluster_id'],
+        'rule_cluster_label': pair['metadata']['rule_cluster_label'],
+        'subreddit_cluster_id': pair['subreddit_cluster_id'],
+        'subreddit_cluster_label': pair['subreddit_cluster_label'],
+        'subreddit_language': pair.get('subreddit_language', 'unknown'),
+    }
+
+
 def _trace_rationale(row: Dict[str, Any]) -> str:
     trace_reasoning = row.get("trace_reasoning") or ""
     if trace_reasoning.strip():
@@ -776,6 +788,62 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
         logger.warning(f"RAG artifact missing {missing_queries} target query rows")
     logger.info(f"Prepared RAG examples for {len(examples_by_target)} target threads")
     return examples_by_target
+
+
+def evaluate_rag_vote_baseline(thread_pairs: List[Dict[str, Any]],
+                               split: str,
+                               rag_examples_by_target: Dict[str, List[Dict[str, Any]]],
+                               logger: logging.Logger) -> List[Dict[str, Any]]:
+    """Predict by majority vote over retrieved examples' correct rules."""
+    def vote(pair: Dict[str, Any], thread_type: str, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        options = pair[f'{thread_type}_answer_options']
+        label_by_rule = {option['rule']: option['label'] for option in options}
+        stats = {}
+        for rank, example in enumerate(examples):
+            rule = example['metadata']['correct_rule']
+            if rule not in label_by_rule:
+                continue
+            entry = stats.setdefault(rule, {'count': 0, 'score': 0.0, 'rank': rank})
+            entry['count'] += 1
+            entry['score'] += example['score']
+
+        if stats:
+            rule = min(stats, key=lambda r: (-stats[r]['count'], -stats[r]['score'], stats[r]['rank']))
+            prediction = label_by_rule[rule]
+        else:
+            rule = ""
+            prediction = ""
+
+        correct = pair[f'{thread_type}_correct_answer']
+        return {
+            'reasoning_response': f"RAG vote baseline selected rule: {rule}",
+            'clean_answer_response': prediction,
+            'extracted_prediction': prediction,
+            'correct_answer': correct,
+            'score': 1 if prediction == correct else 0,
+            'answer_options': options,
+        }
+
+    results = []
+    for pair in thread_pairs:
+        violating_examples = rag_examples_by_target.get(_thread_target_key(split, pair, "violating"), [])
+        compliant_examples = rag_examples_by_target.get(_thread_target_key(split, pair, "compliant"), [])
+        result = {
+            'mod_comment_id': pair['mod_comment_id'],
+            'subreddit': pair['subreddit'],
+            'submission_id': pair['submission_id'],
+            'violating': vote(pair, 'violating', violating_examples),
+            'compliant': vote(pair, 'compliant', compliant_examples),
+            'metadata': _build_result_metadata(pair),
+            'few_shot': {
+                'violating': [_serialize_rag_example(ex) for ex in violating_examples],
+                'compliant': [_serialize_rag_example(ex) for ex in compliant_examples],
+            }
+        }
+        results.append(result)
+
+    logger.info(f"Generated RAG vote baseline predictions for {len(results)} thread pairs")
+    return results
 
 
 # =============================================================================
@@ -1682,14 +1750,7 @@ def _generate_stage2_vllm(thread_pairs: List[Dict[str, Any]],
                 'answer_options': pair['compliant_answer_options']
             },
 
-            'metadata': {
-                'rule': pair['metadata']['rule'],
-                'rule_cluster_id': pair['metadata']['rule_cluster_id'],
-                'rule_cluster_label': pair['metadata']['rule_cluster_label'],
-                'subreddit_cluster_id': pair['subreddit_cluster_id'],
-                'subreddit_cluster_label': pair['subreddit_cluster_label'],
-                'subreddit_language': pair.get('subreddit_language', 'unknown')
-            }
+            'metadata': _build_result_metadata(pair)
         }
         _attach_rag_provenance(result, pair)
         results.append(result)
@@ -2010,14 +2071,7 @@ def evaluate_two_stage_api(thread_pairs: List[Dict[str, Any]],
                 'answer_options': pair['compliant_answer_options']
             },
 
-            'metadata': {
-                'rule': pair['metadata']['rule'],
-                'rule_cluster_id': pair['metadata']['rule_cluster_id'],
-                'rule_cluster_label': pair['metadata']['rule_cluster_label'],
-                'subreddit_cluster_id': pair['subreddit_cluster_id'],
-                'subreddit_cluster_label': pair['subreddit_cluster_label'],
-                'subreddit_language': pair.get('subreddit_language', 'unknown')
-            }
+            'metadata': _build_result_metadata(pair)
         }
         _attach_rag_provenance(result, pair)
         results.append(result)

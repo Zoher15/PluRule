@@ -192,7 +192,7 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
-    if args.rag_k > 0 and not args.rag_trace_style:
+    if args.rag_k > 0 and args.model != 'rag-vote' and not args.rag_trace_style:
         parser.error('--rag-trace-style is required when RAG is enabled (--rag-k > 0)')
     return args
 
@@ -242,6 +242,11 @@ def main():
     if args.rag_k < 0:
         print("--rag-k must be non-negative", file=sys.stderr)
         sys.exit(2)
+
+    # Baseline models pin the RAG settings they were designed for (see BASELINE_MODELS).
+    model_config = config.get_model_config(args.model)
+    for arg_name, value in model_config.get('forced_args', {}).items():
+        setattr(args, arg_name, value)
 
     # Validate arguments
     try:
@@ -410,25 +415,33 @@ def main():
                 logger=logger
             )
 
-        # 2. Build prompts
-        _log_section(logger, "STEP 2B: BUILDING PROMPTS" if args.rag_k > 0 else "STEP 2: BUILDING PROMPTS")
-        thread_pairs = helpers.build_prompts_for_thread_pairs(
-            thread_pairs,
-            args.context,
-            args.phrase,
-            args.model,
-            args.mode,
-            logger,
-            split=args.split,
-            rag_examples_by_target=rag_examples_by_target,
-            rag_trace_style=args.rag_trace_style,
-            instruct=args.instruct
-        )
-
-        # 3. Process evaluation
-        model_config = config.get_model_config(args.model)
         results = []
 
+        if model_config['type'] == 'baseline':
+            _log_section(logger, "STEP 2B: RAG VOTE BASELINE")
+            results = helpers.evaluate_rag_vote_baseline(
+                thread_pairs,
+                args.split,
+                rag_examples_by_target,
+                logger
+            )
+        else:
+            # 2. Build prompts
+            _log_section(logger, "STEP 2B: BUILDING PROMPTS" if args.rag_k > 0 else "STEP 2: BUILDING PROMPTS")
+            thread_pairs = helpers.build_prompts_for_thread_pairs(
+                thread_pairs,
+                args.context,
+                args.phrase,
+                args.model,
+                args.mode,
+                logger,
+                split=args.split,
+                rag_examples_by_target=rag_examples_by_target,
+                rag_trace_style=args.rag_trace_style,
+                instruct=args.instruct
+            )
+
+        # 3. Process evaluation
         if model_config['type'] == 'vllm':
             # Let vLLM handle request scheduling via max_num_seqs instead of reloading per outer batch.
             logger.info(f"\nProcessing {len(thread_pairs)} pairs with one vLLM engine")
@@ -449,7 +462,7 @@ def main():
                 resource_stats, args.max_response_tokens, args.context, logger,
                 instruct=args.instruct
             )
-        else:
+        elif model_config['type'] == 'api':
             batch_size = 256  # Stage 2 batch size for local vLLM answer extraction.
             # API models: Send all data at once for Stage 1 (OpenAI handles 190MB/50K limits)
             # Stage 2 uses batch_size for local vLLM processing

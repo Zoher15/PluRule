@@ -148,6 +148,21 @@ API_MODELS = {
     }
 }
 
+BASELINE_MODELS = {
+    'rag-vote': {
+        'baseline_type': 'rag_vote',
+        # RAG settings this baseline is defined for; applied to args at startup.
+        'forced_args': {
+            'rag_k': 4,
+            'rag_filter': 'subreddit',
+            'rag_balance': 'top',
+            'rag_trace_path': None,
+            'rag_trace_style': None,
+            'instruct': False,
+        },
+    }
+}
+
 # OpenAI Flex API Configuration
 OPENAI_FLEX_CONFIG = {
     'timeout_seconds': 900,       # 15 minutes (Flex can be slow)
@@ -163,12 +178,14 @@ def get_model_config(model_name: str) -> Dict[str, Any]:
         return {'type': 'vllm', **VLLM_MODELS[model_name]}
     elif model_name in API_MODELS:
         return {'type': 'api', **API_MODELS[model_name]}
+    elif model_name in BASELINE_MODELS:
+        return {'type': 'baseline', **BASELINE_MODELS[model_name]}
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
 def get_supported_models() -> List[str]:
     """Get list of all supported models."""
-    return list(VLLM_MODELS.keys()) + list(API_MODELS.keys())
+    return list(VLLM_MODELS.keys()) + list(API_MODELS.keys()) + list(BASELINE_MODELS.keys())
 
 def is_vllm_model(model_name: str) -> bool:
     """Check if model uses vLLM."""
