@@ -183,7 +183,18 @@ def parse_arguments() -> argparse.Namespace:
         help='Discloze trace JSONL whose rationales should be used for retrieved few-shot examples'
     )
 
-    return parser.parse_args()
+    parser.add_argument(
+        '--rag-trace-style',
+        type=str,
+        default=None,
+        choices=['response-only', 'rationale-think', 'rationale-plain'],
+        help='Few-shot trace assistant-turn format (required when --rag-k > 0)'
+    )
+
+    args = parser.parse_args()
+    if args.rag_k > 0 and not args.rag_trace_style:
+        parser.error('--rag-trace-style is required when RAG is enabled (--rag-k > 0)')
+    return args
 
 
 def _log_section(logger, title: str) -> None:
@@ -268,7 +279,8 @@ def main():
         args.rag_filter,
         args.rag_balance,
         source_split=args.rag_source_split,
-        artifact_sha256=rag_artifact_sha256
+        artifact_sha256=rag_artifact_sha256,
+        trace_style=args.rag_trace_style
     )
     if args.instruct:
         run_suffix = _append_run_suffix(run_suffix, "instruct")
@@ -382,6 +394,7 @@ def main():
                 'retrieval_path': str(rag_retrieval_path),
                 'retrieval_artifact_sha256': rag_artifact_sha256,
                 'trace_path': str(args.rag_trace_path) if args.rag_trace_path else None,
+                'trace_style': args.rag_trace_style,
                 'run_suffix': run_suffix
             }
             logger.info(f"RAG retrieval artifact: {rag_retrieval_path}")
@@ -408,6 +421,7 @@ def main():
             logger,
             split=args.split,
             rag_examples_by_target=rag_examples_by_target,
+            rag_trace_style=args.rag_trace_style,
             instruct=args.instruct
         )
 

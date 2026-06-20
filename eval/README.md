@@ -113,15 +113,16 @@ python eval/evaluate.py \
     --mode prefill \
     --rag-k 4 \
     --rag-filter rule-cluster \
-    --rag-balance mixed
+    --rag-balance mixed \
+    --rag-trace-style rationale-think
 ```
 
 Few-shot examples use the same prompt context as the target eval case. Retrieval
 is scored only on target-comment text. Retrieved cases are rendered as prior
-user/assistant turns when a matching discloze trace is available: the assistant
-turn contains `<think>{trace_reasoning}</think>` followed by `trace_response`.
-With `--instruct`, the example assistant turn omits the `<think>` wrapper.
-Source examples whose submissions contain media are skipped by default.
+user/assistant turns when a matching discloze trace is available. The assistant
+turn format is selected by `--rag-trace-style`, which is required whenever RAG is
+enabled (`--rag-k > 0`). Source examples whose submissions contain media are
+skipped by default.
 
 ### Arguments
 
@@ -164,6 +165,7 @@ Source examples whose submissions contain media are skipped by default.
 - `--rag-balance`: `mixed` balances violating/compliant examples before filling from nearest neighbors; `top` uses nearest neighbors only.
 - `--rag-source-split`: Candidate split used by the retrieval artifact. Defaults to `train`.
 - `--rag-trace-path`: Discloze trace JSONL used to add teacher rationales to matched retrieved examples. Defaults to `/home/exouser/discloze/data/traces/train/full.jsonl`; override with `PLURULE_RAG_TRACE_PATH`.
+- `--rag-trace-style`: Few-shot trace assistant-turn format. Required when `--rag-k > 0`. `response-only` drops the rationale, `rationale-think` wraps it in `<think>…</think>`, and `rationale-plain` emits it as plain text before the response.
 
 ## Output Format
 

@@ -395,7 +395,8 @@ def build_rag_run_suffix(k: int,
                          filter_mode: str,
                          balance: str,
                          source_split: str = None,
-                         artifact_sha256: str = None) -> Optional[str]:
+                         artifact_sha256: str = None,
+                         trace_style: str = None) -> Optional[str]:
     """Build an output-directory run id for RAG settings."""
     if not k or k <= 0:
         return None
@@ -409,6 +410,8 @@ def build_rag_run_suffix(k: int,
         parts.append(f"src-{_sanitize_run_component(source_split)}")
     if artifact_sha256:
         parts.append(f"art-{_sanitize_run_component(artifact_sha256[:12])}")
+    if trace_style:
+        parts.append(f"trace-{_sanitize_run_component(trace_style)}")
     return "-".join(parts)
 
 
@@ -787,6 +790,7 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
                                    logger: logging.Logger,
                                    split: str,
                                    rag_examples_by_target: Dict[str, List[Dict[str, Any]]] = None,
+                                   rag_trace_style: str = None,
                                    instruct: bool = False) -> List[Dict[str, Any]]:
     """
     Build prompts for all thread pairs (both violating and compliant).
@@ -826,6 +830,7 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             model_config=model_config,
             mode=mode,
             few_shot_examples=violating_rag_examples,
+            rag_trace_style=rag_trace_style,
             instruct=instruct
         )
 
@@ -837,6 +842,7 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             model_config=model_config,
             mode=mode,
             few_shot_examples=compliant_rag_examples,
+            rag_trace_style=rag_trace_style,
             instruct=instruct
         )
 
@@ -861,6 +867,7 @@ def _build_single_prompt(pair: Dict[str, Any],
                         model_config: Dict[str, Any],
                         mode: str,
                         few_shot_examples: List[Dict[str, Any]] = None,
+                        rag_trace_style: str = None,
                         instruct: bool = False) -> Dict[str, Any]:
     """
     Build prompt for a single thread (violating or compliant).
@@ -890,7 +897,7 @@ def _build_single_prompt(pair: Dict[str, Any],
     question_text = _build_question_text(pair, thread_type, context_config, prompt_phrase)
 
     if few_shot_examples:
-        messages.extend(_build_few_shot_messages(few_shot_examples, context_config, model_config, instruct))
+        messages.extend(_build_few_shot_messages(few_shot_examples, context_config, model_config, rag_trace_style, instruct))
 
     # Build user content with multimodal data
     content = _build_multimodal_content(
@@ -907,19 +914,19 @@ def _build_single_prompt(pair: Dict[str, Any],
 
 def _format_few_shot_answer(metadata: Dict[str, Any],
                             trace: Optional[Dict[str, Any]] = None,
+                            trace_style: str = None,
                             instruct: bool = False) -> str:
     correct_answer = metadata["correct_answer"]
     correct_rule = metadata["correct_rule"]
-    if trace and trace.get("rationale"):
-        response = trace.get("response")
-        if not response:
-            response = f"Answer: {correct_answer} {correct_rule}."
-        if instruct:
-            return f"{trace['rationale']}\n\n{response}"
-        return (
-            f"<think>\n{trace['rationale']}\n</think>\n\n"
-            f"{response}"
-        )
+    if trace and (trace_style == "response-only" or trace.get("rationale")):
+        response = trace.get("response") or f"Answer: {correct_answer} {correct_rule}."
+        if trace_style == "response-only":
+            return response if instruct else f"<think>\n</think>\n\n{response}"
+        rationale = (trace.get("rationale") or "").strip()
+        if trace_style == "rationale-plain":
+            return f"{rationale}\n\n{response}"
+        return f"<think>\n{rationale}\n</think>\n\n{response}"  # rationale-think
+
     if metadata["thread_type"] == "compliant" or correct_rule == "No rules broken":
         return (
             "Answer: The target comment does not violate any listed rule. "
@@ -934,6 +941,7 @@ def _format_few_shot_answer(metadata: Dict[str, Any],
 def _build_few_shot_messages(few_shot_examples: List[Dict[str, Any]],
                              context_config: Dict[str, Any],
                              model_config: Dict[str, Any],
+                             rag_trace_style: str = None,
                              instruct: bool = False) -> List[Dict[str, Any]]:
     messages = []
     for example in few_shot_examples:
@@ -956,7 +964,7 @@ def _build_few_shot_messages(few_shot_examples: List[Dict[str, Any]],
         })
         messages.append({
             "role": "assistant",
-            "content": _format_few_shot_answer(example['metadata'], example.get('trace'), instruct)
+            "content": _format_few_shot_answer(example['metadata'], example.get('trace'), rag_trace_style, instruct)
         })
     return messages
 
