@@ -41,6 +41,7 @@ env/
 slurm-*.out
 bigred3.sh
 reddit_jobs.txt
+reddit_jobs2.txt
 job_status.txt
 
 # OS
