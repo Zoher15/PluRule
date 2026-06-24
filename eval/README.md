@@ -118,8 +118,10 @@ python eval/evaluate.py \
 ```
 
 Few-shot examples use the same prompt context as the target eval case. Retrieval
-is scored only on target-comment text. Retrieved cases are rendered as prior
-user/assistant turns. The assistant turn format is selected by
+is scored only on target-comment text. By default, retrieved cases are rendered
+as prior user/assistant turns. With `--no-retrofill`, cases are prepended inline
+in the target user prompt as neutral examples separated with `-------` blocks.
+The assistant answer format is selected by
 `--rag-trace-style`, which is required whenever RAG is enabled (`--rag-k > 0`).
 Use `template` for deterministic answer-only examples that do not require a
 Discloze trace file. Source examples whose submissions contain media are skipped
@@ -182,6 +184,7 @@ python eval/evaluate.py \
 - `--rag-source-split`: Candidate split used by RAG. Defaults to `train`.
 - `--rag-trace-path`: Discloze trace JSONL used to add teacher rationales to matched retrieved examples. Defaults to `/home/exouser/discloze/data/traces/train/full.jsonl`; override with `PLURULE_RAG_TRACE_PATH`.
 - `--rag-trace-style`: Few-shot assistant-turn format. Required when `--rag-k > 0`. `response-only` drops the rationale, `rationale-think` wraps it in `<think>…</think>`, `rationale-plain` emits it as plain text before the response, and `template` emits a deterministic answer sentence without loading traces.
+- `--no-retrofill`: Render few-shot examples inline before the target example instead of as prior chat turns. Inline examples are separated with `-------` and are only supported for non-media context modes.
 
 ## Output Format
 

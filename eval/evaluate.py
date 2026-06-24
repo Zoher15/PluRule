@@ -191,6 +191,12 @@ def parse_arguments() -> argparse.Namespace:
         help='Few-shot trace assistant-turn format (required when --rag-k > 0)'
     )
 
+    parser.add_argument(
+        '--no-retrofill',
+        action='store_true',
+        help='Render few-shot examples inline in the target prompt instead of as prior chat turns'
+    )
+
     args = parser.parse_args()
     if args.rag_k > 0 and args.model != 'rag-vote' and not args.rag_trace_style:
         parser.error('--rag-trace-style is required when RAG is enabled (--rag-k > 0)')
@@ -283,13 +289,16 @@ def main():
             print(f"Invalid RAG retrieval artifact: {e}", file=sys.stderr)
             sys.exit(1)
 
+    rag_no_retrofill = args.no_retrofill and args.rag_k > 0
+
     run_suffix = helpers.build_rag_run_suffix(
         args.rag_k,
         args.rag_filter,
         args.rag_balance,
         source_split=args.rag_source_split,
         artifact_sha256=rag_artifact_sha256,
-        trace_style=args.rag_trace_style
+        trace_style=args.rag_trace_style,
+        no_retrofill=rag_no_retrofill
     )
     if args.instruct:
         run_suffix = _append_run_suffix(run_suffix, "instruct")
@@ -328,6 +337,8 @@ def main():
         )
         if rag_artifact_sha256:
             rag_log += f", artifact={rag_artifact_sha256[:12]}"
+        if rag_no_retrofill:
+            rag_log += ", rendering=no-retrofill"
         logger.info(rag_log)
     else:
         logger.info("RAG: disabled")
@@ -407,6 +418,7 @@ def main():
                 'retrieval_artifact_sha256': rag_artifact_sha256,
                 'trace_path': str(rag_trace_path) if rag_trace_path else None,
                 'trace_style': args.rag_trace_style,
+                'no_retrofill': rag_no_retrofill,
                 'run_suffix': run_suffix
             }
             if rag_retrieval_path:
@@ -446,7 +458,8 @@ def main():
                 split=args.split,
                 rag_examples_by_target=rag_examples_by_target,
                 rag_trace_style=args.rag_trace_style,
-                instruct=args.instruct
+                instruct=args.instruct,
+                rag_no_retrofill=rag_no_retrofill
             )
 
         # 3. Process evaluation

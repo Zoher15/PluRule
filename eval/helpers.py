@@ -413,7 +413,8 @@ def build_rag_run_suffix(k: int,
                          balance: str,
                          source_split: str = None,
                          artifact_sha256: str = None,
-                         trace_style: str = None) -> Optional[str]:
+                         trace_style: str = None,
+                         no_retrofill: bool = False) -> Optional[str]:
     """Build an output-directory run id for RAG settings."""
     if not k or k <= 0:
         return None
@@ -429,6 +430,8 @@ def build_rag_run_suffix(k: int,
         parts.append(f"art-{_sanitize_run_component(artifact_sha256[:12])}")
     if trace_style:
         parts.append(f"trace-{_sanitize_run_component(trace_style)}")
+    if no_retrofill:
+        parts.append("no-retrofill")
     return "-".join(parts)
 
 
@@ -930,7 +933,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
                                    split: str,
                                    rag_examples_by_target: Dict[str, List[Dict[str, Any]]] = None,
                                    rag_trace_style: str = None,
-                                   instruct: bool = False) -> List[Dict[str, Any]]:
+                                   instruct: bool = False,
+                                   rag_no_retrofill: bool = False) -> List[Dict[str, Any]]:
     """
     Build prompts for all thread pairs (both violating and compliant).
 
@@ -943,11 +947,14 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
         logger: Logger instance
         split: Dataset split (used to build RAG target keys)
         rag_examples_by_target: Optional mapping from target key to examples
+        rag_no_retrofill: If True, inline retrieved examples in the target prompt
 
     Returns:
         List of thread pairs with prompts added
     """
     context_config = config.parse_context_flags(context_type)
+    if rag_no_retrofill and rag_examples_by_target and context_config.get('include_media', False):
+        raise ValueError("--no-retrofill is not supported with media contexts")
     phrase_text = config.PHRASES.get(phrase_name, '')
     model_config = config.get_model_config(model_name)
 
@@ -970,7 +977,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             mode=mode,
             few_shot_examples=violating_rag_examples,
             rag_trace_style=rag_trace_style,
-            instruct=instruct
+            instruct=instruct,
+            rag_no_retrofill=rag_no_retrofill
         )
 
         compliant_prompt = _build_single_prompt(
@@ -982,7 +990,8 @@ def build_prompts_for_thread_pairs(thread_pairs: List[Dict[str, Any]],
             mode=mode,
             few_shot_examples=compliant_rag_examples,
             rag_trace_style=rag_trace_style,
-            instruct=instruct
+            instruct=instruct,
+            rag_no_retrofill=rag_no_retrofill
         )
 
         processed_pair = {
@@ -1007,7 +1016,8 @@ def _build_single_prompt(pair: Dict[str, Any],
                         mode: str,
                         few_shot_examples: List[Dict[str, Any]] = None,
                         rag_trace_style: str = None,
-                        instruct: bool = False) -> Dict[str, Any]:
+                        instruct: bool = False,
+                        rag_no_retrofill: bool = False) -> Dict[str, Any]:
     """
     Build prompt for a single thread (violating or compliant).
 
@@ -1019,6 +1029,7 @@ def _build_single_prompt(pair: Dict[str, Any],
         model_config: Model configuration
         mode: Phrase mode ('prefill' or 'prompt')
         few_shot_examples: Optional list of rendered example source records
+        rag_no_retrofill: If True, inline retrieved examples in the target prompt
 
     Returns:
         Dictionary with 'messages' key
@@ -1035,7 +1046,15 @@ def _build_single_prompt(pair: Dict[str, Any],
         prompt_phrase = None
     question_text = _build_question_text(pair, thread_type, context_config, prompt_phrase)
 
-    if few_shot_examples:
+    if few_shot_examples and rag_no_retrofill:
+        examples_text = _build_inline_few_shot_text(
+            few_shot_examples,
+            context_config,
+            rag_trace_style,
+            instruct
+        )
+        question_text = f"{examples_text}\n\n-------\n\nTarget Example\n\n{question_text}"
+    elif few_shot_examples:
         messages.extend(_build_few_shot_messages(few_shot_examples, context_config, model_config, rag_trace_style, instruct))
 
     # Build user content with multimodal data
@@ -1086,6 +1105,33 @@ def _format_few_shot_answer(metadata: Dict[str, Any],
         f"Answer: The target comment violates rule \"{correct_rule}\". "
         f"The correct answer is {correct_answer}."
     )
+
+
+def _build_inline_few_shot_text(few_shot_examples: List[Dict[str, Any]],
+                                context_config: Dict[str, Any],
+                                rag_trace_style: str = None,
+                                instruct: bool = False) -> str:
+    blocks = []
+    for idx, example in enumerate(few_shot_examples, start=1):
+        example_text = _build_question_text(
+            example["pair"],
+            example["thread_type"],
+            context_config,
+            prompt_phrase=None
+        )
+        answer_text = _format_few_shot_answer(
+            example["metadata"],
+            example.get("trace"),
+            rag_trace_style,
+            instruct
+        ).strip()
+        blocks.append(
+            f"Example {idx}\n\n"
+            f"{example_text}\n\n"
+            f"Answer:\n{answer_text}"
+        )
+
+    return "Examples\n\n" + "\n\n-------\n\n".join(blocks)
 
 
 def _build_few_shot_messages(few_shot_examples: List[Dict[str, Any]],

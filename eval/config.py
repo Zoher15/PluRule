@@ -212,6 +212,7 @@ BASELINE_MODELS = {
             'rag_balance': 'top',
             'rag_trace_path': None,
             'rag_trace_style': None,
+            'no_retrofill': False,
             'instruct': False,
             'context': 'none',
             'phrase': 'baseline',
