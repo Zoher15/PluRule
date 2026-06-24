@@ -125,6 +125,21 @@ Use `template` for deterministic answer-only examples that do not require a
 Discloze trace file. Source examples whose submissions contain media are skipped
 by default.
 
+For a deterministic random baseline, skip the similarity artifact entirely:
+
+```bash
+python eval/evaluate.py \
+    --model qwen3-vl-8b-instruct \
+    --split test \
+    --context submission-discussion \
+    --phrase grounded_context \
+    --mode prefill \
+    --rag-k 4 \
+    --rag-filter rule-cluster \
+    --rag-balance random \
+    --rag-trace-style template
+```
+
 ### Arguments
 
 - `--model, -m`: Model to evaluate
@@ -161,10 +176,10 @@ by default.
 - `--override`: Overwrite existing results
 - `--max-response-tokens`: Maximum generation length for Stage 1 responses (default: 2048)
 - `--rag-k`: Number of retrieved few-shot examples per target thread. `0` disables RAG.
-- `--rag-retrieval-path`: Optional path to the `.pt` retrieval artifact. Defaults to `output/eval/rag/{split}_to_{rag-source-split}_target_comment_similarity.pt`.
+- `--rag-retrieval-path`: Optional path to the `.pt` retrieval artifact for `top` and `mixed` RAG. Defaults to `output/eval/rag/{split}_to_{rag-source-split}_target_comment_similarity.pt`.
 - `--rag-filter`: Retrieval filter: `none`, `subreddit`, `subreddit-cluster`, or `rule-cluster`.
-- `--rag-balance`: `mixed` balances violating/compliant examples before filling from nearest neighbors; `top` uses nearest neighbors only.
-- `--rag-source-split`: Candidate split used by the retrieval artifact. Defaults to `train`.
+- `--rag-balance`: `mixed` balances violating/compliant examples before filling from nearest neighbors, `top` uses nearest neighbors only, and `random` deterministically samples source target comments without reading the similarity artifact.
+- `--rag-source-split`: Candidate split used by RAG. Defaults to `train`.
 - `--rag-trace-path`: Discloze trace JSONL used to add teacher rationales to matched retrieved examples. Defaults to `/home/exouser/discloze/data/traces/train/full.jsonl`; override with `PLURULE_RAG_TRACE_PATH`.
 - `--rag-trace-style`: Few-shot assistant-turn format. Required when `--rag-k > 0`. `response-only` drops the rationale, `rationale-think` wraps it in `<think>…</think>`, `rationale-plain` emits it as plain text before the response, and `template` emits a deterministic answer sentence without loading traces.
 

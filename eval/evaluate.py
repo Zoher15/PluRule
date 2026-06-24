@@ -161,8 +161,8 @@ def parse_arguments() -> argparse.Namespace:
         '--rag-balance',
         type=str,
         default='mixed',
-        choices=['mixed', 'top'],
-        help='Few-shot selection policy: mixed balances violating/compliant, top uses nearest neighbors'
+        choices=['mixed', 'top', 'random'],
+        help='Few-shot selection policy: mixed balances nearest neighbors, top uses nearest neighbors only, random samples deterministic source target comments without the similarity artifact'
     )
 
     parser.add_argument(
@@ -170,7 +170,7 @@ def parse_arguments() -> argparse.Namespace:
         type=str,
         default='train',
         choices=list(config.DATASET_FILES.keys()),
-        help='Candidate split used by the RAG retrieval artifact'
+        help='Candidate split used by RAG'
     )
 
     parser.add_argument(
@@ -248,6 +248,8 @@ def main():
     for arg_name, value in model_config.get('forced_args', {}).items():
         if arg_name == 'rag_k' and args.rag_k > 0:
             continue
+        if arg_name == 'rag_balance' and args.rag_balance == 'random':
+            continue
         setattr(args, arg_name, value)
 
     # Validate arguments
@@ -270,7 +272,7 @@ def main():
 
     rag_retrieval_path = None
     rag_artifact_sha256 = None
-    if args.rag_k > 0:
+    if args.rag_k > 0 and args.rag_balance != 'random':
         rag_retrieval_path = args.rag_retrieval_path or helpers.default_rag_retrieval_path(
             args.split,
             args.rag_source_split
@@ -320,11 +322,13 @@ def main():
     logger.info(f"Phrase: {args.phrase} (mode: {args.mode})")
     logger.info(f"Instruct mode: {args.instruct}")
     if args.rag_k > 0:
-        logger.info(
+        rag_log = (
             f"RAG: k={args.rag_k}, filter={args.rag_filter}, "
-            f"balance={args.rag_balance}, source_split={args.rag_source_split}, "
-            f"artifact={rag_artifact_sha256[:12]}"
+            f"balance={args.rag_balance}, source_split={args.rag_source_split}"
         )
+        if rag_artifact_sha256:
+            rag_log += f", artifact={rag_artifact_sha256[:12]}"
+        logger.info(rag_log)
     else:
         logger.info("RAG: disabled")
     logger.info(f"Debug mode: {args.debug}")
@@ -399,13 +403,14 @@ def main():
                 'filter': args.rag_filter,
                 'balance': args.rag_balance,
                 'source_split': args.rag_source_split,
-                'retrieval_path': str(rag_retrieval_path),
+                'retrieval_path': str(rag_retrieval_path) if rag_retrieval_path else None,
                 'retrieval_artifact_sha256': rag_artifact_sha256,
                 'trace_path': str(rag_trace_path) if rag_trace_path else None,
                 'trace_style': args.rag_trace_style,
                 'run_suffix': run_suffix
             }
-            logger.info(f"RAG retrieval artifact: {rag_retrieval_path}")
+            if rag_retrieval_path:
+                logger.info(f"RAG retrieval artifact: {rag_retrieval_path}")
             rag_examples_by_target = helpers.prepare_rag_examples(
                 thread_pairs=thread_pairs,
                 split=args.split,

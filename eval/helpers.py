@@ -15,6 +15,7 @@ import logging
 import base64
 import hashlib
 import os
+import random
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
@@ -359,6 +360,22 @@ def _sanitize_run_component(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-") or "unknown"
 
 
+def _stable_hash(value: str) -> int:
+    """Create deterministic integer hash from string, matching dataset shuffling."""
+    return int.from_bytes(hashlib.sha256(value.encode('utf-8')).digest(), 'big')
+
+
+def _answer_choice_seed(mod_comment_id: str, thread_type: str) -> int:
+    """Reuse the answer-option shuffle seed shape for deterministic per-target sampling."""
+    mod_comment_id = str(mod_comment_id)
+    seed_str = mod_comment_id + f"_{thread_type}"
+    try:
+        mod_comment_int = int(mod_comment_id, 36)
+    except ValueError:
+        mod_comment_int = _stable_hash(mod_comment_id)
+    return mod_comment_int + _stable_hash(seed_str)
+
+
 def rag_artifact_summary_path(retrieval_path: Path) -> Path:
     """Return the sidecar summary path for a RAG retrieval artifact."""
     return Path(retrieval_path).with_suffix(".summary.json")
@@ -435,6 +452,14 @@ def _rag_thread_leaf(pair: Dict[str, Any], thread_type: str) -> Dict[str, Any]:
     return {}
 
 
+def _rag_target_is_renderable(pair: Dict[str, Any], thread_type: str) -> bool:
+    leaf = _rag_thread_leaf(pair, thread_type)
+    if not leaf:
+        return False
+    body = (leaf.get("body") or "").strip()
+    return body != "[NEEDS_HYDRATION]"
+
+
 def _correct_rule_from_options(pair: Dict[str, Any], thread_type: str) -> str:
     correct_answer = pair[f"{thread_type}_correct_answer"]
     for option in pair.get(f"{thread_type}_answer_options", []):
@@ -465,10 +490,14 @@ def _rag_target_metadata(split: str, pair: Dict[str, Any], thread_type: str) -> 
     }
 
 
-def _build_candidate_lookup(split: str, pairs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _build_candidate_lookup(split: str,
+                            pairs: List[Dict[str, Any]],
+                            require_renderable: bool = False) -> Dict[str, Dict[str, Any]]:
     lookup = {}
     for pair in pairs:
         for thread_type in ("violating", "compliant"):
+            if require_renderable and not _rag_target_is_renderable(pair, thread_type):
+                continue
             metadata = _rag_target_metadata(split, pair, thread_type)
             lookup[metadata["target_key"]] = {
                 "pair": pair,
@@ -542,6 +571,16 @@ def _top_indices_from_pool(scores, pool: List[int], limit: int, used: set) -> Li
     top_n = min(limit, len(filtered))
     top_positions = torch.topk(values, top_n).indices.tolist()
     return [filtered[pos] for pos in top_positions]
+
+
+def _random_indices_from_pool(pool: List[int], limit: int, used: set, rng: random.Random) -> List[int]:
+    if limit <= 0:
+        return []
+    filtered = [idx for idx in pool if idx not in used]
+    if not filtered:
+        return []
+    rng.shuffle(filtered)
+    return filtered[:limit]
 
 
 def _serialize_rag_example(example: Dict[str, Any]) -> Dict[str, Any]:
@@ -658,13 +697,19 @@ def _select_rag_examples_for_target(scores,
                                     balance: str,
                                     bucket: Dict[str, List[int]],
                                     trace_lookup: Dict[str, Dict[str, Any]],
+                                    target: Optional[Dict[str, Any]] = None,
                                     self_index: Optional[int] = None) -> List[Dict[str, Any]]:
     used = set()
     if self_index is not None:
         used.add(self_index)  # never retrieve the target's own thread as an example
 
     selected_indices = []
-    if balance == "mixed":
+    if balance == "random":
+        if target is None:
+            raise ValueError("Random RAG selection requires target metadata")
+        rng = random.Random(_answer_choice_seed(target.get("mod_comment_id", ""), target["thread_type"]))
+        selected_indices = _random_indices_from_pool(bucket["all"], k, used, rng)
+    elif balance == "mixed":
         violating_quota = (k + 1) // 2
         compliant_quota = k // 2
         for idx in _top_indices_from_pool(scores, bucket["violating"], violating_quota, used):
@@ -682,7 +727,7 @@ def _select_rag_examples_for_target(scores,
         raise ValueError(f"Unknown RAG balance mode: {balance}")
 
     examples = []
-    for idx in selected_indices:
+    for rank, idx in enumerate(selected_indices):
         record = candidates[idx]
         lookup = candidate_lookup[record["target_key"]]
         metadata = lookup["metadata"]
@@ -690,8 +735,10 @@ def _select_rag_examples_for_target(scores,
             "pair": lookup["pair"],
             "thread_type": lookup["thread_type"],
             "metadata": metadata,
-            "score": float(scores[idx].item()),
+            "score": 0.0 if balance == "random" else float(scores[idx].item()),
         }
+        if balance == "random":
+            example["random_rank"] = rank
         trace_key = f"{metadata['mod_comment_id']}__{metadata['thread_type']}"
         trace = trace_lookup.get(trace_key)
         if (
@@ -706,44 +753,52 @@ def _select_rag_examples_for_target(scores,
 
 def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
                          split: str,
-                         retrieval_path: Path,
+                         retrieval_path: Optional[Path],
                          k: int,
                          filter_mode: str,
                          balance: str,
                          source_split: str,
                          trace_path: Optional[Path],
                          logger: logging.Logger) -> Dict[str, List[Dict[str, Any]]]:
-    """Load a retrieval artifact and select RAG examples for every target thread."""
+    """Select RAG examples for every target thread."""
     if k <= 0:
         return {}
 
-    import torch
+    use_random = balance == "random"
+    queries = []
+    query_index = {}
+    similarity_matrix = None
 
-    retrieval_path = Path(retrieval_path)
-    if not retrieval_path.exists():
-        raise FileNotFoundError(f"RAG retrieval artifact not found: {retrieval_path}")
+    if use_random:
+        logger.info("RAG balance policy: deterministic random target comments")
+    else:
+        import torch
 
-    logger.info(f"Loading RAG retrieval artifact: {retrieval_path}")
-    artifact = torch.load(retrieval_path, map_location="cpu", weights_only=False)
-    if artifact.get("query_split") != split:
-        raise ValueError(
-            f"RAG artifact query split {artifact.get('query_split')} does not match eval split {split}"
-        )
-    if artifact.get("candidate_split") != source_split:
-        raise ValueError(
-            f"RAG artifact candidate split {artifact.get('candidate_split')} does not match source split {source_split}"
-        )
+        retrieval_path = Path(retrieval_path)
+        if not retrieval_path.exists():
+            raise FileNotFoundError(f"RAG retrieval artifact not found: {retrieval_path}")
 
-    candidates = artifact["candidates"]
-    queries = artifact["queries"]
-    similarity_matrix = artifact["similarity_matrix"]
-    expected_shape = (len(queries), len(candidates))
-    if tuple(similarity_matrix.shape) != expected_shape:
-        raise ValueError(
-            f"RAG similarity matrix shape {tuple(similarity_matrix.shape)} "
-            f"does not match query/candidate metadata {expected_shape}"
-        )
-    query_index = {query["target_key"]: idx for idx, query in enumerate(queries)}
+        logger.info(f"Loading RAG retrieval artifact: {retrieval_path}")
+        artifact = torch.load(retrieval_path, map_location="cpu", weights_only=False)
+        if artifact.get("query_split") != split:
+            raise ValueError(
+                f"RAG artifact query split {artifact.get('query_split')} does not match eval split {split}"
+            )
+        if artifact.get("candidate_split") != source_split:
+            raise ValueError(
+                f"RAG artifact candidate split {artifact.get('candidate_split')} does not match source split {source_split}"
+            )
+
+        candidates = artifact["candidates"]
+        queries = artifact["queries"]
+        similarity_matrix = artifact["similarity_matrix"]
+        expected_shape = (len(queries), len(candidates))
+        if tuple(similarity_matrix.shape) != expected_shape:
+            raise ValueError(
+                f"RAG similarity matrix shape {tuple(similarity_matrix.shape)} "
+                f"does not match query/candidate metadata {expected_shape}"
+            )
+        query_index = {query["target_key"]: idx for idx, query in enumerate(queries)}
 
     logger.info(f"Loading RAG source split: {source_split}")
     source_pairs = load_dataset(source_split, logger, debug=False)
@@ -752,7 +807,14 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
     skipped_pairs = original_source_count - len(source_pairs)
     if skipped_pairs:
         logger.info(f"RAG media filter: excluded {skipped_pairs} source pair(s)")
-    candidate_lookup = _build_candidate_lookup(source_split, source_pairs)
+
+    candidate_lookup = _build_candidate_lookup(
+        source_split,
+        source_pairs,
+        require_renderable=use_random,
+    )
+    if use_random:
+        candidates = [entry["metadata"] for entry in candidate_lookup.values()]
     candidate_buckets = _build_candidate_buckets(candidates, candidate_lookup, filter_mode)
     candidate_index_by_key = {
         candidate.get("target_key"): idx for idx, candidate in enumerate(candidates)
@@ -766,13 +828,15 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
         for thread_type in ("violating", "compliant"):
             target = _rag_target_metadata(split, pair, thread_type)
             target_key = target["target_key"]
-            row_idx = query_index.get(target_key)
-            if row_idx is None:
-                missing_queries += 1
-                examples_by_target[target_key] = []
-                continue
-            scores = similarity_matrix[row_idx]
             bucket = candidate_buckets.get(_rag_filter_key(target, filter_mode), empty_bucket)
+            scores = None
+            if not use_random:
+                row_idx = query_index.get(target_key)
+                if row_idx is None:
+                    missing_queries += 1
+                    examples_by_target[target_key] = []
+                    continue
+                scores = similarity_matrix[row_idx]
             examples_by_target[target_key] = _select_rag_examples_for_target(
                 scores,
                 candidates,
@@ -781,12 +845,19 @@ def prepare_rag_examples(thread_pairs: List[Dict[str, Any]],
                 balance,
                 bucket,
                 trace_lookup,
+                target=target,
                 self_index=candidate_index_by_key.get(target_key),
             )
 
     if missing_queries:
         logger.warning(f"RAG artifact missing {missing_queries} target query rows")
-    logger.info(f"Prepared RAG examples for {len(examples_by_target)} target threads")
+    if use_random:
+        logger.info(
+            f"Prepared deterministic random RAG examples for {len(examples_by_target)} "
+            f"target threads from {len(candidates)} source target comments"
+        )
+    else:
+        logger.info(f"Prepared RAG examples for {len(examples_by_target)} target threads")
     return examples_by_target
 
 
