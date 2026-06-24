@@ -986,6 +986,17 @@ def _format_few_shot_answer(metadata: Dict[str, Any],
                             instruct: bool = False) -> str:
     correct_answer = metadata["correct_answer"]
     correct_rule = metadata["correct_rule"]
+    if trace_style == "template":
+        if metadata["thread_type"] == "compliant" or correct_rule == "No rules broken":
+            return (
+                "The target comment does not violate any rule. "
+                f"Therefore, the answer is {correct_answer}."
+            )
+        return (
+            f"The target comment violates rule {correct_rule}. "
+            f"Therefore, the answer is {correct_answer}."
+        )
+
     if trace and (trace_style == "response-only" or trace.get("rationale")):
         response = trace.get("response") or f"Answer: {correct_answer} {correct_rule}."
         if trace_style == "response-only":

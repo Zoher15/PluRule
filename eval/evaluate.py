@@ -187,7 +187,7 @@ def parse_arguments() -> argparse.Namespace:
         '--rag-trace-style',
         type=str,
         default=None,
-        choices=['response-only', 'rationale-think', 'rationale-plain'],
+        choices=['response-only', 'rationale-think', 'rationale-plain', 'template'],
         help='Few-shot trace assistant-turn format (required when --rag-k > 0)'
     )
 
@@ -246,6 +246,8 @@ def main():
     # Baseline models pin the RAG settings they were designed for (see BASELINE_MODELS).
     model_config = config.get_model_config(args.model)
     for arg_name, value in model_config.get('forced_args', {}).items():
+        if arg_name == 'rag_k' and args.rag_k > 0:
+            continue
         setattr(args, arg_name, value)
 
     # Validate arguments
@@ -391,6 +393,7 @@ def main():
         rag_config = None
         if args.rag_k > 0:
             _log_section(logger, "STEP 2A: PREPARING RAG EXAMPLES")
+            rag_trace_path = None if args.rag_trace_style == 'template' else args.rag_trace_path
             rag_config = {
                 'k': args.rag_k,
                 'filter': args.rag_filter,
@@ -398,7 +401,7 @@ def main():
                 'source_split': args.rag_source_split,
                 'retrieval_path': str(rag_retrieval_path),
                 'retrieval_artifact_sha256': rag_artifact_sha256,
-                'trace_path': str(args.rag_trace_path) if args.rag_trace_path else None,
+                'trace_path': str(rag_trace_path) if rag_trace_path else None,
                 'trace_style': args.rag_trace_style,
                 'run_suffix': run_suffix
             }
@@ -411,7 +414,7 @@ def main():
                 filter_mode=args.rag_filter,
                 balance=args.rag_balance,
                 source_split=args.rag_source_split,
-                trace_path=args.rag_trace_path,
+                trace_path=rag_trace_path,
                 logger=logger
             )
 
@@ -463,7 +466,7 @@ def main():
                 instruct=args.instruct
             )
         elif model_config['type'] == 'api':
-            batch_size = 256  # Stage 2 batch size for local vLLM answer extraction.
+            batch_size = 200  # Stage 2 batch size for local vLLM answer extraction.
             # API models: Send all data at once for Stage 1 (OpenAI handles 190MB/50K limits)
             # Stage 2 uses batch_size for local vLLM processing
             logger.info(f"\nProcessing {len(thread_pairs)} pairs via API (Stage 2 batch_size={batch_size})")

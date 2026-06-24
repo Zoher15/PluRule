@@ -85,31 +85,81 @@ QWEN35_SAMPLING_PRESETS = {
 VLLM_MODELS = {
     'qwen3-vl-4b-instruct': {
         'hf_path': 'Qwen/Qwen3-VL-4B-Instruct',
-        'gpu_memory_utilization': 0.95
+        'gpu_memory_utilization': 0.93
     },
     'qwen3-vl-8b-instruct': {
         'hf_path': 'Qwen/Qwen3-VL-8B-Instruct',
-        'gpu_memory_utilization': 0.95
+        'gpu_memory_utilization': 0.93
     },
     'qwen3-vl-30b-instruct': {
         'hf_path': 'Qwen/Qwen3-VL-30B-A3B-Instruct',
-        'gpu_memory_utilization': 0.95
+        'gpu_memory_utilization': 0.93
     },
     'qwen3-vl-4b-thinking': {
         'hf_path': 'Qwen/Qwen3-VL-4B-Thinking',
-        'gpu_memory_utilization': 0.95
+        'gpu_memory_utilization': 0.93
     },
     'qwen3-vl-8b-thinking': {
         'hf_path': 'Qwen/Qwen3-VL-8B-Thinking',
-        'gpu_memory_utilization': 0.95
+        'gpu_memory_utilization': 0.93
     },
     'qwen3-vl-30b-thinking': {
         'hf_path': 'Qwen/Qwen3-VL-30B-A3B-Thinking',
-        'gpu_memory_utilization': 0.95
+        'gpu_memory_utilization': 0.93
     },
     'qwen3.5-35b-a3b-fp8': {
         'hf_path': 'Qwen/Qwen3.5-35B-A3B-FP8',
-        'gpu_memory_utilization': 0.95,
+        'gpu_memory_utilization': 0.93,
+        'trust_remote_code': True,
+        'max_model_len': 131072,
+        'max_num_seqs': 256,
+        'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
+        'instruct_sampling_params': QWEN35_SAMPLING_PRESETS['instruct_reasoning'],
+        'sampling_seed': 0,
+    },
+    'qwen3.5-27b-fp8': {
+        'hf_path': 'Qwen/Qwen3.5-27B-FP8',
+        'gpu_memory_utilization': 0.93,
+        'trust_remote_code': True,
+        'max_model_len': 131072,
+        'max_num_seqs': 256,
+        'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
+        'instruct_sampling_params': QWEN35_SAMPLING_PRESETS['instruct_reasoning'],
+        'sampling_seed': 0,
+    },
+    'qwen3.5-9b': {
+        'hf_path': 'Qwen/Qwen3.5-9B',
+        'gpu_memory_utilization': 0.93,
+        'trust_remote_code': True,
+        'max_model_len': 131072,
+        'max_num_seqs': 256,
+        'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
+        'instruct_sampling_params': QWEN35_SAMPLING_PRESETS['instruct_reasoning'],
+        'sampling_seed': 0,
+    },
+    'qwen3.5-4b': {
+        'hf_path': 'Qwen/Qwen3.5-4B',
+        'gpu_memory_utilization': 0.93,
+        'trust_remote_code': True,
+        'max_model_len': 131072,
+        'max_num_seqs': 256,
+        'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
+        'instruct_sampling_params': QWEN35_SAMPLING_PRESETS['instruct_reasoning'],
+        'sampling_seed': 0,
+    },
+    'qwen3.5-2b': {
+        'hf_path': 'Qwen/Qwen3.5-2B',
+        'gpu_memory_utilization': 0.93,
+        'trust_remote_code': True,
+        'max_model_len': 131072,
+        'max_num_seqs': 256,
+        'sampling_params': QWEN35_SAMPLING_PRESETS['thinking_general'],
+        'instruct_sampling_params': QWEN35_SAMPLING_PRESETS['instruct_reasoning'],
+        'sampling_seed': 0,
+    },
+    'qwen3.5-0.8b': {
+        'hf_path': 'Qwen/Qwen3.5-0.8B',
+        'gpu_memory_utilization': 0.93,
         'trust_remote_code': True,
         'max_model_len': 131072,
         'max_num_seqs': 256,
@@ -154,6 +204,8 @@ BASELINE_MODELS = {
         # Settings this baseline is defined for; applied to args at startup.
         # context/phrase/mode don't affect the vote (no prompt is built), so they
         # are pinned to a canonical value to keep all runs in one output folder.
+        # evaluate.py leaves positive user-provided rag_k values intact so k can
+        # still be swept.
         'forced_args': {
             'rag_k': 4,
             'rag_filter': 'subreddit',

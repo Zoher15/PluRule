@@ -119,15 +119,16 @@ python eval/evaluate.py \
 
 Few-shot examples use the same prompt context as the target eval case. Retrieval
 is scored only on target-comment text. Retrieved cases are rendered as prior
-user/assistant turns when a matching discloze trace is available. The assistant
-turn format is selected by `--rag-trace-style`, which is required whenever RAG is
-enabled (`--rag-k > 0`). Source examples whose submissions contain media are
-skipped by default.
+user/assistant turns. The assistant turn format is selected by
+`--rag-trace-style`, which is required whenever RAG is enabled (`--rag-k > 0`).
+Use `template` for deterministic answer-only examples that do not require a
+Discloze trace file. Source examples whose submissions contain media are skipped
+by default.
 
 ### Arguments
 
 - `--model, -m`: Model to evaluate
-  - vLLM: `qwen3-vl-4b-instruct`, `qwen3-vl-8b-instruct`, `qwen3-vl-30b-instruct`, `qwen3-vl-4b-thinking`, `qwen3-vl-8b-thinking`, `qwen3-vl-30b-thinking`
+  - vLLM: `qwen3-vl-4b-instruct`, `qwen3-vl-8b-instruct`, `qwen3-vl-30b-instruct`, `qwen3-vl-4b-thinking`, `qwen3-vl-8b-thinking`, `qwen3-vl-30b-thinking`, `qwen3.5-35b-a3b-fp8`, `qwen3.5-27b-fp8`, `qwen3.5-9b`, `qwen3.5-4b`, `qwen3.5-2b`, `qwen3.5-0.8b`
   - OpenAI API path: `gpt-4o`, `gpt5.2-low`, `gpt5.2-high`
   - `claude-sonnet-4` is present in `API_MODELS`, but the current API runner in `helpers.evaluate_two_stage_api()` is wired to OpenAI Flex
 
@@ -165,7 +166,7 @@ skipped by default.
 - `--rag-balance`: `mixed` balances violating/compliant examples before filling from nearest neighbors; `top` uses nearest neighbors only.
 - `--rag-source-split`: Candidate split used by the retrieval artifact. Defaults to `train`.
 - `--rag-trace-path`: Discloze trace JSONL used to add teacher rationales to matched retrieved examples. Defaults to `/home/exouser/discloze/data/traces/train/full.jsonl`; override with `PLURULE_RAG_TRACE_PATH`.
-- `--rag-trace-style`: Few-shot trace assistant-turn format. Required when `--rag-k > 0`. `response-only` drops the rationale, `rationale-think` wraps it in `<think>…</think>`, and `rationale-plain` emits it as plain text before the response.
+- `--rag-trace-style`: Few-shot assistant-turn format. Required when `--rag-k > 0`. `response-only` drops the rationale, `rationale-think` wraps it in `<think>…</think>`, `rationale-plain` emits it as plain text before the response, and `template` emits a deterministic answer sentence without loading traces.
 
 ## Output Format
 
