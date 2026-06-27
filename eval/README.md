@@ -182,7 +182,7 @@ python eval/evaluate.py \
 - `--rag-filter`: Retrieval filter: `none`, `subreddit`, `subreddit-cluster`, or `rule-cluster`.
 - `--rag-balance`: `mixed` balances violating/compliant examples before filling from nearest neighbors, `top` uses nearest neighbors only, and `random` deterministically samples source target comments without reading the similarity artifact.
 - `--rag-source-split`: Candidate split used by RAG. Defaults to `train`.
-- `--rag-trace-path`: Discloze trace JSONL used to add teacher rationales to matched retrieved examples. Defaults to `/home/exouser/discloze/data/traces/train/full.jsonl`; override with `PLURULE_RAG_TRACE_PATH`.
+- `--rag-trace-path`: Discloze trace JSONL used to add teacher rationales to matched retrieved examples. Defaults to the sibling Discloze checkout at `<project-parent>/discloze/data/traces/train/full.jsonl`; override with `PLURULE_RAG_TRACE_PATH`.
 - `--rag-trace-style`: Few-shot assistant-turn format. Required when `--rag-k > 0`. `response-only` drops the rationale, `rationale-think` wraps it in `<think>…</think>`, `rationale-plain` emits it as plain text before the response, and `template` emits a deterministic answer sentence without loading traces.
 - `--no-retrofill`: Render few-shot examples inline before the target example instead of as prior chat turns. Inline examples are separated with `-------` and are only supported for non-media context modes.
 

@@ -176,10 +176,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--rag-trace-path',
         type=Path,
-        default=Path(os.environ.get(
-            'PLURULE_RAG_TRACE_PATH',
-            '/home/exouser/discloze/data/traces/train/full.jsonl'
-        )),
+        default=config.RAG_TRACE_PATH,
         help='Discloze trace JSONL whose rationales should be used for retrieved few-shot examples'
     )
 

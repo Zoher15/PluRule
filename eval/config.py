@@ -17,6 +17,10 @@ from typing import Dict, Any, List
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 MEDIA_DIR = Path(os.environ.get("PLURULE_EVAL_MEDIA_DIR", DATA_DIR / "media")).expanduser()
+RAG_TRACE_PATH = Path(os.environ.get(
+    "PLURULE_RAG_TRACE_PATH",
+    PROJECT_ROOT.parent / "discloze" / "data" / "traces" / "train" / "full.jsonl"
+)).expanduser()
 OUTPUT_DIR = PROJECT_ROOT / "output" / "eval"
 LOGS_DIR = PROJECT_ROOT / "logs" / "eval"
 
